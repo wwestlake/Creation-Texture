@@ -1,0 +1,11 @@
+﻿build/
+out/
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+vcpkg_installed/
+
+# Ignore CMake build output
+build/

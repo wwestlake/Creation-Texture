@@ -1,0 +1,250 @@
+﻿#include "MainComponent.h"
+
+#include "Branding.h"
+#include "../Language/AppLanguagePolicy.h"
+#include <creation/ui/CreationSuiteLogos.h>
+
+namespace
+{
+void configureSummaryBox(juce::TextEditor& editor)
+{
+    editor.setMultiLine(true);
+    editor.setReadOnly(true);
+    editor.setScrollbarsShown(true);
+    editor.setCaretVisible(false);
+    editor.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff121a24));
+    editor.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff314155));
+    editor.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+}
+}
+
+MainComponent::MainComponent()
+{
+    configureHeader();
+    configurePanels();
+    loadSuiteState();
+    setSize(1380, 860);
+}
+MainComponent::~MainComponent() = default;
+
+void MainComponent::configureHeader()
+{
+    headerBar.setAppTitle("Creation Texture");
+    headerBar.setLogoImage(creation::ui::getSuiteLogoImage(creation::ui::SuiteLogoId::texture));
+    headerBar.setProjectLabel("Shell: Ready for domain implementation");
+    headerBar.setTransportControlsVisible(false);
+    headerBar.audioButton.setButtonText("Refresh");
+    headerBar.tourButton.setButtonText("EULA");
+    headerBar.setStatusText("Loading shared suite state...");
+    headerBar.onAudioRequested = [this]
+    {
+        loadSuiteState();
+    };
+    headerBar.onTourRequested = [this]
+    {
+        suiteShellController.showSuiteEula();
+    };
+    suiteShellController.attach(headerBar,
+                                {
+                                    "Creation Texture",
+                                    creation::assets::SuiteAppDomain::texture,
+                                    creation_texture::branding::backgroundColour()
+                                },
+                                [this](const juce::String& status)
+                                {
+                                    headerBar.setStatusText(status);
+                                    if (status.containsIgnoreCase("saved suite-wide"))
+                                        loadSuiteState();
+                                });
+
+    addAndMakeVisible(headerBar);
+}
+
+void MainComponent::configurePanels()
+{
+    titleLabel.setText("Creation Texture", juce::dontSendNotification);
+    titleLabel.setFont(juce::Font(31.0f, juce::Font::bold));
+    titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    addAndMakeVisible(titleLabel);
+
+    subtitleLabel.setText("Shared suite shell with AI, configuration, registry, and domain-entry wiring already in place.",
+                          juce::dontSendNotification);
+    subtitleLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc9d3e3));
+    addAndMakeVisible(subtitleLabel);
+
+    runtimeLabel.setText(juce::String(creation_texture::language::getLanguageRuntimeSummary()), juce::dontSendNotification);
+    runtimeLabel.setColour(juce::Label::textColourId, creation_texture::branding::accentColour());
+    addAndMakeVisible(runtimeLabel);
+
+    workbenchGroup.setText("Domain Workbench");
+    resourcesGroup.setText("Resources And Registry");
+    aiGroup.setText("AI Agent Shell");
+    configGroup.setText("Suite Configuration");
+
+    addAndMakeVisible(workbenchGroup);
+    addAndMakeVisible(resourcesGroup);
+    addAndMakeVisible(aiGroup);
+    addAndMakeVisible(configGroup);
+
+    configureSummaryBox(workbenchSummary);
+    configureSummaryBox(resourcesSummary);
+    configureSummaryBox(aiSummary);
+    configureSummaryBox(configSummary);
+
+    addAndMakeVisible(workbenchSummary);
+    addAndMakeVisible(resourcesSummary);
+    addAndMakeVisible(aiSummary);
+    addAndMakeVisible(configSummary);
+}
+
+void MainComponent::loadSuiteState()
+{
+    juce::String suiteError;
+    suiteSettings = suiteSettingsStore.load(suiteError);
+
+    juce::String aiError;
+    suiteAiSettings = suiteAiSettingsStore.load(aiError);
+
+    juce::String registryError;
+    const auto allProjects = creation::interop::ProjectRegistry::discoverProjects(suiteSettings, registryError);
+    totalProjectCount = allProjects.size();
+
+    creation::interop::ProjectQuery domainQuery;
+    domainQuery.appDomain = currentDomain();
+    const auto domainProjects = creation::interop::ProjectRegistry::queryProjects(suiteSettings, domainQuery, registryError);
+    domainProjectCount = domainProjects.size();
+    lastRegistryError = registryError;
+
+    if (suiteError.isNotEmpty())
+        headerBar.setStatusText("Suite settings: " + suiteError);
+    else if (aiError.isNotEmpty())
+        headerBar.setStatusText("AI settings: " + aiError);
+    else if (registryError.isNotEmpty())
+        headerBar.setStatusText("Project registry: " + registryError);
+    else
+        headerBar.setStatusText("Shared suite shell ready.");
+
+    refreshShellSummary();
+}
+
+void MainComponent::refreshShellSummary()
+{
+    workbenchSummary.setText(workbenchSummaryText(), juce::dontSendNotification);
+    resourcesSummary.setText(registrySummaryText(), juce::dontSendNotification);
+    aiSummary.setText(aiSummaryText(), juce::dontSendNotification);
+    configSummary.setText(configSummaryText(), juce::dontSendNotification);
+}
+
+creation::assets::SuiteAppDomain MainComponent::currentDomain() const noexcept
+{
+    return creation::assets::SuiteAppDomain::texture;
+}
+
+juce::String MainComponent::domainDisplayName() const
+{
+    return creation::assets::toDisplayName(currentDomain());
+}
+
+juce::String MainComponent::registrySummaryText() const
+{
+    juce::String text;
+    text << "App domain: " << domainDisplayName() << "\n";
+    text << "Projects in this domain: " << domainProjectCount << "\n";
+    text << "Projects across all known suite domains: " << totalProjectCount << "\n\n";
+    text << "This scaffold is already connected to the shared project registry layer.\n";
+    text << "Use this panel to confirm the app is seeing the same suite storage model as every other project.\n";
+
+    if (lastRegistryError.isNotEmpty())
+        text << "\nRegistry message: " << lastRegistryError;
+
+    return text;
+}
+
+juce::String MainComponent::aiSummaryText() const
+{
+    const auto runtime = creation::services::SuiteAiSettingsResolver::resolveRuntimeSettingsForApp(suiteAiSettings,
+                                                                                                    currentDomain());
+
+    juce::String text;
+    text << "Shared AI account entries: " << suiteAiSettings.accounts.size() << "\n";
+    text << "Selected app domain token: " << juce::String(creation_texture::language::getAppDomainName()) << "\n";
+    text << "Resolved provider: " << runtime.providerDisplayName << "\n";
+    text << "Resolved model: " << runtime.modelName << "\n";
+    text << "Resolved base URL: " << runtime.baseUrl << "\n\n";
+    text << "This shell is where app-specific agents, prompts, and task orchestration should sit on top of suite-wide provider selection.";
+    return text;
+}
+
+juce::String MainComponent::configSummaryText() const
+{
+    const auto configDirectory = suiteSettingsStore.getSuiteConfigDirectory().getFullPathName();
+    const auto containersDirectory = creation::suite::getProjectContainerDirectory(suiteSettings).getFullPathName();
+
+    juce::String text;
+    text << "Suite config directory: " << configDirectory << "\n";
+    text << "Project container root: " << containersDirectory << "\n";
+    text << "Suite VFS root: " << suiteSettings.suiteVfsRoot << "\n";
+    text << "Shared resources root: " << suiteSettings.sharedResourcesRoot << "\n";
+    text << "Exports root: " << suiteSettings.exportsRoot << "\n\n";
+    text << "Use the suite gear button to manage shared settings without rebuilding this app-specific shell.";
+    return text;
+}
+
+juce::String MainComponent::workbenchSummaryText() const
+{
+    juce::String text;
+    text << "Project shell target: Creation Texture\n";
+    text << "Domain token: " << juce::String(creation_texture::language::getAppDomainName()) << "\n\n";
+    text << "Recommended next moves:\n";
+    text << "- define the app's core workflows in docs/CAPABILITIES.md\n";
+    text << "- replace this panel with the first real domain surface\n";
+    text << "- keep app-specific logic in Source/ and Language/\n";
+    text << "- consume shared suite libraries instead of copying infrastructure\n";
+    return text;
+}
+void MainComponent::paint(juce::Graphics& g)
+{
+    g.fillAll(creation_texture::branding::backgroundColour());
+
+    auto bounds = getLocalBounds().toFloat().reduced(18.0f);
+    g.setColour(creation_texture::branding::panelColour());
+    g.fillRoundedRectangle(bounds, 24.0f);
+
+    g.setColour(creation_texture::branding::accentColour().withAlpha(0.8f));
+    g.drawRoundedRectangle(bounds, 24.0f, 1.4f);
+}
+
+void MainComponent::resized()
+{
+    headerBar.setBounds(getLocalBounds().removeFromTop(96));
+
+    auto area = getLocalBounds().reduced(34, 28);
+    area.removeFromTop(88);
+
+    titleLabel.setBounds(area.removeFromTop(38));
+    subtitleLabel.setBounds(area.removeFromTop(26));
+    runtimeLabel.setBounds(area.removeFromTop(24));
+    area.removeFromTop(16);
+
+    auto topRow = area.removeFromTop(area.getHeight() / 2);
+    auto leftTop = topRow.removeFromLeft(topRow.getWidth() / 2);
+    leftTop.removeFromRight(8);
+    topRow.removeFromLeft(8);
+
+    workbenchGroup.setBounds(leftTop);
+    resourcesGroup.setBounds(topRow);
+
+    auto bottomRow = area;
+    auto leftBottom = bottomRow.removeFromLeft(bottomRow.getWidth() / 2);
+    leftBottom.removeFromRight(8);
+    bottomRow.removeFromLeft(8);
+
+    aiGroup.setBounds(leftBottom);
+    configGroup.setBounds(bottomRow);
+
+    workbenchSummary.setBounds(workbenchGroup.getBounds().reduced(14, 26));
+    resourcesSummary.setBounds(resourcesGroup.getBounds().reduced(14, 26));
+    aiSummary.setBounds(aiGroup.getBounds().reduced(14, 26));
+    configSummary.setBounds(configGroup.getBounds().reduced(14, 26));
+}
+

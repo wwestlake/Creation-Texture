@@ -1,0 +1,10 @@
+﻿if(DEFINED CREATION_SUITE_SHARED_DIR AND EXISTS "${CREATION_SUITE_SHARED_DIR}/CMake/CreationSharedLLVM.cmake")
+    include("${CREATION_SUITE_SHARED_DIR}/CMake/CreationSharedLLVM.cmake")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../shared/CMake/CreationSharedLLVM.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/../../shared/CMake/CreationSharedLLVM.cmake")
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../../shared/CMake/CreationSharedLLVM.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/../../../shared/CMake/CreationSharedLLVM.cmake")
+else()
+    message(FATAL_ERROR "CreationSharedLLVM.cmake not found under ${CREATION_SUITE_SHARED_DIR}/CMake or shared/CMake.")
+endif()
+

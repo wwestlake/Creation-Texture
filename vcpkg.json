@@ -1,0 +1,17 @@
+﻿{
+  "name": "creation_texture",
+  "version-string": "0.0.1",
+  "builtin-baseline": "2d7e4f3c6a7a0a5d1b0b2f0a5a6d3c8e7b1f2d4c",
+  "dependencies": [
+    {
+      "name": "llvm",
+      "default-features": false,
+      "features": [
+        "core",
+        "target-x86",
+        "tools"
+      ]
+    }
+  ]
+}
+
