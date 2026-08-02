@@ -1,5 +1,7 @@
 ﻿#include "MainComponent.h"
 
+#include <thread>
+
 #include "Branding.h"
 #include "../Language/AppLanguagePolicy.h"
 #include <creation/ui/CreationSuiteLogos.h>
@@ -22,7 +24,9 @@ MainComponent::MainComponent()
 {
     configureHeader();
     configurePanels();
+    configureAiPanel();
     loadSuiteState();
+    processRegistration.RegisterSelf("texture");
     setSize(1380, 860);
 }
 MainComponent::~MainComponent() = default;
@@ -78,23 +82,132 @@ void MainComponent::configurePanels()
 
     workbenchGroup.setText("Domain Workbench");
     resourcesGroup.setText("Resources And Registry");
-    aiGroup.setText("AI Agent Shell");
     configGroup.setText("Suite Configuration");
 
     addAndMakeVisible(workbenchGroup);
     addAndMakeVisible(resourcesGroup);
-    addAndMakeVisible(aiGroup);
     addAndMakeVisible(configGroup);
 
     configureSummaryBox(workbenchSummary);
     configureSummaryBox(resourcesSummary);
-    configureSummaryBox(aiSummary);
     configureSummaryBox(configSummary);
 
     addAndMakeVisible(workbenchSummary);
     addAndMakeVisible(resourcesSummary);
-    addAndMakeVisible(aiSummary);
     addAndMakeVisible(configSummary);
+}
+
+void MainComponent::configureAiPanel()
+{
+    addAndMakeVisible(aiPanel);
+
+    aiPanel.onAccountChanged = [this](const juce::String& accountId)
+    {
+        if (const auto* account = creation::services::SuiteAiSettingsResolver::findAccountById(suiteAiSettings, accountId))
+        {
+            resolvedAiSettings.accountId = account->accountId;
+            resolvedAiSettings.providerId = account->providerId;
+            resolvedAiSettings.baseUrl = account->baseUrl;
+            resolvedAiSettings.modelName = account->modelName;
+            resolvedAiSettings.apiKey = account->apiKey;
+            aiPanel.setSelectedModel(resolvedAiSettings.modelName);
+        }
+    };
+
+    aiPanel.onModelChanged = [this](const juce::String& modelName)
+    {
+        resolvedAiSettings.modelName = modelName.trim();
+    };
+
+    aiPanel.onPromptSubmitted = [this](const juce::String& submittedPrompt)
+    {
+        pendingAiPrompt = submittedPrompt;
+
+        creation::services::SuiteContextRetrievalRequest request;
+        request.prompt = submittedPrompt;
+        request.appDomain = juce::String(creation_texture::language::getAppDomainName());
+        request.maxItems = 6;
+        request.processInstruction.steeringNote = aiPanel.getSteeringNote();
+
+        contextEngine.SubmitRequest(request);
+        headerBar.setStatusText("Building AI context packet...");
+    };
+
+    aiPanel.onCollapsedChanged = [this](bool)
+    {
+        resized();
+    };
+
+    contextEngine.onContextReady = [this](const creation::services::SuiteContextPacket& packet)
+    {
+        juce::MessageManager::callAsync([this, packet]
+        {
+            aiPanel.setContextPacket(packet);
+            if (pendingAiPrompt.isNotEmpty() && ! aiCompletionInFlight)
+                launchAiCompletion(packet);
+        });
+    };
+}
+
+void MainComponent::launchAiCompletion(const creation::services::SuiteContextPacket& packet)
+{
+    if (aiCompletionInFlight)
+        return;
+
+    if (! resolvedAiSettings.isValid() || resolvedAiSettings.apiKey.isEmpty())
+    {
+        aiPanel.setAssistantResponse("Configure an AI account in Suite Settings first.");
+        headerBar.setStatusText("No usable AI account configured.");
+        return;
+    }
+
+    if (pendingAiPrompt.trim().isEmpty())
+        return;
+
+    aiCompletionInFlight = true;
+    aiPanel.clearSteeringNote();
+
+    auto userPrompt = pendingAiPrompt;
+    juce::String contextBlock;
+    if (! packet.snippets.isEmpty())
+    {
+        contextBlock << "Project context (use only if directly relevant to the request below):\n";
+        for (const auto& snippet : packet.snippets)
+            contextBlock << "- " << snippet.title << " (" << snippet.category << "): " << snippet.excerpt << "\n";
+        contextBlock << "\n";
+    }
+    userPrompt = contextBlock + userPrompt;
+
+    std::thread([safeThis = juce::Component::SafePointer<MainComponent>(this),
+                 settings = resolvedAiSettings,
+                 userPrompt = std::move(userPrompt)]() mutable
+    {
+        if (safeThis == nullptr)
+            return;
+
+        creation::services::SuiteAiChatClient::ChatResult result;
+        auto ok = safeThis->aiChatClient.sendChatCompletion(settings, juce::String(), userPrompt, result);
+
+        juce::MessageManager::callAsync([safeThis, ok, result = std::move(result)]() mutable
+        {
+            if (safeThis == nullptr)
+                return;
+
+            safeThis->aiCompletionInFlight = false;
+            safeThis->pendingAiPrompt.clear();
+
+            if (ok)
+            {
+                safeThis->aiPanel.setAssistantResponse(result.text);
+                safeThis->headerBar.setStatusText("AI response received.");
+            }
+            else
+            {
+                safeThis->aiPanel.setAssistantResponse(result.errorMessage);
+                safeThis->headerBar.setStatusText("AI request failed: " + result.errorMessage);
+            }
+        });
+    }).detach();
 }
 
 void MainComponent::loadSuiteState()
@@ -104,6 +217,10 @@ void MainComponent::loadSuiteState()
 
     juce::String aiError;
     suiteAiSettings = suiteAiSettingsStore.load(aiError);
+    resolvedAiSettings = creation::services::SuiteAiSettingsResolver::resolveRuntimeSettingsForApp(suiteAiSettings, currentDomain());
+    aiPanel.RefreshConfiguredAccounts();
+    aiPanel.setSelectedAccountId(resolvedAiSettings.accountId);
+    aiPanel.setSelectedModel(resolvedAiSettings.modelName);
 
     juce::String registryError;
     const auto allProjects = creation::interop::ProjectRegistry::discoverProjects(suiteSettings, registryError);
@@ -131,7 +248,6 @@ void MainComponent::refreshShellSummary()
 {
     workbenchSummary.setText(workbenchSummaryText(), juce::dontSendNotification);
     resourcesSummary.setText(registrySummaryText(), juce::dontSendNotification);
-    aiSummary.setText(aiSummaryText(), juce::dontSendNotification);
     configSummary.setText(configSummaryText(), juce::dontSendNotification);
 }
 
@@ -157,21 +273,6 @@ juce::String MainComponent::registrySummaryText() const
     if (lastRegistryError.isNotEmpty())
         text << "\nRegistry message: " << lastRegistryError;
 
-    return text;
-}
-
-juce::String MainComponent::aiSummaryText() const
-{
-    const auto runtime = creation::services::SuiteAiSettingsResolver::resolveRuntimeSettingsForApp(suiteAiSettings,
-                                                                                                    currentDomain());
-
-    juce::String text;
-    text << "Shared AI account entries: " << suiteAiSettings.accounts.size() << "\n";
-    text << "Selected app domain token: " << juce::String(creation_texture::language::getAppDomainName()) << "\n";
-    text << "Resolved provider: " << runtime.providerDisplayName << "\n";
-    text << "Resolved model: " << runtime.modelName << "\n";
-    text << "Resolved base URL: " << runtime.baseUrl << "\n\n";
-    text << "This shell is where app-specific agents, prompts, and task orchestration should sit on top of suite-wide provider selection.";
     return text;
 }
 
@@ -239,12 +340,11 @@ void MainComponent::resized()
     leftBottom.removeFromRight(8);
     bottomRow.removeFromLeft(8);
 
-    aiGroup.setBounds(leftBottom);
+    aiPanel.setBounds(leftBottom);
     configGroup.setBounds(bottomRow);
 
     workbenchSummary.setBounds(workbenchGroup.getBounds().reduced(14, 26));
     resourcesSummary.setBounds(resourcesGroup.getBounds().reduced(14, 26));
-    aiSummary.setBounds(aiGroup.getBounds().reduced(14, 26));
     configSummary.setBounds(configGroup.getBounds().reduced(14, 26));
 }
 
