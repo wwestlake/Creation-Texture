@@ -112,3 +112,23 @@ target_link_libraries(CreationTextureApp PRIVATE
     juce::juce_recommended_warning_flags
 )
 
+install(TARGETS CreationTextureApp
+    RUNTIME DESTINATION .
+    RESOURCE DESTINATION .
+)
+install(FILES README.md LICENSE DESTINATION .)
+
+set(CPACK_PACKAGE_NAME "Creation Texture")
+set(CPACK_PACKAGE_VENDOR "LagDaemon Software")
+set(CPACK_PACKAGE_CONTACT "LagDaemon Software")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Creation Texture")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "creation-texture-${CPACK_PACKAGE_VERSION}-win64")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "Creation Texture")
+set(CPACK_GENERATOR "ZIP;WIX")
+set(CPACK_WIX_PROGRAM_MENU_FOLDER "Creation Texture")
+set(CPACK_PACKAGE_EXECUTABLES "Creation Texture" "Creation Texture")
+set(CPACK_CREATE_DESKTOP_LINKS "Creation Texture")
+
+include(CPack)
+
