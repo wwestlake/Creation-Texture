@@ -61,6 +61,16 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     set(CREATION_TEXTURE_INTEROP_TARGET creation_suite_interop)
 endif()
 
+# Texture's CEL surface -- suite-wide language, not a bespoke per-app one.
+# ce_lang_frontend/node_system build with no LLVM dependency; only the
+# JIT half of shared/CEL needs LLVM, and Texture doesn't link that (yet).
+if(NOT TARGET node_system)
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/NodeSystem" CreationSuiteSharedNodeSystem)
+endif()
+if(NOT TARGET ce_lang_frontend)
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/CEL" CreationSuiteSharedCel)
+endif()
+
 juce_add_gui_app(CreationTextureApp
     PRODUCT_NAME "Creation Texture"
     COMPANY_NAME "LagDaemon Software"
@@ -103,6 +113,8 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_UI_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
     creation_texture_language_host
+    ce_lang_frontend
+    node_system
     juce::juce_gui_extra
     juce::juce_audio_basics
     juce::juce_audio_devices
