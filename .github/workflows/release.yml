@@ -11,22 +11,32 @@ permissions:
 jobs:
   build-release:
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/CreationTexture
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Checkout shared Creation Suite code
-        # Texture's CMakeLists.txt resolves CREATION_SUITE_SHARED_DIR as
-        # ../../shared relative to itself, matching its layout as an
-        # apps/CreationTexture submodule inside the Creation-Suite umbrella
-        # repo. A standalone checkout of this repo alone has no such
-        # sibling, so shared/ is fetched separately here and pointed at
-        # explicitly below instead of relying on that relative-path default.
+      # Texture's own CMake (both the CreationSharedLLVM.cmake include and
+      # the CREATION_SUITE_SHARED_DIR default) resolves everything shared/
+      # as ../../shared relative to itself -- its real layout as an
+      # apps/CreationTexture submodule inside the Creation-Suite umbrella
+      # repo. Rather than overriding each of those relative paths
+      # individually (fragile -- a plain override missed the hardcoded
+      # ../../shared/CMake/CreationSharedLLVM.cmake include entirely), CI
+      # just reproduces the real nesting: check out the umbrella first for
+      # its shared/ tree, then check out this app's own tagged commit into
+      # apps/CreationTexture, overwriting the umbrella's empty submodule
+      # placeholder. Every relative path then resolves exactly as it does
+      # in a real Creation-Suite checkout.
+      - name: Checkout Creation Suite umbrella (for shared/)
         uses: actions/checkout@v4
         with:
           repository: wwestlake/Creation-Suite
-          path: creation-suite-shared
+
+      - name: Checkout this app at the release tag
+        uses: actions/checkout@v4
+        with:
+          path: apps/CreationTexture
 
       - name: Fetch JUCE
         shell: pwsh
@@ -81,7 +91,7 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DJUCE_DIR="$env:RUNNER_TEMP\JUCE" "-DCreationTexture_VERSION=${{ steps.classify.outputs.version }}" "-DCREATION_SUITE_SHARED_DIR=$env:GITHUB_WORKSPACE\creation-suite-shared\shared"
+          cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DJUCE_DIR="$env:RUNNER_TEMP\JUCE" "-DCreationTexture_VERSION=${{ steps.classify.outputs.version }}"
 
       - name: Build app
         shell: pwsh
@@ -114,11 +124,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-creation-texture
-          path: artifacts/*
+          path: apps/CreationTexture/artifacts/*
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: Creation Texture ${{ steps.classify.outputs.version }}${{ steps.classify.outputs.suffix }}
           prerelease: ${{ steps.classify.outputs.prerelease }}
-          files: artifacts/*
+          files: apps/CreationTexture/artifacts/*
