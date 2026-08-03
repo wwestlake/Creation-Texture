@@ -65,6 +65,8 @@ juce_add_gui_app(CreationTextureApp
     PRODUCT_NAME "Creation Texture"
     COMPANY_NAME "LagDaemon Software"
     BUNDLE_ID "com.lagdaemon.creationtexture"
+    ICON_BIG "${CREATION_SUITE_SHARED_DIR}/UI/assets/creation_texture.png"
+    ICON_SMALL "${CREATION_SUITE_SHARED_DIR}/UI/assets/creation_texture.png"
 )
 
 # Mirrors the built executable into the workspace-level shared bin
