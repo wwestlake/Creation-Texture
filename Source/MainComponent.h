@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 #include <creation/assets/ProjectManifest.h>
+#include <creation/assets/ProjectSession.h>
+#include <creation/assets/ProjectWorkspaceService.h>
 #include <creation/interop/ProjectRegistry.h>
 #include <creation/services/SuiteAiChatClient.h>
 #include <creation/services/SuiteAiSettings.h>
@@ -28,6 +30,7 @@ private:
     void configureAiPanel();
     void loadSuiteState();
     void refreshShellSummary();
+    void openProject(const juce::String& projectId);
     void launchAiCompletion(const creation::services::SuiteContextPacket& packet);
     creation::assets::SuiteAppDomain currentDomain() const noexcept;
     juce::String domainDisplayName() const;
@@ -58,6 +61,7 @@ private:
     creation::services::SuiteAiSettingsStore suiteAiSettingsStore;
     creation::suite::SuiteSettings suiteSettings;
     creation::services::SuiteAiSettings suiteAiSettings;
+    creation::assets::ProjectSession projectSession;
     creation::services::SuiteAiResolvedRuntimeSettings resolvedAiSettings;
 
     juce::String lastRegistryError;
