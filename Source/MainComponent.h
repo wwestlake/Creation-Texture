@@ -14,8 +14,10 @@
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/ui/SuiteAiChatPanel.h>
 #include <creation/ui/SuiteShellController.h>
+#include <CreationDock/DockManager.h>
 
-class MainComponent final : public juce::Component
+class MainComponent final : public juce::Component,
+                             private juce::MenuBarModel
 {
 public:
     MainComponent();
@@ -37,6 +39,15 @@ private:
     juce::String registrySummaryText() const;
     juce::String configSummaryText() const;
     juce::String workbenchSummaryText() const;
+
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String&) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
+    void initialiseDockingWorkspace();
+    void toggleDockPanel(const juce::String& panelId, CreationDock::DockTargetZone fallbackZone);
+
+    std::unique_ptr<juce::MenuBarComponent> menuBar;
+    std::unique_ptr<CreationDock::DockManager> dockManager;
 
     CreationSuiteHeaderBar headerBar;
     creation::ui::SuiteShellController suiteShellController;

@@ -61,6 +61,11 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     set(CREATION_TEXTURE_INTEROP_TARGET creation_suite_interop)
 endif()
 
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/JuceDocking/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/JuceDocking"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedDocking")
+endif()
+
 # Texture's CEL surface -- suite-wide language, not a bespoke per-app one.
 # ce_lang_frontend/node_system build with no LLVM dependency; only the
 # JIT half of shared/CEL needs LLVM, and Texture doesn't link that (yet).
@@ -91,6 +96,10 @@ add_custom_command(TARGET CreationTextureApp POST_BUILD
 
 juce_generate_juce_header(CreationTextureApp)
 
+target_include_directories(CreationTextureApp PRIVATE
+    "${CREATION_SUITE_SHARED_DIR}/JuceDocking/include"
+)
+
 target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
@@ -115,6 +124,7 @@ target_link_libraries(CreationTextureApp PRIVATE
     creation_texture_language_host
     ce_lang_frontend
     node_system
+    CreationDock
     juce::juce_gui_extra
     juce::juce_audio_basics
     juce::juce_audio_devices
