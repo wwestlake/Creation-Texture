@@ -1,27 +1,26 @@
-﻿#include <JuceHeader.h>
+#include <JuceHeader.h>
 #include "MainComponent.h"
 #include <creation/ui/CreationSuiteLogos.h>
+#include <creation/ui/SuiteJUCEApplication.h>
 
-class CreationTextureApplication final : public juce::JUCEApplication
+class CreationTextureApplication final : public creation::ui::SuiteJUCEApplication
 {
 public:
+    CreationTextureApplication() : SuiteJUCEApplication(creation::ui::SuiteLogoId::texture) {}
+
     const juce::String getApplicationName() override { return "Creation Texture"; }
     const juce::String getApplicationVersion() override { return "0.0.1"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise(const juce::String&) override
-    {
-        mainWindow.reset(new MainWindow(getApplicationName()));
-    }
-
-    void shutdown() override
-    {
-        mainWindow = nullptr;
-    }
-
     void systemRequestedQuit() override
     {
         quit();
+    }
+
+protected:
+    std::unique_ptr<juce::DocumentWindow> createMainWindow() override
+    {
+        return std::make_unique<MainWindow>(getApplicationName());
     }
 
 private:
@@ -47,9 +46,6 @@ private:
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
     };
-
-    std::unique_ptr<MainWindow> mainWindow;
 };
 
 START_JUCE_APPLICATION(CreationTextureApplication)
-
