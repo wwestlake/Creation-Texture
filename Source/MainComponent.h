@@ -11,6 +11,7 @@
 #include <creation/suite/SuiteStoragePaths.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/ui/SuiteShellController.h>
+#include <TexturePluginHost.h>
 
 class MainComponent final : public juce::Component
 {
@@ -104,7 +105,7 @@ private:
         void setTextureInfo(const juce::String& text);
         void addWorkingTexture(const juce::Image& image, const juce::String& sourceLabel, const juce::String& projectEntry);
         void clearWorkingTextures();
-        void reloadPreview();
+        void reloadPreview(bool persistDerivedResult = false);
         bool hasTexture() const noexcept;
         juce::String getTextureSourceLabel() const;
         int getWorkingTextureCount() const noexcept;
@@ -118,6 +119,7 @@ private:
         void resized() override;
 
         std::function<void()> onImportTextureRequested;
+        std::function<void(const juce::Image&, const juce::String&)> onProcessedTextureReady;
 
     private:
         class Viewport;
@@ -147,7 +149,8 @@ private:
 
         void refreshWorkingTextureControls();
         static juce::String roleDisplayName(TextureRole role);
-        static juce::Image applyAdjustments(const WorkingTextureItem& item);
+        juce::Image applyAdjustments(const WorkingTextureItem& item);
+        creation_texture::language::TexturePluginHost texturePluginHost;
         bool previewDirty = false;
     };
 
@@ -170,6 +173,7 @@ private:
     void importPreviewTexture();
     bool importPreviewTextureFromFile(const juce::File& file, bool persistIntoProject);
     bool loadPreviewTextureFromProjectEntry(const juce::String& entryPath);
+    void persistProcessedTexture(const juce::Image& image, const juce::String& sourceLabel);
     juce::Image loadTextureImageFromFile(const juce::File& file, juce::String& errorMessage) const;
     juce::Image loadTextureImageFromMemory(const void* data, size_t size, const juce::String& filenameHint, juce::String& errorMessage) const;
     void createNewProject();

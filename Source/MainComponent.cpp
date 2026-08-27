@@ -3,7 +3,6 @@
 #include "Branding.h"
 #include "../Language/AppLanguagePolicy.h"
 #include <creation/ui/CreationSuiteLogos.h>
-#include <cmath>
 #include <gl/GL.h>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -16,6 +15,7 @@ namespace
 constexpr auto textureProjectRoot = "texture/";
 constexpr auto textureSessionEntry = "texture/session/texture-session.xml";
 constexpr auto texturePreviewImportRoot = "texture/preview/imported-textures/";
+constexpr auto texturePreviewDerivedRoot = "texture/preview/derived/";
 constexpr auto legacyTextureSessionEntry = "texture-session.xml";
 constexpr auto legacyTexturePreviewImportRoot = "preview/imported-textures/";
 
@@ -44,11 +44,6 @@ void configureAdjustmentSlider(juce::Slider& slider, double min, double max, dou
     slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 20);
     slider.setRange(min, max, 0.01);
     slider.setValue(value, juce::dontSendNotification);
-}
-
-float clamp01(float value)
-{
-    return juce::jlimit(0.0f, 1.0f, value);
 }
 
 int workspaceModeIndex(MainComponent::WorkspaceMode mode)
@@ -615,7 +610,7 @@ MainComponent::PreviewWorkspacePanel::PreviewWorkspacePanel()
     configureModeButton(reloadPreviewButton);
     reloadPreviewButton.onClick = [this]
     {
-        reloadPreview();
+        reloadPreview(true);
     };
     addAndMakeVisible(reloadPreviewButton);
 
@@ -763,45 +758,14 @@ juce::Image MainComponent::PreviewWorkspacePanel::applyAdjustments(const Working
     if (item.image.isNull())
         return {};
 
-    auto source = item.image.convertedToFormat(juce::Image::ARGB);
-    juce::Image adjusted(juce::Image::ARGB, source.getWidth(), source.getHeight(), true);
+    juce::String error;
+    const auto adjusted = texturePluginHost.applyAdjustments(item.image, item.brightness, item.contrast,
+                                                              item.saturation, item.gamma, error);
+    if (! adjusted.isNull())
+        return adjusted;
 
-    const auto brightness = item.brightness;
-    const auto contrast = item.contrast;
-    const auto saturation = item.saturation;
-    const auto gamma = juce::jmax(0.01f, item.gamma);
-    const auto inverseGamma = 1.0f / gamma;
-
-    for (int y = 0; y < source.getHeight(); ++y)
-    {
-        for (int x = 0; x < source.getWidth(); ++x)
-        {
-            auto colour = source.getPixelAt(x, y);
-            float r = colour.getFloatRed();
-            float g = colour.getFloatGreen();
-            float b = colour.getFloatBlue();
-
-            r = ((r - 0.5f) * contrast) + 0.5f + brightness;
-            g = ((g - 0.5f) * contrast) + 0.5f + brightness;
-            b = ((b - 0.5f) * contrast) + 0.5f + brightness;
-
-            const float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            r = luminance + (r - luminance) * saturation;
-            g = luminance + (g - luminance) * saturation;
-            b = luminance + (b - luminance) * saturation;
-
-            r = std::pow(clamp01(r), inverseGamma);
-            g = std::pow(clamp01(g), inverseGamma);
-            b = std::pow(clamp01(b), inverseGamma);
-
-            adjusted.setPixelAt(x, y, juce::Colour::fromFloatRGBA(clamp01(r),
-                                                                  clamp01(g),
-                                                                  clamp01(b),
-                                                                  colour.getFloatAlpha()));
-        }
-    }
-
-    return adjusted;
+    statusLabel.setText("FRust texture plugin: " + error, juce::dontSendNotification);
+    return item.image;
 }
 
 void MainComponent::PreviewWorkspacePanel::refreshWorkingTextureControls()
@@ -922,9 +886,10 @@ int MainComponent::PreviewWorkspacePanel::getSelectedPrimitiveIndex() const noex
     return primitiveSelector.getSelectedItemIndex();
 }
 
-void MainComponent::PreviewWorkspacePanel::reloadPreview()
+void MainComponent::PreviewWorkspacePanel::reloadPreview(bool persistDerivedResult)
 {
     juce::Image previewImage;
+    juce::String processedSourceLabel;
     activePreviewSourceLabel.clear();
 
     for (const auto& item : workingTextures)
@@ -933,6 +898,7 @@ void MainComponent::PreviewWorkspacePanel::reloadPreview()
         {
             previewImage = applyAdjustments(item);
             activePreviewSourceLabel = item.sourceLabel;
+            processedSourceLabel = item.sourceLabel;
             break;
         }
     }
@@ -942,12 +908,16 @@ void MainComponent::PreviewWorkspacePanel::reloadPreview()
         const auto& selectedItem = workingTextures[(size_t) selectedTextureIndex];
         previewImage = applyAdjustments(selectedItem);
         activePreviewSourceLabel = selectedItem.sourceLabel;
+        processedSourceLabel = selectedItem.sourceLabel;
     }
 
     viewport->setTextureImage(previewImage);
     viewport->refreshNow();
     previewDirty = false;
     refreshWorkingTextureControls();
+
+    if (persistDerivedResult && ! previewImage.isNull() && texturePluginHost.isReady() && onProcessedTextureReady)
+        onProcessedTextureReady(previewImage, processedSourceLabel);
 }
 
 bool MainComponent::PreviewWorkspacePanel::isPreviewDirty() const noexcept
@@ -1144,6 +1114,10 @@ void MainComponent::configurePanels()
     previewWorkspace.onImportTextureRequested = [this]
     {
         importPreviewTexture();
+    };
+    previewWorkspace.onProcessedTextureReady = [this](const juce::Image& image, const juce::String& sourceLabel)
+    {
+        persistProcessedTexture(image, sourceLabel);
     };
     addAndMakeVisible(proceduralWorkspace);
     addAndMakeVisible(mapsWorkspace);
@@ -1705,6 +1679,29 @@ bool MainComponent::importPreviewTextureFromFile(const juce::File& file, bool pe
     refreshShellSummary();
     headerBar.setStatusText("Imported texture into working set: " + file.getFileName());
     return true;
+}
+
+void MainComponent::persistProcessedTexture(const juce::Image& image, const juce::String& sourceLabel)
+{
+    if (! projectSession.isValid() || image.isNull())
+        return;
+
+    juce::MemoryOutputStream encodedPng;
+    juce::PNGImageFormat pngFormat;
+    if (! pngFormat.writeImageToStream(image, encodedPng))
+    {
+        headerBar.setStatusText("Could not encode the FRust-processed texture as PNG.");
+        return;
+    }
+
+    auto stem = juce::File::createLegalFileName(juce::File(sourceLabel).getFileNameWithoutExtension());
+    if (stem.isEmpty())
+        stem = "texture";
+
+    const auto entry = juce::String(texturePreviewDerivedRoot) + stem + "-adjusted.png";
+    projectSession.writeEntry(entry, encodedPng.getMemoryBlock());
+    saveProjectState(false);
+    headerBar.setStatusText("FRust texture plugin saved derived asset: " + entry);
 }
 
 bool MainComponent::loadPreviewTextureFromProjectEntry(const juce::String& entryPath)
