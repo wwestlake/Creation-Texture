@@ -7,15 +7,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/CMake/CreationSuiteBuildSettings.cmake")
+creation_suite_require_juce()
+
 if(MSVC)
     string(APPEND CMAKE_CXX_FLAGS_RELEASE " /Zi")
     string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE " /DEBUG /OPT:REF /OPT:ICF")
     string(APPEND CMAKE_SHARED_LINKER_FLAGS_RELEASE " /DEBUG /OPT:REF /OPT:ICF")
     string(APPEND CMAKE_MODULE_LINKER_FLAGS_RELEASE " /DEBUG /OPT:REF /OPT:ICF")
-endif()
-
-if(NOT DEFINED JUCE_DIR)
-    message(FATAL_ERROR "Set JUCE_DIR to your JUCE root directory before configuring.")
 endif()
 
 set(CREATION_SUITE_SHARED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../shared" CACHE PATH "Path to the Creation Suite shared code root")
@@ -24,13 +23,19 @@ include(cmake/CreationSharedLLVM.cmake)
 configure_creation_shared_llvm(CREATION_TEXTURE "Creation Texture")
 
 add_subdirectory("${JUCE_DIR}" juce)
-add_subdirectory(Language)
 
 set(CREATION_TEXTURE_ASSET_SYSTEM_TARGET "")
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/AssetSystem/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/AssetSystem"
                      "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedAssetSystem")
     set(CREATION_TEXTURE_ASSET_SYSTEM_TARGET creation_suite_asset_system)
+endif()
+
+set(CREATION_TEXTURE_VFS_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/VFS/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/VFS"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedVFS")
+    set(CREATION_TEXTURE_VFS_TARGET creation_suite_vfs)
 endif()
 
 set(CREATION_TEXTURE_SERVICES_TARGET "")
@@ -54,10 +59,30 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     set(CREATION_TEXTURE_INTEROP_TARGET creation_suite_interop)
 endif()
 
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedFrustPluginRuntime")
+endif()
+
+add_subdirectory(Language)
+
 juce_add_gui_app(CreationTextureApp
     PRODUCT_NAME "Creation Texture"
     COMPANY_NAME "LagDaemon Software"
     BUNDLE_ID "com.lagdaemon.creationtexture"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/UI/assets/creation_texture.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/UI/assets/creation_texture.png"
+)
+
+creation_suite_add_shared_bin_copy(CreationTextureApp)
+creation_suite_get_shared_bin_dir(CREATION_TEXTURE_SHARED_BIN_DIR)
+
+add_custom_command(TARGET CreationTextureApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CreationTextureApp>/plugins"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/BuiltInPlugins/TextureAdjustments.frust" "$<TARGET_FILE_DIR:CreationTextureApp>/plugins/"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CREATION_TEXTURE_SHARED_BIN_DIR}/plugins"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/BuiltInPlugins/TextureAdjustments.frust" "${CREATION_TEXTURE_SHARED_BIN_DIR}/plugins/"
+    COMMENT "Copying built-in FRust texture plugins"
 )
 
 juce_generate_juce_header(CreationTextureApp)
@@ -80,16 +105,31 @@ target_compile_definitions(CreationTextureApp PRIVATE
 
 target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_ASSET_SYSTEM_TARGET}
+    ${CREATION_TEXTURE_VFS_TARGET}
     ${CREATION_TEXTURE_SERVICES_TARGET}
     ${CREATION_TEXTURE_UI_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
     creation_texture_language_host
     juce::juce_gui_extra
+    juce::juce_opengl
     juce::juce_audio_basics
     juce::juce_audio_devices
     juce::juce_audio_formats
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags
+)
+
+if(MSVC)
+    target_compile_options(CreationTextureApp PRIVATE /FS /MP1)
+endif()
+
+install(TARGETS CreationTextureApp RUNTIME DESTINATION . COMPONENT CreationTexture)
+install(FILES BuiltInPlugins/TextureAdjustments.frust DESTINATION plugins COMPONENT CreationTexture)
+
+add_executable(CreationTexturePluginSmoke tests/TexturePluginSmoke.cpp)
+target_link_libraries(CreationTexturePluginSmoke PRIVATE creation_suite_frust_plugin_runtime)
+target_compile_definitions(CreationTexturePluginSmoke PRIVATE
+    CREATION_TEXTURE_ADJUSTMENTS_PLUGIN="${CMAKE_CURRENT_SOURCE_DIR}/BuiltInPlugins/TextureAdjustments.frust"
 )
 

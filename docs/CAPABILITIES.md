@@ -1,4 +1,4 @@
-﻿# Creation Texture Capabilities
+# Creation Texture Capabilities
 
 Start this document by describing:
 
@@ -15,4 +15,3 @@ Suggested first sections:
 4. AI/agent use cases
 5. Import/export boundaries
 6. Explicit non-goals
-
