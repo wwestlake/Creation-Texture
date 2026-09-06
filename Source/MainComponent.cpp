@@ -109,10 +109,13 @@ void MainComponent::loadSuiteState()
     const auto allProjects = creation::interop::ProjectRegistry::discoverProjects(suiteSettings, registryError);
     totalProjectCount = allProjects.size();
 
-    creation::interop::ProjectQuery domainQuery;
-    domainQuery.appDomain = currentDomain();
-    const auto domainProjects = creation::interop::ProjectRegistry::queryProjects(suiteSettings, domainQuery, registryError);
-    domainProjectCount = domainProjects.size();
+    // Informational only -- appDomain is never a query filter (there is no such thing as an
+    // app owning a project); this is a client-side tally over the already-unfiltered listing.
+    const auto myDomain = currentDomain();
+    domainProjectCount = 0;
+    for (const auto& project : allProjects)
+        if (project.manifest.appDomain == myDomain)
+            ++domainProjectCount;
     lastRegistryError = registryError;
 
     if (suiteError.isNotEmpty())
@@ -184,8 +187,7 @@ juce::String MainComponent::configSummaryText() const
     text << "Suite config directory: " << configDirectory << "\n";
     text << "Project container root: " << containersDirectory << "\n";
     text << "Suite VFS root: " << suiteSettings.suiteVfsRoot << "\n";
-    text << "Shared resources root: " << suiteSettings.sharedResourcesRoot << "\n";
-    text << "Exports root: " << suiteSettings.exportsRoot << "\n\n";
+    text << "Shared resources root: " << creation::suite::getSharedResourcesDirectory(suiteSettings).getFullPathName() << "\n\n";
     text << "Use the suite gear button to manage shared settings without rebuilding this app-specific shell.";
     return text;
 }
