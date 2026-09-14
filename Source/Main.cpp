@@ -5,7 +5,7 @@
 class CreationTextureApplication final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "Creation Texture"; }
+    const juce::String getApplicationName() override { return "Djehuti Texture"; }
     const juce::String getApplicationVersion() override { return "0.0.1"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 

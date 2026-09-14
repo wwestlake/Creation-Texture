@@ -1038,7 +1038,7 @@ MainComponent::~MainComponent() = default;
 
 void MainComponent::configureHeader()
 {
-    headerBar.setAppTitle("Creation Texture");
+    headerBar.setAppTitle("Djehuti Texture");
     headerBar.setLogoImage(creation::ui::getSuiteLogoImage(creation::ui::SuiteLogoId::texture));
     headerBar.setProjectLabel("Project: No active texture project");
     headerBar.setTransportControlsVisible(false);
@@ -1056,7 +1056,7 @@ void MainComponent::configureHeader()
 
     suiteShellController.attach(headerBar,
                                 {
-                                    "Creation Texture",
+                                    "Djehuti Texture",
                                     creation::assets::SuiteAppDomain::texture,
                                     creation_texture::branding::backgroundColour()
                                 },
@@ -1078,7 +1078,7 @@ void MainComponent::configureHeader()
 
 void MainComponent::configurePanels()
 {
-    titleLabel.setText("Creation Texture", juce::dontSendNotification);
+    titleLabel.setText("Djehuti Texture", juce::dontSendNotification);
     titleLabel.setFont(juce::Font(juce::FontOptions(31.0f)).boldened());
     titleLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     addAndMakeVisible(titleLabel);
@@ -1161,7 +1161,7 @@ void MainComponent::loadSuiteState()
     else if (projectError.isNotEmpty())
         headerBar.setStatusText(projectError);
     else
-        headerBar.setStatusText("Creation Texture is ready in the current project context.");
+        headerBar.setStatusText("Djehuti Texture is ready in the current project context.");
 
     refreshShellSummary();
     loadLayoutState();
@@ -1257,7 +1257,7 @@ void MainComponent::popOutWorkspace(WorkspaceMode mode, const juce::Rectangle<in
     poppedWorkspacePlaceholder.setText(workspaceModeName(mode) + " is open in its own window.\nClose that window to dock it back here.",
                                        juce::dontSendNotification);
 
-    auto window = std::make_unique<ManagedDocumentWindow>("Creation Texture - " + workspaceModeName(mode),
+    auto window = std::make_unique<ManagedDocumentWindow>("Djehuti Texture - " + workspaceModeName(mode),
                                                           juce::Colour(0xff10141a),
                                                           juce::DocumentWindow::closeButton
                                                               | juce::DocumentWindow::minimiseButton
@@ -1809,7 +1809,7 @@ juce::String MainComponent::registrySummaryText() const
     text << "App domain: " << domainDisplayName() << "\n";
     text << "Projects in this domain: " << domainProjectCount << "\n";
     text << "Projects across all known suite domains: " << totalProjectCount << "\n\n";
-    text << "Creation Texture uses the shared suite project registry and VFS-backed project model.\n";
+    text << "Djehuti Texture uses the shared suite project registry and VFS-backed project model.\n";
     text << "The project is the shared storage context; this tool saves its own session/assets into that project.\n";
 
     if (lastRegistryError.isNotEmpty())

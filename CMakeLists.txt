@@ -1,6 +1,6 @@
 ﻿cmake_minimum_required(VERSION 3.22)
 
-set(CreationTexture_VERSION "0.0.1" CACHE STRING "Creation Texture product version")
+set(CreationTexture_VERSION "0.0.1" CACHE STRING "Djehuti Texture product version")
 project(CreationTexture VERSION ${CreationTexture_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -17,10 +17,10 @@ if(MSVC)
     string(APPEND CMAKE_MODULE_LINKER_FLAGS_RELEASE " /DEBUG /OPT:REF /OPT:ICF")
 endif()
 
-set(CREATION_SUITE_SHARED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../shared" CACHE PATH "Path to the Creation Suite shared code root")
+set(CREATION_SUITE_SHARED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../shared" CACHE PATH "Path to the Djehuti Suite shared code root")
 
 include(cmake/CreationSharedLLVM.cmake)
-configure_creation_shared_llvm(CREATION_TEXTURE "Creation Texture")
+configure_creation_shared_llvm(CREATION_TEXTURE "Djehuti Texture")
 
 add_subdirectory("${JUCE_DIR}" juce)
 
@@ -67,7 +67,7 @@ endif()
 add_subdirectory(Language)
 
 juce_add_gui_app(CreationTextureApp
-    PRODUCT_NAME "Creation Texture"
+    PRODUCT_NAME "Djehuti Texture"
     COMPANY_NAME "LagDaemon Software"
     BUNDLE_ID "com.lagdaemon.creationtexture"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/UI/assets/creation_texture.png"
