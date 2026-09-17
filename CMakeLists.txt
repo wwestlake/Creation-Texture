@@ -64,6 +64,22 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime/CMakeLists.txt")
                      "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedFrustPluginRuntime")
 endif()
 
+# The node-graph substrate is suite-owned (docs/SHARED_EXTRACTION_PLAN.md),
+# shared with Engine and Station rather than forked per-app -- see
+# CreationEngine/CMakeLists.txt's identical comment. node_system carries the
+# graph model, pin/type registry, and graph->FRust codegen; NodeEditorUI is
+# just the canvas widget on top of it. Both already existed for other apps;
+# Texture simply never linked them.
+set(CREATION_TEXTURE_NODE_EDITOR_UI_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/NodeEditorUI/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/NodeEditorUI"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedNodeEditorUI")
+    set(CREATION_TEXTURE_NODE_EDITOR_UI_TARGET creation_suite_node_editor_ui)
+endif()
+if(NOT TARGET node_system)
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/NodeSystem" CreationSuiteSharedNodeSystem)
+endif()
+
 add_subdirectory(Language)
 
 juce_add_gui_app(CreationTextureApp
@@ -109,6 +125,8 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_SERVICES_TARGET}
     ${CREATION_TEXTURE_UI_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
+    ${CREATION_TEXTURE_NODE_EDITOR_UI_TARGET}
+    creation_suite_node_system
     creation_texture_language_host
     juce::juce_gui_extra
     juce::juce_opengl
