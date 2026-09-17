@@ -1142,11 +1142,6 @@ void MainComponent::loadSuiteState()
     juce::String registryError;
     const auto allProjects = creation::interop::ProjectRegistry::discoverProjects(suiteSettings, registryError);
     totalProjectCount = allProjects.size();
-
-    creation::interop::ProjectQuery domainQuery;
-    domainQuery.appDomain = currentDomain();
-    const auto domainProjects = creation::interop::ProjectRegistry::queryProjects(suiteSettings, domainQuery, registryError);
-    domainProjectCount = domainProjects.size();
     lastRegistryError = registryError;
 
     juce::String projectError;
@@ -1591,9 +1586,8 @@ bool MainComponent::ensureProjectSessionActive(juce::String& errorMessage)
         }
     }
 
-    auto availableProjects = creation::assets::ProjectContainerService::listProjects(suiteSettings,
-                                                                                     creation::assets::SuiteAppDomain::texture,
-                                                                                     errorMessage);
+    // Unfiltered by design -- projects are not owned by any app domain.
+    auto availableProjects = creation::assets::ProjectContainerService::listProjects(suiteSettings, errorMessage);
     if (! availableProjects.isEmpty())
     {
         if (creation::assets::ProjectWorkspaceService::openProject(suiteSettings,
@@ -1807,8 +1801,9 @@ juce::String MainComponent::registrySummaryText() const
 {
     juce::String text;
     text << "App domain: " << domainDisplayName() << "\n";
-    text << "Projects in this domain: " << domainProjectCount << "\n";
-    text << "Projects across all known suite domains: " << totalProjectCount << "\n\n";
+    // Deliberately unfiltered -- projects are not owned by any app domain,
+    // see creation::interop::ProjectQuery's own comment.
+    text << "Projects in the shared suite registry: " << totalProjectCount << "\n\n";
     text << "Djehuti Texture uses the shared suite project registry and VFS-backed project model.\n";
     text << "The project is the shared storage context; this tool saves its own session/assets into that project.\n";
 

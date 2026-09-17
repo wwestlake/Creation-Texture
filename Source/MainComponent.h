@@ -226,7 +226,6 @@ private:
     std::unique_ptr<juce::FileChooser> previewTextureChooser;
 
     juce::String lastRegistryError;
-    int domainProjectCount = 0;
     int totalProjectCount = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
