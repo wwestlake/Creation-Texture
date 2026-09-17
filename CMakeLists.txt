@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.22)
 
 set(CreationTexture_VERSION "0.0.1" CACHE STRING "Djehuti Texture product version")
 project(CreationTexture VERSION ${CreationTexture_VERSION} LANGUAGES CXX)
@@ -83,7 +83,7 @@ endif()
 add_subdirectory(Language)
 
 juce_add_gui_app(CreationTextureApp
-    PRODUCT_NAME "Djehuti Texture"
+    PRODUCT_NAME "DjehutiTexture"
     COMPANY_NAME "LagDaemon Software"
     BUNDLE_ID "com.lagdaemon.creationtexture"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/UI/assets/creation_texture.png"
@@ -157,3 +157,7 @@ add_custom_command(TARGET CreationTextureApp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CreationTextureApp>" "D:/CreationSuite-Workspaces/gemini-$<LOWER_CASE:$<CONFIG>>-bin/"
     COMMENT "Copying CreationTextureApp to the shared gemini bin directory"
 )
+
+# Auto-generated output name overrides
+set_target_properties(CreationTexturePluginSmoke PROPERTIES OUTPUT_NAME "DjehutiTexturePluginSmoke")
+set_target_properties(CreationTextureApp PROPERTIES OUTPUT_NAME "DjehutiTextureApp")
