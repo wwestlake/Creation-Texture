@@ -143,7 +143,7 @@ if(MSVC)
 endif()
 
 install(TARGETS CreationTextureApp RUNTIME DESTINATION . COMPONENT CreationTexture)
-install(FILES BuiltInPlugins/TextureAdjustments.frust DESTINATION plugins COMPONENT CreationTexture)
+install(FILES BuiltInPlugins/TextureAdjustments.frust BuiltInPlugins/TextureCompositor.frust DESTINATION plugins COMPONENT CreationTexture)
 
 add_executable(CreationTexturePluginSmoke tests/TexturePluginSmoke.cpp)
 target_link_libraries(CreationTexturePluginSmoke PRIVATE creation_suite_frust_plugin_runtime)
