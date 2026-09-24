@@ -34,12 +34,21 @@ namespace NodeType
 {
 inline constexpr const char* ImageInput = "texture.imageInput";
 inline constexpr const char* ImageOutput = "texture.imageOutput";
+inline constexpr const char* ContrastAdjustment = "texture.contrastAdjustment";
+inline constexpr const char* Viewer = "texture.viewer";
+
+inline constexpr const char* MakeTileable = "texture.makeTileable";
+inline constexpr const char* TileSampler = "texture.tileSampler";
+inline constexpr const char* DirectionalWarp = "texture.directionalWarp";
 } // namespace NodeType
 
 namespace PinName
 {
 inline constexpr const char* Image = "image";
 inline constexpr const char* AssetPath = "assetPath";
+inline constexpr const char* Width = "width";
+inline constexpr const char* Height = "height";
+inline constexpr const char* ViewerType = "viewerType";
 } // namespace PinName
 
 // Builds a fresh registry containing Texture's structural nodes. Returned by

@@ -21,6 +21,11 @@ PinTypeDesc TexturePin()
     return PinTypeDesc{ PinKind::Data, DataType::Texture };
 }
 
+PinTypeDesc FloatPin()
+{
+    return PinTypeDesc{ PinKind::Data, DataType::Float };
+}
+
 PinTypeDesc StringPin()
 {
     return PinTypeDesc{ PinKind::Data, DataType::String };
@@ -57,7 +62,11 @@ NodeLibraryRegistry BuildTextureNodeCatalog()
     imageInput.typeName = NodeType::ImageInput;
     imageInput.domain = Domain::Material;
     imageInput.inputs = { StringConfig(PinName::AssetPath) };
-    imageInput.outputs = { Image(PinName::Image) };
+    imageInput.outputs = { 
+        Image(PinName::Image),
+        PinSignature{ PinName::Width, FloatPin(), {} },
+        PinSignature{ PinName::Height, FloatPin(), {} }
+    };
     imageInput.displayName = "Image Input";
     imageInput.category = "Texture";
     library.nodeTypes.push_back(std::move(imageInput));
@@ -73,6 +82,50 @@ NodeLibraryRegistry BuildTextureNodeCatalog()
     imageOutput.displayName = "Image Output";
     imageOutput.category = "Texture";
     library.nodeTypes.push_back(std::move(imageOutput));
+
+    NodeTypeDescriptor contrast;
+    contrast.typeName = NodeType::ContrastAdjustment;
+    contrast.domain = Domain::Material;
+    contrast.inputs = { Image(PinName::Image) };
+    contrast.outputs = { Image(PinName::Image) };
+    contrast.displayName = "Contrast Adjustment";
+    contrast.category = "Color";
+    library.nodeTypes.push_back(std::move(contrast));
+
+    NodeTypeDescriptor viewer;
+    viewer.typeName = NodeType::Viewer;
+    viewer.domain = Domain::Material;
+    viewer.inputs = { Image(PinName::Image), StringConfig(PinName::ViewerType, "Preview") };
+    viewer.displayName = "Viewer";
+    viewer.category = "Output";
+    library.nodeTypes.push_back(std::move(viewer));
+
+    NodeTypeDescriptor makeTileable;
+    makeTileable.typeName = NodeType::MakeTileable;
+    makeTileable.domain = Domain::Material;
+    makeTileable.inputs = { Image(PinName::Image), { "Edge Blend", FloatPin(), "0.1" } };
+    makeTileable.outputs = { Image(PinName::Image) };
+    makeTileable.displayName = "Make Tileable";
+    makeTileable.category = "Modifiers";
+    library.nodeTypes.push_back(std::move(makeTileable));
+
+    NodeTypeDescriptor tileSampler;
+    tileSampler.typeName = NodeType::TileSampler;
+    tileSampler.domain = Domain::Material;
+    tileSampler.inputs = { Image("Pattern"), { "Tiles X", FloatPin(), "8.0" }, { "Tiles Y", FloatPin(), "8.0" }, { "Scale Rand", FloatPin(), "0.5" }, { "Rot Rand", FloatPin(), "1.0" }, { "Pos Rand", FloatPin(), "1.0" } };
+    tileSampler.outputs = { Image(PinName::Image) };
+    tileSampler.displayName = "Tile Sampler";
+    tileSampler.category = "Modifiers";
+    library.nodeTypes.push_back(std::move(tileSampler));
+
+    NodeTypeDescriptor dirWarp;
+    dirWarp.typeName = NodeType::DirectionalWarp;
+    dirWarp.domain = Domain::Material;
+    dirWarp.inputs = { Image(PinName::Image), Image("Intensity Map"), { "Angle", FloatPin(), "0.0" }, { "Intensity", FloatPin(), "10.0" } };
+    dirWarp.outputs = { Image(PinName::Image) };
+    dirWarp.displayName = "Directional Warp";
+    dirWarp.category = "Modifiers";
+    library.nodeTypes.push_back(std::move(dirWarp));
 
     libraries.Register(std::move(library));
     return libraries;

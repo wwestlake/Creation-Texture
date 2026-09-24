@@ -52,6 +52,13 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/UI/CMakeLists.txt")
     set(CREATION_TEXTURE_UI_TARGET creation_suite_ui)
 endif()
 
+set(CREATION_TEXTURE_RENDER_TARGET "")
+if(EXISTS "/Render/CMakeLists.txt")
+    add_subdirectory("/Render"
+                     "/CreationSuiteSharedRender")
+    set(CREATION_TEXTURE_RENDER_TARGET creation_suite_render)
+endif()
+
 set(CREATION_TEXTURE_INTEROP_TARGET "")
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/Interop"
@@ -107,6 +114,16 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
+    Source/ProceduralWorkspacePanel.cpp
+    Source/ProceduralWorkspacePanel.h
+    Source/TextureNodeCatalog.cpp
+    Source/TextureNodeCatalog.h
+    Source/TextureCompiler.cpp
+    Source/TextureCompiler.h
+    Source/ViewerNodeEditor.cpp
+    Source/ViewerNodeEditor.h
+    Source/ContrastAdjustmentEditor.cpp
+    Source/ContrastAdjustmentEditor.h
     Source/Branding.cpp
     Source/Branding.h
     Source/Shared/CreationSuiteHeaderBar.h
@@ -124,6 +141,7 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_VFS_TARGET}
     ${CREATION_TEXTURE_SERVICES_TARGET}
     ${CREATION_TEXTURE_UI_TARGET}
+    ${CREATION_TEXTURE_RENDER_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
     ${CREATION_TEXTURE_NODE_EDITOR_UI_TARGET}
     creation_suite_node_system

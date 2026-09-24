@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <JuceHeader.h>
 #include <creation/assets/ProjectSession.h>
@@ -12,6 +12,7 @@
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/ui/SuiteShellController.h>
 #include <TexturePluginHost.h>
+#include "ProceduralWorkspacePanel.h"
 
 class MainComponent final : public juce::Component
 {
@@ -207,7 +208,7 @@ private:
     juce::GroupComponent configGroup;
 
     PreviewWorkspacePanel previewWorkspace;
-    WorkspacePanel proceduralWorkspace { "Procedural Workspace" };
+    ProceduralWorkspacePanel proceduralWorkspace;
     WorkspacePanel mapsWorkspace { "Maps Workspace" };
     WorkspacePanel adjustmentsWorkspace { "Adjustments Workspace" };
     WorkspacePanel utilitiesWorkspace { "Utilities Workspace" };
