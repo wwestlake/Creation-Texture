@@ -132,10 +132,12 @@ void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
         if (file.endsWithIgnoreCase(".png") || file.endsWithIgnoreCase(".jpg") || file.endsWithIgnoreCase(".jpeg"))
         {
             juce::File sourceFile(file);
-            juce::String logicalPath = "assets/" + sourceFile.getFileName();
+            creation::assets::ProjectAssetService::ImportOptions options;
+            options.kind = creation::assets::AssetKind::binary;
+            creation::assets::AssetDescriptor descriptor;
             juce::String errorMessage;
             
-            if (projectSession->writeEntryFromFile(logicalPath, sourceFile, errorMessage))
+            if (creation::assets::ProjectAssetService::importFile(*projectSession, sourceFile, options, descriptor, errorMessage))
             {
                 std::string error;
                 auto* node = ce::node_system::AddRegisteredNode(graph, registry.TypeRegistry(), creation_texture::nodes::NodeType::ImageInput, &error);
@@ -148,7 +150,7 @@ void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
                         if (inputPin.name == creation_texture::nodes::PinName::AssetPath)
                         {
                             if (auto* mutablePin = node->FindPin(inputPin.id))
-                                mutablePin->defaultValue = logicalPath.toStdString();
+                                mutablePin->defaultValue = descriptor.logicalPath.toStdString();
                             break;
                         }
                     }
