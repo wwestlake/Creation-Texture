@@ -187,6 +187,18 @@ TextureCompileResult CompileTextureGraph(const ns::Graph& graph, const ns::NodeT
              << "}";
              
     result.source.evaluateFunction = function.str();
+    
+    std::string decls;
+    for (const auto& [path, uniformName] : textureSlots) {
+        creation_texture::TextureSlot slot;
+        slot.path = path;
+        slot.uniformName = uniformName;
+        result.source.textures.push_back(slot);
+        
+        decls += "uniform sampler2D " + uniformName + ";\n";
+    }
+    result.source.declarations = decls;
+    
     result.ok = true;
     return result;
 }

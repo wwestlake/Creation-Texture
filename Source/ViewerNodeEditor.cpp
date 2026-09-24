@@ -213,7 +213,7 @@ void ViewerNodeEditor::renderOpenGL()
     proj.mat[15] = 0.0f;
     
     juce::Matrix3D<float> view;
-    view.mat[14] = -2.5f; 
+    view.mat[14] = -cameraDistance; 
     
 
     juce::Matrix3D<float> model;
@@ -328,4 +328,11 @@ void ViewerNodeEditor::mouseDrag(const juce::MouseEvent& e)
 void ViewerNodeEditor::mouseUp(const juce::MouseEvent& e)
 {
     isRightMouseDragging = false;
+}
+
+void ViewerNodeEditor::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    cameraDistance -= wheel.deltaY * 5.0f;
+    if (cameraDistance < 0.5f) cameraDistance = 0.5f;
+    if (cameraDistance > 20.0f) cameraDistance = 20.0f;
 }

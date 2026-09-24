@@ -21,6 +21,7 @@ public:
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
+    void mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     struct Geometry {
         GLuint vbo = 0;
         GLuint ebo = 0;
@@ -56,6 +57,7 @@ private:
     float rotationX = 0.0f;
     float rotationY = 0.0f;
     juce::Point<float> lastMousePos;
+    float cameraDistance = 2.5f;
     bool isRightMouseDragging = false;
     std::unordered_map<std::string, std::unique_ptr<juce::OpenGLTexture>> loadedTextures;
 
