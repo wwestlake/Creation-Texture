@@ -103,7 +103,7 @@ private:
 
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
-        glTranslatef(0.0f, 0.0f, -3.25f);
+        glTranslatef(0.0f, 0.0f, -zoomDistance);
         glRotatef(elevationDegrees, 1.0f, 0.0f, 0.0f);
         glRotatef(rotationDegrees, 0.0f, 1.0f, 0.0f);
 
@@ -316,7 +316,7 @@ private:
             for (int slice = 0; slice <= slices; ++slice)
             {
                 const float u = (float) slice / (float) slices;
-                const float theta = u * juce::MathConstants<float>::twoPi;
+                const float theta = -u * juce::MathConstants<float>::twoPi;
 
                 const float x0 = std::cos(phi0) * std::cos(theta);
                 const float y0 = std::sin(phi0);
@@ -343,7 +343,7 @@ private:
         for (int i = 0; i <= slices; ++i)
         {
             const float u = (float) i / (float) slices;
-            const float theta = u * juce::MathConstants<float>::twoPi;
+            const float theta = -u * juce::MathConstants<float>::twoPi;
             const float x = std::cos(theta) * radius;
             const float z = std::sin(theta) * radius;
             glTexCoord2f(u, 0.0f); glVertex3f(x, -halfHeight, z);
@@ -356,7 +356,7 @@ private:
         for (int i = 0; i <= slices; ++i)
         {
             const float u = (float) i / (float) slices;
-            const float theta = u * juce::MathConstants<float>::twoPi;
+            const float theta = -u * juce::MathConstants<float>::twoPi;
             glTexCoord2f(0.5f + std::cos(theta) * 0.5f, 0.5f + std::sin(theta) * 0.5f);
             glVertex3f(std::cos(theta) * radius, halfHeight, std::sin(theta) * radius);
         }
@@ -367,7 +367,7 @@ private:
         for (int i = slices; i >= 0; --i)
         {
             const float u = (float) i / (float) slices;
-            const float theta = u * juce::MathConstants<float>::twoPi;
+            const float theta = -u * juce::MathConstants<float>::twoPi;
             glTexCoord2f(0.5f + std::cos(theta) * 0.5f, 0.5f + std::sin(theta) * 0.5f);
             glVertex3f(std::cos(theta) * radius, -halfHeight, std::sin(theta) * radius);
         }
@@ -398,6 +398,14 @@ private:
         rotationDegrees += delta.x * 0.5f;
         elevationDegrees = juce::jlimit(-90.0f, 90.0f, elevationDegrees + delta.y * 0.5f);
         
+        openGLContext.triggerRepaint();
+    }
+
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
+    {
+        const juce::ScopedLock lock(stateLock);
+        zoomDistance -= wheel.deltaY * 5.0f;
+        zoomDistance = juce::jlimit(1.0f, 20.0f, zoomDistance);
         openGLContext.triggerRepaint();
     }
 };
@@ -844,4 +852,7 @@ void ViewerPanel::restoreWorkingSetState(const juce::ValueTree& state,
     refreshWorkingTextureControls();
     reloadPreview();
 }
+
+
+
 

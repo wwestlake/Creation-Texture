@@ -81,8 +81,7 @@ void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
     {
         if (file.endsWithIgnoreCase(".png") || file.endsWithIgnoreCase(".jpg") || file.endsWithIgnoreCase(".jpeg"))
         {
-            auto& node = graph.AddNode(creation_texture::nodes::NodeType::ImageInput, ce::node_system::Domain::Material);
-            node.SetEditorPosition(0.0f, 0.0f);
+            std::string error; auto* node = ce::node_system::AddRegisteredNode(graph, registry.TypeRegistry(), creation_texture::nodes::NodeType::ImageInput, &error); if(node) node->SetEditorPosition(0.0f, 0.0f);
         }
     }
     graphComponent.repaint();
@@ -149,3 +148,4 @@ void NodeGraphPanel::loadGraph(const juce::File& file)
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load Error", "Failed to load graph:\n" + juce::String(errStr));
     }
 }
+
