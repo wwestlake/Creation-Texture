@@ -1,4 +1,5 @@
 #include "ViewerNodeEditor.h"
+#include "DjehutiHeadData.h"
 #include <cmath>
 #include <vector>
 
@@ -123,55 +124,7 @@ void ViewerNodeEditor::buildCone(int segments) {
 }
 
 void ViewerNodeEditor::buildDjehuti() {
-    std::vector<float> v; std::vector<unsigned int> i;
-    
-    int segments = 16;
-    for(int y=0; y<=segments; y++) {
-        for(int x=0; x<=segments; x++) {
-            float xSeg = (float)x/(float)segments, ySeg = (float)y/(float)segments;
-            float px = std::cos(xSeg * 6.283185f) * std::sin(ySeg * 3.14159f);
-            float py = std::cos(ySeg * 3.14159f);
-            float pz = std::sin(xSeg * 6.283185f) * std::sin(ySeg * 3.14159f);
-            v.push_back(px*0.5f); v.push_back(py*0.5f + 0.2f); v.push_back(pz*0.4f);
-            v.push_back(px); v.push_back(py); v.push_back(pz);
-            v.push_back(xSeg); v.push_back(ySeg);
-        }
-    }
-    int headBase = 0;
-    for(int y=0; y<segments; y++) {
-        for(int x=0; x<segments; x++) {
-            i.push_back(headBase + (y+1)*(segments+1) + x); i.push_back(headBase + y*(segments+1) + x); i.push_back(headBase + y*(segments+1) + x + 1);
-            i.push_back(headBase + (y+1)*(segments+1) + x); i.push_back(headBase + y*(segments+1) + x + 1); i.push_back(headBase + (y+1)*(segments+1) + x + 1);
-        }
-    }
-    
-    int beakStart = v.size()/8;
-    for(int p=0; p<=segments; p++) {
-        for(int ring=0; ring<10; ring++) {
-            float t = (float)ring/9.0f;
-            float radius = 0.15f * (1.0f - t);
-            float a = ((float)p/segments) * 6.283185f;
-            float px = std::cos(a)*radius, py = std::sin(a)*radius;
-            float z = 0.3f + t * 0.8f;
-            float y = 0.2f - t * 0.5f - (t*t)*0.3f; 
-            
-            float nx = std::cos(a), ny = std::sin(a), nz = 0.2f;
-            float l = std::sqrt(nx*nx+ny*ny+nz*nz);
-            v.push_back(px); v.push_back(py + y); v.push_back(z);
-            v.push_back(nx/l); v.push_back(ny/l); v.push_back(nz/l);
-            v.push_back((float)p/segments); v.push_back(t);
-        }
-    }
-    for(int p=0; p<segments; p++) {
-        for(int ring=0; ring<9; ring++) {
-            int b = beakStart + p*10 + ring;
-            int b2 = beakStart + ((p+1)%segments)*10 + ring;
-            i.push_back(b); i.push_back(b+1); i.push_back(b2);
-            i.push_back(b2); i.push_back(b+1); i.push_back(b2+1);
-        }
-    }
-
-    CreateBuffer(openGLContext, djehuti, v, i);
+    CreateBuffer(openGLContext, djehuti, creation_texture::djehutiVertices, creation_texture::djehutiIndices);
 }
 
 void ViewerNodeEditor::createGeometries() {
@@ -241,6 +194,7 @@ void ViewerNodeEditor::renderOpenGL()
 
     if (currentSnapshot->generatedGlsl != currentShaderCode && !currentSnapshot->generatedGlsl.empty()) {
         compileShaderProgram(currentSnapshot->generatedGlsl);
+        loadedTextures.clear();
     }
 
     juce::OpenGLHelpers::clear(currentSnapshot->debugColour);
@@ -290,6 +244,21 @@ void ViewerNodeEditor::renderOpenGL()
     openGLContext.extensions.glUniformMatrix4fv(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), "projection"), 1, juce::gl::GL_FALSE, proj.mat);
     openGLContext.extensions.glUniformMatrix4fv(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), "view"), 1, juce::gl::GL_FALSE, view.mat);
     openGLContext.extensions.glUniformMatrix4fv(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), "model"), 1, juce::gl::GL_FALSE, model.mat);
+
+    int unit = 0;
+    for (const auto& slot : currentSnapshot->imageSlots) {
+        if (loadedTextures.find(slot.uniformName) == loadedTextures.end()) {
+            auto glTex = std::make_unique<juce::OpenGLTexture>();
+            glTex->loadImage(slot.image);
+            loadedTextures[slot.uniformName] = std::move(glTex);
+        }
+        
+        auto& tex = loadedTextures[slot.uniformName];
+        openGLContext.extensions.glActiveTexture(juce::gl::GL_TEXTURE0 + unit);
+        tex->bind();
+        openGLContext.extensions.glUniform1i(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), slot.uniformName.c_str()), unit);
+        unit++;
+    }
 
     Geometry* g = &plane;
     if (mode == 2) g = &cube;
