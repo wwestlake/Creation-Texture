@@ -37,6 +37,8 @@ MainComponent::MainComponent()
     dockManager->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), CreationDock::DockTargetZone::Right);
 
     setSize(1600, 1000);
+
+    nodeGraphPanel.setProjectSession(&projectSession);
 }
 
 MainComponent::~MainComponent()
@@ -139,3 +141,4 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
         dockManager->activatePanel("Viewer");
     }
 }
+

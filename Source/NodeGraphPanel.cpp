@@ -32,6 +32,44 @@ NodeGraphPanel::NodeGraphPanel()
         }
     };
 
+    graphComponent.onGetNodeExtraHeight = [this](ce::node_system::NodeId id) {
+        if (auto* node = graph.FindNode(id)) {
+            if (node->TypeName() == creation_texture::nodes::NodeType::ImageInput)
+                return 120.0f;
+        }
+        return 0.0f;
+    };
+
+    graphComponent.onPaintNode = [this](juce::Graphics& g, ce::node_system::NodeId id, juce::Rectangle<float> bounds) {
+        if (auto* node = graph.FindNode(id)) {
+            if (node->TypeName() == creation_texture::nodes::NodeType::ImageInput) {
+                std::string assetPath;
+                for (const auto& pin : node->Inputs()) {
+                    if (pin.name == creation_texture::nodes::PinName::AssetPath) {
+                        if (std::holds_alternative<std::string>(pin.defaultValue))
+                            assetPath = std::get<std::string>(pin.defaultValue);
+                        break;
+                    }
+                }
+                if (!assetPath.empty() && projectSession && projectSession->isValid()) {
+                    if (imagePreviewCache.find(assetPath) == imagePreviewCache.end()) {
+                        juce::MemoryBlock block;
+                        if (projectSession->readEntry(assetPath, block)) {
+                            imagePreviewCache[assetPath] = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
+                        } else {
+                            imagePreviewCache[assetPath] = juce::Image();
+                        }
+                    }
+                    auto img = imagePreviewCache[assetPath];
+                    if (img.isValid()) {
+                        auto previewBounds = bounds.withTrimmedTop(bounds.getHeight() - 110.0f).withTrimmedBottom(10.0f).reduced(10.0f, 0.0f);
+                        g.drawImage(img, previewBounds, juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+                    }
+                }
+            }
+        }
+    };
+
     graphComponent.onNodeDoubleClicked = [this](ce::node_system::NodeId id, juce::Rectangle<float> bounds) {
         handleNodeDoubleClicked(id, bounds);
     };
@@ -77,11 +115,40 @@ void NodeGraphPanel::fileDragExit(const juce::StringArray& files) {}
 
 void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
 {
+    if (!projectSession || !projectSession->isValid())
+        return;
+
+    const auto world = graphComponent.ScreenToWorld(juce::Point<float>((float)x, (float)y));
+    float currentY = world.y;
+
     for (const auto& file : files)
     {
         if (file.endsWithIgnoreCase(".png") || file.endsWithIgnoreCase(".jpg") || file.endsWithIgnoreCase(".jpeg"))
         {
-            std::string error; auto* node = ce::node_system::AddRegisteredNode(graph, registry.TypeRegistry(), creation_texture::nodes::NodeType::ImageInput, &error); if(node) node->SetEditorPosition(0.0f, 0.0f);
+            juce::File sourceFile(file);
+            juce::String logicalPath = "assets/" + sourceFile.getFileName();
+            juce::String errorMessage;
+            
+            if (projectSession->writeEntryFromFile(logicalPath, sourceFile, errorMessage))
+            {
+                std::string error;
+                auto* node = ce::node_system::AddRegisteredNode(graph, registry.TypeRegistry(), creation_texture::nodes::NodeType::ImageInput, &error);
+                if (node)
+                {
+                    node->SetEditorPosition(world.x, currentY);
+                    
+                    for (const auto& inputPin : node->Inputs())
+                    {
+                        if (inputPin.name == creation_texture::nodes::PinName::AssetPath)
+                        {
+                            if (auto* mutablePin = node->FindPin(inputPin.id))
+                                mutablePin->defaultValue = logicalPath.toStdString();
+                            break;
+                        }
+                    }
+                    currentY += 100.0f;
+                }
+            }
         }
     }
     graphComponent.repaint();
@@ -148,4 +215,8 @@ void NodeGraphPanel::loadGraph(const juce::File& file)
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load Error", "Failed to load graph:\n" + juce::String(errStr));
     }
 }
+
+
+
+
 

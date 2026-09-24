@@ -6,6 +6,7 @@
 #include <creation/node_editor_ui/NodeGraphComponent.h>
 #include <creation/node_editor_ui/NodePalette.h>
 #include <creation/ui/FrustyComponent.h>
+#include <creation/assets/ProjectSession.h>
 #include "ViewerNodeEditor.h"
 
 class NodeGraphPanel : public juce::Component,
@@ -27,6 +28,7 @@ public:
 
     void saveGraph(const juce::File& file);
     void loadGraph(const juce::File& file);
+    void setProjectSession(creation::assets::ProjectSession* session) { projectSession = session; }
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
 
@@ -40,6 +42,10 @@ private:
     juce::TextButton compileButton{"Compile Graph"};
     std::shared_ptr<TextureFrameSnapshot> currentSnapshot;
     juce::Array<juce::Component::SafePointer<ViewerNodeEditor>> activeViewers;
+    creation::assets::ProjectSession* projectSession = nullptr;
+    std::map<std::string, juce::Image> imagePreviewCache;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NodeGraphPanel)
 };
+
+
