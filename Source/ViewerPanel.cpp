@@ -75,6 +75,9 @@ private:
     {
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LEQUAL);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
         glEnable(GL_TEXTURE_2D);
         glShadeModel(GL_SMOOTH);
         glClearColor(0.06f, 0.09f, 0.13f, 1.0f);
