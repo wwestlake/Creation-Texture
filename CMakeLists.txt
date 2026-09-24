@@ -52,6 +52,13 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/UI/CMakeLists.txt")
     set(CREATION_TEXTURE_UI_TARGET creation_suite_ui)
 endif()
 
+set(CREATION_TEXTURE_DOCK_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/JuceDocking/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/JuceDocking"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedJuceDocking")
+    set(CREATION_TEXTURE_DOCK_TARGET CreationDock)
+endif()
+
 set(CREATION_TEXTURE_RENDER_TARGET "")
 if(EXISTS "/Render/CMakeLists.txt")
     add_subdirectory("/Render"
@@ -114,8 +121,10 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
-    Source/ProceduralWorkspacePanel.cpp
-    Source/ProceduralWorkspacePanel.h
+    Source/NodeGraphPanel.cpp
+    Source/ViewerPanel.cpp
+    Source/NodeGraphPanel.h
+    Source/ViewerPanel.h
     Source/TextureNodeCatalog.cpp
     Source/TextureNodeCatalog.h
     Source/TextureCompiler.cpp
@@ -141,6 +150,7 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_VFS_TARGET}
     ${CREATION_TEXTURE_SERVICES_TARGET}
     ${CREATION_TEXTURE_UI_TARGET}
+    ${CREATION_TEXTURE_DOCK_TARGET}
     ${CREATION_TEXTURE_RENDER_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
     ${CREATION_TEXTURE_NODE_EDITOR_UI_TARGET}

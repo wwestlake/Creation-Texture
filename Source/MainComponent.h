@@ -12,9 +12,12 @@
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/ui/SuiteShellController.h>
 #include <TexturePluginHost.h>
-#include "ProceduralWorkspacePanel.h"
+#include <CreationDock/DockManager.h>
+#include <juce_gui_extra/juce_gui_extra.h>
+#include "NodeGraphPanel.h"
 
-class MainComponent final : public juce::Component
+class MainComponent final : public juce::Component,
+                            private juce::MenuBarModel
 {
 public:
     enum class WorkspaceMode
@@ -31,6 +34,9 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
 
 private:
     static constexpr int workspaceModeCount = 5;
@@ -72,90 +78,7 @@ private:
         juce::TextEditor summaryEditor;
     };
 
-    class PreviewWorkspacePanel final : public juce::Component
-    {
-    public:
-        enum class TextureRole
-        {
-            baseColor = 0,
-            normal,
-            roughness,
-            metallic,
-            emissive,
-            mask,
-            auxiliary
-        };
-
-        struct WorkingTextureItem
-        {
-            juce::Image image;
-            juce::String sourceLabel;
-            juce::String projectEntry;
-            TextureRole role = TextureRole::baseColor;
-            float brightness = 0.0f;
-            float contrast = 1.0f;
-            float saturation = 1.0f;
-            float gamma = 1.0f;
-        };
-
-        PreviewWorkspacePanel();
-        ~PreviewWorkspacePanel() override;
-
-        void setProjectName(const juce::String& projectName);
-        void setStatusText(const juce::String& text);
-        void setTextureInfo(const juce::String& text);
-        void addWorkingTexture(const juce::Image& image, const juce::String& sourceLabel, const juce::String& projectEntry);
-        void clearWorkingTextures();
-        void reloadPreview(bool persistDerivedResult = false);
-        bool hasTexture() const noexcept;
-        juce::String getTextureSourceLabel() const;
-        int getWorkingTextureCount() const noexcept;
-        juce::String getWorkingSetSummary() const;
-        void setSelectedPrimitiveIndex(int index);
-        int getSelectedPrimitiveIndex() const noexcept;
-        bool isPreviewDirty() const noexcept;
-        juce::ValueTree createWorkingSetState() const;
-        void restoreWorkingSetState(const juce::ValueTree& state,
-                                    const std::function<juce::Image(const juce::String& projectEntry)>& imageLoader);
-        void resized() override;
-
-        std::function<void()> onImportTextureRequested;
-        std::function<void(const juce::Image&, const juce::String&)> onProcessedTextureReady;
-
-    private:
-        class Viewport;
-
-        juce::Label titleLabel;
-        juce::Label projectLabel;
-        juce::TextButton importTextureButton { "Import Texture" };
-        juce::TextButton removeTextureButton { "Remove Selected" };
-        juce::TextButton reloadPreviewButton { "Reload Preview" };
-        juce::ComboBox primitiveSelector;
-        juce::ComboBox workingTextureSelector;
-        juce::ComboBox roleSelector;
-        juce::Label brightnessLabel;
-        juce::Slider brightnessSlider;
-        juce::Label contrastLabel;
-        juce::Slider contrastSlider;
-        juce::Label saturationLabel;
-        juce::Slider saturationSlider;
-        juce::Label gammaLabel;
-        juce::Slider gammaSlider;
-        juce::Label statusLabel;
-        juce::Label textureInfoLabel;
-        std::unique_ptr<Viewport> viewport;
-        std::vector<WorkingTextureItem> workingTextures;
-        int selectedTextureIndex = -1;
-        juce::String activePreviewSourceLabel;
-
-        void refreshWorkingTextureControls();
-        static juce::String roleDisplayName(TextureRole role);
-        juce::Image applyAdjustments(const WorkingTextureItem& item);
-        creation_texture::language::TexturePluginHost texturePluginHost;
-        bool previewDirty = false;
-    };
-
-    void configureHeader();
+        void configureHeader();
     void configurePanels();
     void loadSuiteState();
     void refreshShellSummary();
@@ -200,15 +123,17 @@ private:
     juce::Label titleLabel;
     juce::Label subtitleLabel;
     juce::Label runtimeLabel;
-    ViewModeBar modeBar;
+    std::unique_ptr<juce::MenuBarComponent> menuBar;
+    std::unique_ptr<CreationDock::DockManager> dockManager;
 
     juce::GroupComponent workspaceGroup;
     juce::GroupComponent resourcesGroup;
     juce::GroupComponent aiGroup;
     juce::GroupComponent configGroup;
 
-    PreviewWorkspacePanel previewWorkspace;
-    ProceduralWorkspacePanel proceduralWorkspace;
+    
+    NodeGraphPanel nodeGraphPanel;
+    ViewerPanel viewerPanel;
     WorkspacePanel mapsWorkspace { "Maps Workspace" };
     WorkspacePanel adjustmentsWorkspace { "Adjustments Workspace" };
     WorkspacePanel utilitiesWorkspace { "Utilities Workspace" };
