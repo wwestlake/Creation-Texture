@@ -25,6 +25,8 @@ public:
     void fileDragExit(const juce::StringArray& files) override;
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
+    void saveGraph(const juce::File& file);
+    void loadGraph(const juce::File& file);
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
 

@@ -123,3 +123,29 @@ void NodeGraphPanel::handleNodeDoubleClicked(ce::node_system::NodeId id, juce::R
         window->setVisible(true);
     }
 }
+#include <node_system/frgraph_serialization.h>
+
+void NodeGraphPanel::saveGraph(const juce::File& file)
+{
+    auto text = ce::node_system::SerializeGraph(graph);
+    file.replaceWithText(text);
+}
+
+void NodeGraphPanel::loadGraph(const juce::File& file)
+{
+    if (!file.existsAsFile()) return;
+    
+    std::string errStr;
+    auto newGraph = ce::node_system::DeserializeGraph(file.loadFileAsString().toStdString(), errStr);
+    
+    if (newGraph)
+    {
+        graph = std::move(*newGraph);
+        graphComponent.GraphReplaced();
+        graphComponent.repaint();
+    }
+    else
+    {
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load Error", "Failed to load graph:\n" + juce::String(errStr));
+    }
+}

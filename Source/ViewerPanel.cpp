@@ -1,5 +1,20 @@
 #include "ViewerPanel.h"
 #include <gl/GL.h>
+void configureModeButton(juce::TextButton& button)
+{
+    button.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a2431));
+    button.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2b6ca3));
+    button.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffd7e6f6));
+    button.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+}
+
+void configureAdjustmentSlider(juce::Slider& slider, double min, double max, double value)
+{
+    slider.setSliderStyle(juce::Slider::LinearHorizontal);
+    slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 56, 20);
+    slider.setRange(min, max, 0.01);
+    slider.setValue(value, juce::dontSendNotification);
+}
 
 using namespace juce::gl;
 class ViewerPanel::Viewport final : public juce::Component,
@@ -367,7 +382,7 @@ private:
     float rotationDegrees = 0.0f;
 };
 
-ViewerPanel::PreviewWorkspacePanel()
+ViewerPanel::ViewerPanel()
 {
     titleLabel.setText("Preview Workspace", juce::dontSendNotification);
     titleLabel.setFont(juce::Font(juce::FontOptions(22.0f)).boldened());
@@ -515,7 +530,7 @@ ViewerPanel::PreviewWorkspacePanel()
     refreshWorkingTextureControls();
 }
 
-ViewerPanel::~PreviewWorkspacePanel() = default;
+ViewerPanel::~ViewerPanel() = default;
 
 void ViewerPanel::setProjectName(const juce::String& projectName)
 {
@@ -819,15 +834,4 @@ void ViewerPanel::restoreWorkingSetState(const juce::ValueTree& state,
     refreshWorkingTextureControls();
     reloadPreview();
 }
-
-MainComponent::MainComponent()
-{
-    configureHeader();
-    configurePanels();
-    loadSuiteState();
-    setActiveMode(WorkspaceMode::preview);
-    setSize(1380, 860);
-}
-
-MainComponent::~MainComponent() = default;
 
