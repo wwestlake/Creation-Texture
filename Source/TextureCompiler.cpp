@@ -73,7 +73,23 @@ TextureCompileResult CompileTextureGraph(const ns::Graph& graph, const ns::NodeT
         const auto& type = node->TypeName();
         
         if (type == "texture.imageInput") {
-            expression = "vec4(vUV.x, vUV.y, 0.0f, 1.0f)";
+            std::string path;
+            const auto* pin = Input(*node, "assetPath");
+            if (pin && std::holds_alternative<std::string>(pin->defaultValue)) {
+                path = std::get<std::string>(pin->defaultValue);
+            }
+            if (path.empty()) {
+                expression = "vec4(0.0f, 0.0f, 0.0f, 1.0f)";
+            } else {
+                std::string uniformName;
+                if (textureSlots.find(path) != textureSlots.end()) {
+                    uniformName = textureSlots[path];
+                } else {
+                    uniformName = "uMaterialTex_" + std::to_string(textureSlots.size());
+                    textureSlots[path] = uniformName;
+                }
+                expression = "texture(" + uniformName + ", vUV)";
+            }
         } else if (type == "texture.imageOutput") {
             result.errors.push_back("Output is not a value expression.");
         } else if (type == "texture.makeTileable") {

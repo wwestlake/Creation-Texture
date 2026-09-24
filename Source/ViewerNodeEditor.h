@@ -18,6 +18,9 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& e) override;
+    void mouseDrag(const juce::MouseEvent& e) override;
+    void mouseUp(const juce::MouseEvent& e) override;
     struct Geometry {
         GLuint vbo = 0;
         GLuint ebo = 0;
@@ -50,7 +53,10 @@ private:
     std::unique_ptr<juce::OpenGLShaderProgram> shaderProgram;
     std::string currentShaderCode;
     
-    float rotationAngle = 0.0f;
+    float rotationX = 0.0f;
+    float rotationY = 0.0f;
+    juce::Point<float> lastMousePos;
+    bool isRightMouseDragging = false;
     std::unordered_map<std::string, std::unique_ptr<juce::OpenGLTexture>> loadedTextures;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewerNodeEditor)

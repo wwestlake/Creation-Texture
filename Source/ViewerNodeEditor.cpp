@@ -247,7 +247,7 @@ void ViewerNodeEditor::renderOpenGL()
     
     if (!shaderProgram) return;
 
-    rotationAngle += 0.01f;
+    
     
     float aspect = getWidth() / (float)juce::jmax(1, getHeight());
     juce::Matrix3D<float> proj;
@@ -261,6 +261,7 @@ void ViewerNodeEditor::renderOpenGL()
     juce::Matrix3D<float> view;
     view.mat[14] = -2.5f; 
     
+
     juce::Matrix3D<float> model;
     int mode = viewModeSelector.getSelectedId();
     if (mode == 1) {
@@ -268,8 +269,21 @@ void ViewerNodeEditor::renderOpenGL()
         model.mat[13] = -0.7f;
         model.mat[0] = 1.5f; model.mat[5] = 1.5f; 
     } else {
-        model = juce::Matrix3D<float>::rotation({rotationAngle * 0.3f, rotationAngle * 0.5f, 0.0f});
+        juce::Matrix3D<float> modelRotX;
+        modelRotX.mat[5] = std::cos(rotationX);
+        modelRotX.mat[6] = std::sin(rotationX);
+        modelRotX.mat[9] = -std::sin(rotationX);
+        modelRotX.mat[10] = std::cos(rotationX);
+
+        juce::Matrix3D<float> modelRotY;
+        modelRotY.mat[0] = std::cos(rotationY);
+        modelRotY.mat[2] = -std::sin(rotationY);
+        modelRotY.mat[8] = std::sin(rotationY);
+        modelRotY.mat[10] = std::cos(rotationY);
+
+        model = modelRotY * modelRotX;
     }
+
 
     shaderProgram->use();
     
@@ -320,4 +334,29 @@ void ViewerNodeEditor::resized()
     auto bounds = getLocalBounds();
     auto topBar = bounds.removeFromTop(30);
     viewModeSelector.setBounds(topBar.reduced(2).removeFromLeft(150));
+}
+
+void ViewerNodeEditor::mouseDown(const juce::MouseEvent& e)
+{
+    if (e.mods.isRightButtonDown())
+    {
+        isRightMouseDragging = true;
+        lastMousePos = e.position;
+    }
+}
+
+void ViewerNodeEditor::mouseDrag(const juce::MouseEvent& e)
+{
+    if (isRightMouseDragging)
+    {
+        auto delta = e.position - lastMousePos;
+        rotationY += delta.x * 0.01f;
+        rotationX += delta.y * 0.01f;
+        lastMousePos = e.position;
+    }
+}
+
+void ViewerNodeEditor::mouseUp(const juce::MouseEvent& e)
+{
+    isRightMouseDragging = false;
 }
