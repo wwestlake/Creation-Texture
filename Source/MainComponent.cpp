@@ -14,11 +14,22 @@ MainComponent::MainComponent()
         openProject(projectId);
     };
 
+    creation::ui::SuiteAssetManagerCapability assetCapability;
+    assetCapability.hostAppDisplayName = "Djehuti Texture";
+    assetCapability.appDomain = creation::assets::SuiteAppDomain::texture;
+    assetCapability.enumerateProjectAssets = [this]() {
+        if (projectSession.isValid()) {
+            return projectSession.getManifest().assetCatalog.assets;
+        }
+        return juce::Array<creation::assets::AssetDescriptor>();
+    };
+    
     suiteShellController.attach(headerBar,
                                 {
                                     "Djehuti Texture",
                                     creation::assets::SuiteAppDomain::texture,
-                                    creation_texture::branding::backgroundColour()
+                                    creation_texture::branding::backgroundColour(),
+                                    assetCapability
                                 },
                                 [this](const juce::String& status)
                                 {
