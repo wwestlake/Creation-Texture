@@ -5,12 +5,10 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include "TextureFrameSnapshot.h"
 
-struct TextureFrameSnapshot
-{
-    juce::Colour debugColour { juce::Colours::black };
-    std::string generatedGlsl;
-};
+
 
 class ViewerNodeEditor : public juce::Component, private juce::OpenGLRenderer
 {
@@ -53,6 +51,7 @@ private:
     std::string currentShaderCode;
     
     float rotationAngle = 0.0f;
+    std::unordered_map<std::string, std::unique_ptr<juce::OpenGLTexture>> loadedTextures;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ViewerNodeEditor)
 };

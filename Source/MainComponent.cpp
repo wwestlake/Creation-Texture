@@ -1,6 +1,7 @@
 #include "MainComponent.h"
 #include "Branding.h"
 #include <creation/assets/ProjectWorkspaceService.h>
+#include <creation/assets/ProjectContainerService.h>
 
 MainComponent::MainComponent()
 {
@@ -39,6 +40,11 @@ MainComponent::MainComponent()
     setSize(1600, 1000);
 
     nodeGraphPanel.setProjectSession(&projectSession);
+    nodeGraphPanel.onEnsureProjectSessionActive = [this](juce::String& err) { return ensureProjectSessionActive(err); };
+
+    juce::String error;
+    ensureProjectSessionActive(error);
+    nodeGraphPanel.addViewer(viewerPanel.getViewer());
 }
 
 MainComponent::~MainComponent()
@@ -141,4 +147,37 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
         dockManager->activatePanel("Viewer");
     }
 }
+
+
+
+bool MainComponent::ensureProjectSessionActive(juce::String& errorMessage)
+{
+    if (projectSession.isValid())
+        return true;
+
+    creation::suite::SuiteSettingsStore store;
+    auto settings = store.load(errorMessage);
+    if (errorMessage.isNotEmpty()) return false;
+
+    auto projects = creation::assets::ProjectContainerService::listProjects(settings, errorMessage);
+    if (projects.isEmpty()) {
+        errorMessage = "No project open. Please open or create a project first.";
+        headerBar.setStatusText(errorMessage);
+        return false;
+    }
+
+    int latestIdx = 0;
+    for (int i = 1; i < projects.size(); ++i) {
+        if (projects.getReference(i).manifest.modifiedAt > projects.getReference(latestIdx).manifest.modifiedAt) {
+            latestIdx = i;
+        }
+    }
+    if (creation::assets::ProjectWorkspaceService::openProject(settings, projects.getReference(latestIdx).projectId, projectSession, errorMessage)) {
+        headerBar.setProjectLabel("Project: " + projectSession.getManifest().projectName);
+        return true;
+    }
+    return false;
+}
+
+
 

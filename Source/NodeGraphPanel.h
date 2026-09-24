@@ -13,6 +13,8 @@ class NodeGraphPanel : public juce::Component,
                                  public juce::FileDragAndDropTarget
 {
 public:
+    void addViewer(ViewerNodeEditor* v) { activeViewers.add(v); }
+
     NodeGraphPanel();
     void setSummaryText(const juce::String& text) {}
     ~NodeGraphPanel() override;
@@ -29,6 +31,7 @@ public:
     void saveGraph(const juce::File& file);
     void loadGraph(const juce::File& file);
     void setProjectSession(creation::assets::ProjectSession* session) { projectSession = session; }
+    std::function<bool(juce::String&)> onEnsureProjectSessionActive;
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
 
@@ -47,5 +50,6 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NodeGraphPanel)
 };
+
 
 

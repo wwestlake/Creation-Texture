@@ -1,3 +1,4 @@
+#include <creation/assets/ProjectAssetService.h>
 #include "NodeGraphPanel.h"
 #include "TextureNodeCatalog.h"
 #include "ViewerNodeEditor.h"
@@ -19,7 +20,8 @@ NodeGraphPanel::NodeGraphPanel()
         auto result = creation_texture::CompileTextureGraph(graph, registry.TypeRegistry());
         if (result.ok) {
             currentSnapshot = std::make_shared<TextureFrameSnapshot>();
-            currentSnapshot->generatedGlsl = result.source.evaluateFunction;
+            currentSnapshot->generatedGlsl = result.source.declarations + "\n" + result.source.evaluateFunction;
+            currentSnapshot->textures = result.source.textures;
             currentSnapshot->debugColour = juce::Colour(0xff121212);
             
             for (auto& viewer : activeViewers) {
@@ -115,6 +117,10 @@ void NodeGraphPanel::fileDragExit(const juce::StringArray& files) {}
 
 void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
 {
+    juce::String err;
+    if (onEnsureProjectSessionActive && !onEnsureProjectSessionActive(err))
+        return;
+
     if (!projectSession || !projectSession->isValid())
         return;
 
@@ -215,6 +221,7 @@ void NodeGraphPanel::loadGraph(const juce::File& file)
         juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load Error", "Failed to load graph:\n" + juce::String(errStr));
     }
 }
+
 
 
 

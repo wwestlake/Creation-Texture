@@ -1,0 +1,12 @@
+
+#pragma once
+#include <JuceHeader.h>
+#include <string>
+#include <vector>
+#include "TextureCompiler.h"
+
+struct TextureFrameSnapshot {
+    juce::Colour debugColour { juce::Colours::black };
+    std::string generatedGlsl;
+    std::vector<creation_texture::TextureSlot> textures;
+};
