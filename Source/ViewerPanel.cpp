@@ -101,7 +101,7 @@ private:
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
         glTranslatef(0.0f, 0.0f, -3.25f);
-        glRotatef(18.0f, 1.0f, 0.0f, 0.0f);
+        glRotatef(elevationDegrees, 1.0f, 0.0f, 0.0f);
         glRotatef(rotationDegrees, 0.0f, 1.0f, 0.0f);
 
         drawBackdrop();
@@ -122,7 +122,6 @@ private:
         }
 
         glBindTexture(GL_TEXTURE_2D, 0);
-        rotationDegrees = std::fmod(rotationDegrees + 0.35f, 360.0f);
     }
 
     void setupProjection(float aspect)
@@ -380,6 +379,24 @@ private:
     GLuint textureId = 0;
     GLuint fallbackTextureId = 0;
     float rotationDegrees = 0.0f;
+    float elevationDegrees = 18.0f;
+    juce::Point<int> lastMousePos;
+
+    void mouseDown(const juce::MouseEvent& e) override
+    {
+        lastMousePos = e.getPosition();
+    }
+
+    void mouseDrag(const juce::MouseEvent& e) override
+    {
+        auto delta = e.getPosition() - lastMousePos;
+        lastMousePos = e.getPosition();
+        
+        rotationDegrees += delta.x * 0.5f;
+        elevationDegrees = juce::jlimit(-90.0f, 90.0f, elevationDegrees + delta.y * 0.5f);
+        
+        openGLContext.triggerRepaint();
+    }
 };
 
 ViewerPanel::ViewerPanel()
@@ -391,14 +408,6 @@ ViewerPanel::ViewerPanel()
 
     projectLabel.setColour(juce::Label::textColourId, juce::Colour(0xff9fb1c8));
     addAndMakeVisible(projectLabel);
-
-    configureModeButton(importTextureButton);
-    importTextureButton.onClick = [this]
-    {
-        if (onImportTextureRequested)
-            onImportTextureRequested();
-    };
-    addAndMakeVisible(importTextureButton);
 
     configureModeButton(removeTextureButton);
     removeTextureButton.onClick = [this]
@@ -744,8 +753,6 @@ void ViewerPanel::resized()
     area.removeFromTop(8);
 
     auto controlsRow = area.removeFromTop(30);
-    importTextureButton.setBounds(controlsRow.removeFromLeft(140));
-    controlsRow.removeFromLeft(10);
     removeTextureButton.setBounds(controlsRow.removeFromLeft(140));
     controlsRow.removeFromLeft(10);
     reloadPreviewButton.setBounds(controlsRow.removeFromLeft(140));

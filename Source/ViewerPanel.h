@@ -37,7 +37,7 @@ public:
 
 private:
     class Viewport;
-    juce::Label titleLabel; juce::Label projectLabel; juce::TextButton importTextureButton { "Import Texture" };
+    juce::Label titleLabel; juce::Label projectLabel; 
     juce::TextButton removeTextureButton { "Remove Selected" }; juce::TextButton reloadPreviewButton { "Reload Preview" };
     juce::ComboBox primitiveSelector; juce::ComboBox workingTextureSelector; juce::ComboBox roleSelector;
     juce::Label brightnessLabel; juce::Slider brightnessSlider; juce::Label contrastLabel; juce::Slider contrastSlider;

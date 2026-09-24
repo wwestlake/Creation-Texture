@@ -8,7 +8,7 @@
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
 
-class MainComponent final : public juce::Component,
+class MainComponent final : public juce::Component, public juce::DragAndDropContainer,
                             public juce::MenuBarModel
 {
 public:

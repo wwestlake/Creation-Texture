@@ -7,7 +7,7 @@ MainComponent::MainComponent()
     headerBar.setAppTitle("Djehuti Texture");
     headerBar.setLogoImage(creation::ui::getSuiteLogoImage(creation::ui::SuiteLogoId::texture));
     headerBar.setProjectLabel("Project: No active texture project");
-    headerBar.setTransportControlsVisible(false);
+    headerBar.setTransportControlsVisible(false); headerBar.audioButton.setVisible(false); 
     
     suiteShellController.onProjectOpenRequested = [this](const juce::String& projectId) {
         openProject(projectId);
@@ -91,6 +91,8 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
     if (menuName == "File")
     {
         menu.addItem(1, "Save");
+        menu.addSeparator();
+        menu.addItem(2, "Import Texture...");
     }
     else if (menuName == "View")
     {
@@ -123,6 +125,10 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
         {
             headerBar.setStatusText("No project is open. Cannot save.");
         }
+    }
+    else if (menuItemID == 2) // Import Texture
+    {
+        headerBar.setStatusText("Import Texture workflow to be implemented.");
     }
     else if (menuItemID == 4)
     {
