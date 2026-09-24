@@ -383,6 +383,7 @@ private:
     GLuint fallbackTextureId = 0;
     float rotationDegrees = 0.0f;
     float elevationDegrees = 18.0f;
+    float zoomDistance = 3.25f;
     juce::Point<int> lastMousePos;
 
     void mouseDown(const juce::MouseEvent& e) override
@@ -852,6 +853,7 @@ void ViewerPanel::restoreWorkingSetState(const juce::ValueTree& state,
     refreshWorkingTextureControls();
     reloadPreview();
 }
+
 
 
 
