@@ -36,6 +36,7 @@ public:
     std::function<bool(juce::String&)> onEnsureProjectSessionActive;
     std::function<void(const juce::String&)> onSaveRequested;
     void loadGraphFromJson(const juce::String& json);
+    void compileGraph();
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
 

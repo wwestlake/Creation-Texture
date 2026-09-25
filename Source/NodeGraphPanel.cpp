@@ -46,36 +46,7 @@ NodeGraphPanel::NodeGraphPanel()
     };
 
     compileButton.onClick = [this]() {
-        ce::material::MaterialCompileResult res = ce::material::CompileMaterialGraph(graph, registry);
-        if (!res.ok) {
-            juce::String errStr;
-            for (const auto& err : res.errors) errStr += juce::String(err) + "\n";
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compile Error", errStr);
-        } else {
-            currentSnapshot = std::make_shared<TextureFrameSnapshot>();
-            currentSnapshot->generatedGlsl = res.source.declarations + "\n" + res.source.evaluateFunction;
-            for (size_t i = 0; i < res.source.textures.size(); ++i) {
-                  const auto& tex = res.source.textures[i];
-                  TextureFrameImageSlot slot;
-                  slot.uniformName = tex.uniformName;
-                  if (projectSession && projectSession->isValid()) {
-                      juce::MemoryBlock block;
-                      if (projectSession->readEntry(tex.path, block)) {
-                          slot.image = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
-                      } else {
-                          juce::File f(juce::String(tex.path));
-                          if (f.existsAsFile()) {
-                              slot.image = juce::ImageFileFormat::loadFrom(f);
-                          }
-                      }
-                  }
-                  currentSnapshot->imageSlots.push_back(slot);
-            }
-            currentSnapshot->debugColour = juce::Colour(0xff121212);
-            for (auto& viewer : activeViewers) {
-                if (viewer != nullptr) viewer->setSnapshot(currentSnapshot);
-            }
-        }
+        compileGraph();
     };
 
     graphComponent.onGetNodeExtraHeight = [this](ce::node_system::NodeId id) {
@@ -122,6 +93,8 @@ NodeGraphPanel::NodeGraphPanel()
     currentSnapshot = std::make_shared<TextureFrameSnapshot>();
     currentSnapshot->debugColour = juce::Colour(0xff121212);
     currentSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { outColor = vec4(vUV.x, vUV.y, 1.0, 1.0); }";
+
+    compileGraph();
 }
 
 NodeGraphPanel::~NodeGraphPanel() = default;
@@ -197,6 +170,39 @@ bool NodeGraphPanel::isInterestedInFileDrag(const juce::StringArray& files)
             return true;
     }
     return false;
+}
+
+void NodeGraphPanel::compileGraph() {
+    ce::material::MaterialCompileResult res = ce::material::CompileMaterialGraph(graph, registry);
+    if (!res.ok) {
+        juce::String errStr;
+        for (const auto& err : res.errors) errStr += juce::String(err) + "\n";
+        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compile Error", errStr);
+    } else {
+        currentSnapshot = std::make_shared<TextureFrameSnapshot>();
+        currentSnapshot->generatedGlsl = res.source.declarations + "\n" + res.source.evaluateFunction;
+        for (size_t i = 0; i < res.source.textures.size(); ++i) {
+            const auto& tex = res.source.textures[i];
+            TextureFrameImageSlot slot;
+            slot.uniformName = tex.uniformName;
+            if (projectSession && projectSession->isValid()) {
+                juce::MemoryBlock block;
+                if (projectSession->readEntry(tex.path, block)) {
+                    slot.image = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
+                } else {
+                    juce::File f(juce::String(tex.path));
+                    if (f.existsAsFile()) {
+                        slot.image = juce::ImageFileFormat::loadFrom(f);
+                    }
+                }
+            }
+            currentSnapshot->imageSlots.push_back(slot);
+        }
+        currentSnapshot->debugColour = juce::Colour(0xff121212);
+        for (auto& viewer : activeViewers) {
+            if (viewer != nullptr) viewer->setSnapshot(currentSnapshot);
+        }
+    }
 }
 
 void NodeGraphPanel::fileDragEnter(const juce::StringArray& files, int x, int y) {}
