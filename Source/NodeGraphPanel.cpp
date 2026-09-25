@@ -3,6 +3,7 @@
 #include "node_system/frgraph_serialization.h"
 #include "ViewerNodeEditor.h"
 #include "ContrastAdjustmentEditor.h"
+#include "TextureSampleNodePanel.h"
 
 namespace {
     ce::node_system::NodeTypeRegistry BuildMaterialRegistry() {
@@ -43,16 +44,8 @@ NodeGraphPanel::NodeGraphPanel()
                         break;
                     }
                 }
-                if (!assetPath.empty() && projectSession && projectSession->isValid()) {
-                    if (imagePreviewCache.find(assetPath) == imagePreviewCache.end()) {
-                        juce::MemoryBlock block;
-                        if (projectSession->readEntry(assetPath, block)) {
-                            imagePreviewCache[assetPath] = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
-                        } else {
-                            imagePreviewCache[assetPath] = juce::Image();
-                        }
-                    }
-                    auto img = imagePreviewCache[assetPath];
+                if (!assetPath.empty()) {
+                    auto img = getProjectImage(juce::String(assetPath));
                     if (img.isValid()) {
                         auto previewBounds = bounds.withTrimmedTop(bounds.getHeight() - 110.0f).withTrimmedBottom(10.0f).reduced(10.0f, 0.0f);
                         g.drawImage(img, previewBounds, juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
@@ -98,46 +91,90 @@ void NodeGraphPanel::resized()
 void NodeGraphPanel::handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds)
 {
     auto* node = graph.FindNode(id);
-    if (!node) return;
+    if (node == nullptr || node->TypeName() != "material.texture.sample2d")
+        return;
 
-    if (node->TypeName() == "material.texture.sample2d")
+    juce::String currentPath;
+    for (const auto& pin : node->Inputs())
+        if (pin.name == "texture" && std::holds_alternative<std::string>(pin.defaultValue))
+            currentPath = juce::String(std::get<std::string>(pin.defaultValue));
+
+    juce::Array<TextureSampleNodePanel::ImageChoice> choices;
+    if (projectSession != nullptr && projectSession->isValid())
     {
-        if (!projectSession || !projectSession->isValid()) {
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Texture Picker", "No active project.");
-            return;
-        }
-        auto patchAssets = projectSession->getManifest().assetCatalog.query({ creation::assets::AssetKind::texture });
-        juce::PopupMenu menu;
-        menu.addSectionHeader("Load Texture");
-        if (patchAssets.isEmpty()) {
-            menu.addItem(1, "No textures found in project", false);
-        } else {
-            int itemId = 100;
-            std::vector<creation::assets::AssetDescriptor> assets;
-            for (const auto& a : patchAssets) {
-                menu.addItem(itemId++, a.displayName);
-                assets.push_back(a);
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+        {
+            if (! isImageAsset(asset))
+                continue;
+
+            TextureSampleNodePanel::ImageChoice choice;
+            choice.displayName = asset.displayName.isNotEmpty() ? asset.displayName
+                                                                : asset.logicalPath.fromLastOccurrenceOf("/", false, false);
+            choice.logicalPath = asset.logicalPath;
+            const auto image = getProjectImage(asset.logicalPath);
+            if (image.isValid())
+            {
+                choice.thumbnail = image.rescaled(juce::jmin(96, image.getWidth()), juce::jmin(96, image.getHeight()),
+                                                  juce::Graphics::mediumResamplingQuality);
+                choice.details = asset.logicalPath.fromLastOccurrenceOf(".", false, false).toUpperCase()
+                               + "  " + juce::String(image.getWidth()) + " x " + juce::String(image.getHeight());
             }
-            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
-                [this, id, assets](int result) {
-                    if (result >= 100) {
-                        int index = result - 100;
-                        if (index < assets.size()) {
-                            if (auto* n = graph.FindNode(id)) {
-                                for (auto& pin : n->Inputs()) {
-                                    if (pin.name == "texture") {
-                                        if (auto* mutablePin = n->FindPin(pin.id))
-                                            mutablePin->defaultValue = assets[index].logicalPath.toStdString();
-                                        break;
-                                    }
-                                }
-                                graphComponent.repaint();
-                            }
-                        }
-                    }
-                });
+            else
+            {
+                choice.details = "Could not be read";
+            }
+            choices.add(choice);
         }
     }
+
+    auto panel = std::make_unique<TextureSampleNodePanel>(choices, currentPath, [this, id](const juce::String& logicalPath) {
+        auto* sampleNode = graph.FindNode(id);
+        if (sampleNode == nullptr)
+            return;
+
+        for (const auto& pin : sampleNode->Inputs())
+        {
+            if (pin.name == "texture")
+            {
+                if (auto* mutablePin = sampleNode->FindPin(pin.id))
+                    mutablePin->defaultValue = logicalPath.toStdString();
+                break;
+            }
+        }
+
+        graphComponent.repaint();
+        compileGraph();
+        if (onGraphEdited)
+            onGraphEdited();
+    });
+
+    // Open beside the node that was double-clicked - the panel belongs to that node.
+    const auto nodeArea = graphComponent.localAreaToGlobal(bounds.toNearestInt());
+    juce::CallOutBox::launchAsynchronously(std::move(panel), nodeArea, nullptr);
+}
+
+bool NodeGraphPanel::isImageAsset(const creation::assets::AssetDescriptor& asset)
+{
+    // Only formats this app can decode. Recognised by what the file is, not by an asset-kind label.
+    static const juce::StringArray imageExtensions { "png", "jpg", "jpeg", "gif" };
+    const auto extension = asset.logicalPath.fromLastOccurrenceOf(".", false, false).toLowerCase();
+    return imageExtensions.contains(extension);
+}
+
+juce::Image NodeGraphPanel::getProjectImage(const juce::String& logicalPath)
+{
+    const auto key = logicalPath.toStdString();
+    auto cached = imagePreviewCache.find(key);
+    if (cached != imagePreviewCache.end())
+        return cached->second;
+
+    juce::Image image;
+    juce::MemoryBlock block;
+    if (projectSession != nullptr && projectSession->isValid() && projectSession->readEntry(logicalPath, block))
+        image = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
+
+    imagePreviewCache[key] = image;
+    return image;
 }
 
 bool NodeGraphPanel::isInterestedInFileDrag(const juce::StringArray& files)

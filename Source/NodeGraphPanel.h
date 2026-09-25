@@ -39,6 +39,8 @@ public:
     void compileGraph();
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
+    static bool isImageAsset(const creation::assets::AssetDescriptor& asset);
+    juce::Image getProjectImage(const juce::String& logicalPath);
 
     ce::node_system::NodeTypeRegistry registry;
     ce::node_system::Graph graph;
