@@ -20,9 +20,9 @@ NodeGraphPanel::NodeGraphPanel()
 {
     addAndMakeVisible(paletteComponent);
     addAndMakeVisible(graphComponent);
-    addAndMakeVisible(frusty);
-    addAndMakeVisible(compileButton);
-    addAndMakeVisible(saveButton);
+    // addAndMakeVisible(frusty);
+    // addAndMakeVisible(compileButton);
+    // addAndMakeVisible(saveButton);
 
     auto* colorNode = ce::node_system::AddRegisteredNode(graph, registry, "material.constant.color");
     auto* outputNode = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output");
@@ -97,6 +97,17 @@ NodeGraphPanel::NodeGraphPanel()
     compileGraph();
 }
 
+void NodeGraphPanel::addViewer(ViewerNodeEditor* v) {
+    activeViewers.add(v);
+    v->onCompileRequested = [this]() { compileGraph(); };
+    v->onSaveRequested = [this]() {
+        if (this->onSaveRequested) {
+            std::string jsonStr = ce::node_system::SerializeGraph(graph);
+            this->onSaveRequested(juce::String(jsonStr));
+        }
+    };
+}
+
 NodeGraphPanel::~NodeGraphPanel() = default;
 
 void NodeGraphPanel::paint(juce::Graphics& g)
@@ -108,11 +119,11 @@ void NodeGraphPanel::resized()
 {
     auto bounds = getLocalBounds();
     paletteComponent.setBounds(bounds.removeFromLeft(200));
-    frusty.setBounds(bounds.removeFromRight(300));
+    // frusty.setBounds(bounds.removeFromRight(300));
     
     auto topBar = bounds.removeFromTop(40);
-    saveButton.setBounds(topBar.removeFromLeft(100).reduced(5));
-    compileButton.setBounds(topBar.removeFromLeft(100).reduced(5));
+    // saveButton.setBounds(topBar.removeFromLeft(100).reduced(5));
+    // compileButton.setBounds(topBar.removeFromLeft(100).reduced(5));
     
     graphComponent.setBounds(bounds);
 }

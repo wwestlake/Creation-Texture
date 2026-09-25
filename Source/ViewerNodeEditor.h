@@ -30,6 +30,9 @@ public:
 
     void setSnapshot(std::shared_ptr<const TextureFrameSnapshot> snapshot);
 
+    std::function<void()> onCompileRequested;
+    std::function<void()> onSaveRequested;
+
 private:
     void newOpenGLContextCreated() override;
     void renderOpenGL() override;
@@ -48,6 +51,9 @@ private:
     void buildDjehuti();
 
     juce::ComboBox viewModeSelector;
+    juce::TextButton compileButton{"Compile Graph"};
+    juce::TextButton saveButton{"Save to Project"};
+    
     juce::OpenGLContext openGLContext;
 
     std::atomic<std::shared_ptr<const TextureFrameSnapshot>> publishedSnapshot;

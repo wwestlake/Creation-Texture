@@ -13,6 +13,16 @@ ViewerNodeEditor::ViewerNodeEditor()
     viewModeSelector.addItem("Djehuti (Ibis) Head", 6);
     viewModeSelector.setSelectedId(2);
     addAndMakeVisible(viewModeSelector);
+    
+    addAndMakeVisible(compileButton);
+    addAndMakeVisible(saveButton);
+
+    compileButton.onClick = [this]() {
+        if (onCompileRequested) onCompileRequested();
+    };
+    saveButton.onClick = [this]() {
+        if (onSaveRequested) onSaveRequested();
+    };
 
     auto defaultSnapshot = std::make_shared<TextureFrameSnapshot>();
     defaultSnapshot->debugColour = juce::Colour(0xff121212);
@@ -338,6 +348,8 @@ void ViewerNodeEditor::resized()
     auto bounds = getLocalBounds();
     auto topBar = bounds.removeFromTop(30);
     viewModeSelector.setBounds(topBar.reduced(2).removeFromLeft(150));
+    saveButton.setBounds(topBar.reduced(2).removeFromLeft(100));
+    compileButton.setBounds(topBar.reduced(2).removeFromLeft(100));
 }
 
 void ViewerNodeEditor::mouseDown(const juce::MouseEvent& e)

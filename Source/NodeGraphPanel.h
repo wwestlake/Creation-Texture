@@ -15,7 +15,7 @@ class NodeGraphPanel : public juce::Component,
                                  public juce::FileDragAndDropTarget
 {
 public:
-    void addViewer(ViewerNodeEditor* v) { activeViewers.add(v); }
+    void addViewer(ViewerNodeEditor* v);
 
     NodeGraphPanel();
     void setSummaryText(const juce::String& text) {}
