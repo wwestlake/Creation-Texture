@@ -26,7 +26,7 @@ ViewerNodeEditor::ViewerNodeEditor()
 
     auto defaultSnapshot = std::make_shared<TextureFrameSnapshot>();
     defaultSnapshot->debugColour = juce::Colour(0xff121212);
-    defaultSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { outColor = vec4(vUV.x, vUV.y, 1.0, 1.0); }";
+    defaultSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { float f = mod(floor(vUV.x * 10.0) + floor(vUV.y * 10.0), 2.0); outColor = vec4(vec3(f * 0.5 + 0.2), 1.0); }";
     publishedSnapshot.store(defaultSnapshot);
 
     openGLContext.setRenderer(this);

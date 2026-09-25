@@ -109,53 +109,86 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
     juce::PopupMenu menu;
     if (menuName == "File")
     {
-        menu.addItem(1, "Save");
+        menu.addItem(1, "New Material");
+        menu.addItem(2, "Load Material...");
         menu.addSeparator();
-        menu.addItem(2, "Import Texture...");
+        menu.addItem(3, "Save Material");
+        menu.addItem(4, "Save Material As...");
+    }
+    else if (menuName == "Edit")
+    {
+        menu.addItem(10, "Undo");
+        menu.addItem(11, "Redo");
+        menu.addSeparator();
+        menu.addItem(12, "Cut");
+        menu.addItem(13, "Copy");
+        menu.addItem(14, "Paste");
+        menu.addItem(15, "Delete");
     }
     else if (menuName == "View")
     {
-        menu.addItem(4, "Node Graph");
-        menu.addItem(5, "3D Preview");
+        menu.addItem(20, "Virtual Engineer");
+        menu.addItem(21, "Node Graph");
+        menu.addItem(22, "3D Preview");
+    }
+    else if (menuName == "Help")
+    {
+        menu.addItem(30, "Documentation");
+        menu.addItem(31, "About Djehuti Texture");
     }
     return menu;
 }
 
 void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
 {
-    if (menuItemID == 1) // Save
+    if (menuItemID >= 1 && menuItemID <= 4)
     {
-        if (projectSession.isValid())
+        if (menuItemID == 3) // Save Material
         {
-            auto tempFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("material.frgraph");
-            nodeGraphPanel.saveGraph(tempFile);
-            
-            juce::MemoryBlock block;
-            tempFile.loadFileAsData(block);
-            projectSession.writeEntry("material.frgraph", block);
-            
-            juce::String err;
-            if (projectSession.commit(err))
-                headerBar.setStatusText("Material saved to project.");
+            if (projectSession.isValid())
+            {
+                auto tempFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("material.frgraph");
+                nodeGraphPanel.saveGraph(tempFile);
+                
+                juce::MemoryBlock block;
+                tempFile.loadFileAsData(block);
+                projectSession.writeEntry("material.frgraph", block);
+                
+                juce::String err;
+                if (projectSession.commit(err))
+                    headerBar.setStatusText("Material saved to project.");
+                else
+                    headerBar.setStatusText("Failed to save material: " + err);
+            }
             else
-                headerBar.setStatusText("Failed to save material: " + err);
+            {
+                headerBar.setStatusText("No project is open. Cannot save.");
+            }
         }
         else
         {
-            headerBar.setStatusText("No project is open. Cannot save.");
+            headerBar.setStatusText("File action to be implemented");
         }
     }
-    else if (menuItemID == 2) // Import Texture
+    else if (menuItemID >= 10 && menuItemID <= 15)
     {
-        headerBar.setStatusText("Import Texture workflow to be implemented.");
+        headerBar.setStatusText("Edit action to be implemented");
     }
-    else if (menuItemID == 4)
+    else if (menuItemID == 20)
+    {
+        dockManager->activatePanel("Frusty");
+    }
+    else if (menuItemID == 21)
     {
         dockManager->activatePanel("NodeGraph");
     }
-    else if (menuItemID == 5)
+    else if (menuItemID == 22)
     {
         dockManager->activatePanel("Viewer");
+    }
+    else if (menuItemID >= 30 && menuItemID <= 31)
+    {
+        headerBar.setStatusText("Help action to be implemented");
     }
 }
 

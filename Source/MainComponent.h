@@ -7,6 +7,7 @@
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
+#include <creation/ui/FrustyComponent.h>
 
 class MainComponent final : public juce::Component, public juce::DragAndDropContainer,
                             public juce::MenuBarModel
@@ -53,6 +54,7 @@ private:
 
     NodeGraphPanel nodeGraphPanel;
     ViewerPanel viewerPanel;
+    creation::ui::FrustyComponent frustyPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

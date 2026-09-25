@@ -24,18 +24,18 @@ NodeGraphPanel::NodeGraphPanel()
     // addAndMakeVisible(compileButton);
     // addAndMakeVisible(saveButton);
 
-    auto* colorNode = ce::node_system::AddRegisteredNode(graph, registry, "material.constant.color");
-    auto* outputNode = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output");
-    if (colorNode && outputNode) {
-        colorNode->SetEditorPosition(20.0f, 100.0f);
-        outputNode->SetEditorPosition(240.0f, 100.0f);
-        const auto valueInput = std::find_if(colorNode->Inputs().begin(), colorNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "value"; });
-        if (valueInput != colorNode->Inputs().end()) {
-            if (auto* colorValuePin = colorNode->FindPin(valueInput->id)) colorValuePin->defaultValue = ce::node_system::Vec3Default{ 0.8f, 0.8f, 0.8f };
-        }
-        const auto baseColorInput = std::find_if(outputNode->Inputs().begin(), outputNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "baseColor"; });
-        if (baseColorInput != outputNode->Inputs().end()) graph.Connect(colorNode->Id(), colorNode->Outputs().front().id, outputNode->Id(), baseColorInput->id);
-    }
+    // auto* colorNode = ce::node_system::AddRegisteredNode(graph, registry, "material.constant.color");
+    // auto* outputNode = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output");
+    // if (colorNode && outputNode) {
+    //     colorNode->SetEditorPosition(20.0f, 100.0f);
+    //     outputNode->SetEditorPosition(240.0f, 100.0f);
+    //     const auto valueInput = std::find_if(colorNode->Inputs().begin(), colorNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "value"; });
+    //     if (valueInput != colorNode->Inputs().end()) {
+    //         if (auto* colorValuePin = colorNode->FindPin(valueInput->id)) colorValuePin->defaultValue = ce::node_system::Vec3Default{ 0.8f, 0.8f, 0.8f };
+    //     }
+    //     const auto baseColorInput = std::find_if(outputNode->Inputs().begin(), outputNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "baseColor"; });
+    //     if (baseColorInput != outputNode->Inputs().end()) graph.Connect(colorNode->Id(), colorNode->Outputs().front().id, outputNode->Id(), baseColorInput->id);
+    // }
     graphComponent.GraphReplaced();
 
     saveButton.onClick = [this]() {
