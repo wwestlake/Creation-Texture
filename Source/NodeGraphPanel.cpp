@@ -20,33 +20,9 @@ NodeGraphPanel::NodeGraphPanel()
 {
     addAndMakeVisible(paletteComponent);
     addAndMakeVisible(graphComponent);
-    // addAndMakeVisible(frusty);
-    // addAndMakeVisible(compileButton);
-    // addAndMakeVisible(saveButton);
 
-    // auto* colorNode = ce::node_system::AddRegisteredNode(graph, registry, "material.constant.color");
-    // auto* outputNode = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output");
-    // if (colorNode && outputNode) {
-    //     colorNode->SetEditorPosition(20.0f, 100.0f);
-    //     outputNode->SetEditorPosition(240.0f, 100.0f);
-    //     const auto valueInput = std::find_if(colorNode->Inputs().begin(), colorNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "value"; });
-    //     if (valueInput != colorNode->Inputs().end()) {
-    //         if (auto* colorValuePin = colorNode->FindPin(valueInput->id)) colorValuePin->defaultValue = ce::node_system::Vec3Default{ 0.8f, 0.8f, 0.8f };
-    //     }
-    //     const auto baseColorInput = std::find_if(outputNode->Inputs().begin(), outputNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "baseColor"; });
-    //     if (baseColorInput != outputNode->Inputs().end()) graph.Connect(colorNode->Id(), colorNode->Outputs().front().id, outputNode->Id(), baseColorInput->id);
-    // }
-    graphComponent.GraphReplaced();
-
-    saveButton.onClick = [this]() {
-        if (onSaveRequested) {
-            std::string jsonStr = ce::node_system::SerializeGraph(graph);
-            onSaveRequested(juce::String(jsonStr));
-        }
-    };
-
-    compileButton.onClick = [this]() {
-        compileGraph();
+    graphComponent.onGraphChanged = [this]() {
+        if (onGraphEdited) onGraphEdited();
     };
 
     graphComponent.onGetNodeExtraHeight = [this](ce::node_system::NodeId id) {
@@ -94,17 +70,14 @@ NodeGraphPanel::NodeGraphPanel()
     currentSnapshot->debugColour = juce::Colour(0xff121212);
     currentSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { outColor = vec4(vUV.x, vUV.y, 1.0, 1.0); }";
 
-    compileGraph();
+    clearGraph();
 }
 
 void NodeGraphPanel::addViewer(ViewerNodeEditor* v) {
     activeViewers.add(v);
     v->onCompileRequested = [this]() { compileGraph(); };
     v->onSaveRequested = [this]() {
-        if (this->onSaveRequested) {
-            std::string jsonStr = ce::node_system::SerializeGraph(graph);
-            this->onSaveRequested(juce::String(jsonStr));
-        }
+        if (onSaveRequested) onSaveRequested();
     };
 }
 
@@ -119,12 +92,6 @@ void NodeGraphPanel::resized()
 {
     auto bounds = getLocalBounds();
     paletteComponent.setBounds(bounds.removeFromLeft(200));
-    // frusty.setBounds(bounds.removeFromRight(300));
-    
-    auto topBar = bounds.removeFromTop(40);
-    // saveButton.setBounds(topBar.removeFromLeft(100).reduced(5));
-    // compileButton.setBounds(topBar.removeFromLeft(100).reduced(5));
-    
     graphComponent.setBounds(bounds);
 }
 
@@ -198,14 +165,8 @@ void NodeGraphPanel::compileGraph() {
             slot.uniformName = tex.uniformName;
             if (projectSession && projectSession->isValid()) {
                 juce::MemoryBlock block;
-                if (projectSession->readEntry(tex.path, block)) {
+                if (projectSession->readEntry(tex.path, block))
                     slot.image = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
-                } else {
-                    juce::File f(juce::String(tex.path));
-                    if (f.existsAsFile()) {
-                        slot.image = juce::ImageFileFormat::loadFrom(f);
-                    }
-                }
             }
             currentSnapshot->imageSlots.push_back(slot);
         }
@@ -237,7 +198,38 @@ public:
 };
 
 
-void NodeGraphPanel::saveGraph(const juce::File& f) {}
-void NodeGraphPanel::loadGraph(const juce::File& f) {}
+juce::String NodeGraphPanel::getGraphText() const
+{
+    return juce::String(ce::node_system::SerializeGraph(graph));
+}
+
+bool NodeGraphPanel::loadGraphText(const juce::String& frgraphText, juce::String& errorMessage)
+{
+    std::string parseError;
+    auto loaded = ce::node_system::DeserializeGraph(frgraphText.toStdString(), parseError);
+    if (loaded == nullptr)
+    {
+        errorMessage = "This material could not be read: " + juce::String(parseError);
+        return false;
+    }
+
+    graph = std::move(*loaded);
+    graph.SetTarget(ce::node_system::GraphTarget::Material);
+    imagePreviewCache.clear();
+    graphComponent.GraphReplaced();
+    compileGraph();
+    return true;
+}
+
+void NodeGraphPanel::clearGraph()
+{
+    // A new material starts with its Material Output node in place - a graph without one does not compile.
+    graph = ce::node_system::Graph("Material", ce::node_system::GraphTarget::Material);
+    if (auto* output = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output"))
+        output->SetEditorPosition(400.0f, 150.0f);
+    imagePreviewCache.clear();
+    graphComponent.GraphReplaced();
+    compileGraph();
+}
 
 

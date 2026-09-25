@@ -128,6 +128,8 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
+    Source/MaterialDocument.cpp
+    Source/MaterialDocument.h
     Source/NodeGraphPanel.cpp
     Source/ViewerPanel.cpp
     Source/NodeGraphPanel.h
