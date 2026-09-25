@@ -55,6 +55,9 @@ private:
     juce::ComboBox viewModeSelector;
     juce::TextButton compileButton{"Compile Graph"};
     juce::TextButton saveButton{"Save to Project"};
+    // Why the preview is not showing the material, in words - empty when the shader compiled.
+    juce::Label statusLabel;
+    void reportShaderStatus(const juce::String& message);
     
     juce::OpenGLContext openGLContext;
 

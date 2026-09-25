@@ -17,6 +17,12 @@ ViewerNodeEditor::ViewerNodeEditor()
     addAndMakeVisible(compileButton);
     addAndMakeVisible(saveButton);
 
+    statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xffff8a80));
+    statusLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xcc1e2227));
+    statusLabel.setJustificationType(juce::Justification::topLeft);
+    statusLabel.setMinimumHorizontalScale(1.0f);
+    addChildComponent(statusLabel);
+
     compileButton.onClick = [this]() {
         if (onCompileRequested) onCompileRequested();
     };
@@ -222,9 +228,11 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
         shaderProgram = std::move(newProgram);
         currentShaderCode = evaluateTextureFunc;
         failedShaderCode.clear();
+        reportShaderStatus({});
     } else {
         failedShaderCode = evaluateTextureFunc;
-        DBG("Material preview shader failed to compile: " << newProgram->getLastError());
+        reportShaderStatus("The preview could not compile this material, so it is still showing the previous one.\n"
+                           + newProgram->getLastError().trim());
     }
 }
 
@@ -352,13 +360,27 @@ void ViewerNodeEditor::openGLContextClosing()
 
 void ViewerNodeEditor::paint(juce::Graphics& g) {}
 
+// Called on the OpenGL thread; the label lives on the message thread.
+void ViewerNodeEditor::reportShaderStatus(const juce::String& message)
+{
+    juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<ViewerNodeEditor>(this), message]() {
+        if (safeThis == nullptr)
+            return;
+        safeThis->statusLabel.setText(message, juce::dontSendNotification);
+        safeThis->statusLabel.setVisible(message.isNotEmpty());
+    });
+}
+
 void ViewerNodeEditor::resized()
 {
     auto bounds = getLocalBounds();
-    auto topBar = bounds.removeFromTop(30);
-    viewModeSelector.setBounds(topBar.reduced(2).removeFromLeft(150));
-    saveButton.setBounds(topBar.reduced(2).removeFromLeft(100));
-    compileButton.setBounds(topBar.reduced(2).removeFromLeft(100));
+    auto topBar = bounds.removeFromTop(30).reduced(2);
+    viewModeSelector.setBounds(topBar.removeFromLeft(150));
+    topBar.removeFromLeft(4);
+    compileButton.setBounds(topBar.removeFromLeft(110));
+    topBar.removeFromLeft(4);
+    saveButton.setBounds(topBar.removeFromLeft(110));
+    statusLabel.setBounds(bounds.removeFromBottom(juce::jmin(90, bounds.getHeight())).reduced(4));
 }
 
 void ViewerNodeEditor::mouseDown(const juce::MouseEvent& e)
