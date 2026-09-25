@@ -143,10 +143,13 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
         uniform mat4 model;
         out vec2 vUV;
         out vec3 vNormal;
+        out vec3 vWorldPos;
         void main() {
             vUV = aUV;
             vNormal = mat3(model) * aNormal;
-            gl_Position = projection * view * model * vec4(aPos, 1.0);
+            vec4 wPos = model * vec4(aPos, 1.0);
+            vWorldPos = wPos.xyz;
+            gl_Position = projection * view * wPos;
         }
     )";
     
@@ -154,21 +157,53 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
         #version 330 core
         in vec2 vUV;
         in vec3 vNormal;
+        in vec3 vWorldPos;
         out vec4 FragColor;
         
         )" + evaluateTextureFunc + R"(
         
         void main() {
-            vec4 texColor;
-            EvaluateTexture(vUV, texColor);
+            vec3 baseColor;
+            float metallic;
+            float roughness;
+            vec3 normal;
+            vec3 cameraVector = normalize(-vWorldPos);
+            EvaluateMaterial(vUV, vWorldPos, vNormal, cameraVector, 0.0, baseColor, metallic, roughness, normal);
             
-            vec3 norm = normalize(vNormal);
-            vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
-            float diff = max(dot(norm, lightDir), 0.0);
-            vec3 ambient = vec3(0.3);
-            vec3 diffuse = diff * vec3(0.7);
+            vec3 N = normalize(vNormal);
+            // In a real PBR shader, 'normal' from EvaluateMaterial (which is a tangent-space normal map)
+            // would be transformed using TBN. For this basic preview, if 'normal' is default (0.5,0.5,1.0),
+            // we just use N.
+            vec3 mappedNormal = normal * 2.0 - 1.0;
+            // Hacky non-tangent bump:
+            if (length(mappedNormal) > 0.1) {
+                // N = normalize(N + mappedNormal * 0.2);
+            }
             
-            FragColor = vec4(texColor.rgb * (ambient + diffuse), texColor.a);
+            vec3 V = normalize(-vWorldPos); // simple camera at 0,0,0 in view space, so just -worldPos roughly
+            vec3 L = normalize(vec3(0.5, 1.0, 0.5));
+            vec3 H = normalize(V + L);
+            
+            float NdotL = max(dot(N, L), 0.0);
+            float NdotH = max(dot(N, H), 0.0);
+            
+            vec3 F0 = mix(vec3(0.04), baseColor, metallic);
+            
+            // Basic Cook-Torrance style specular
+            float alpha = max(roughness * roughness, 0.001);
+            float D = alpha*alpha / (3.14159 * pow(NdotH*NdotH * (alpha*alpha - 1.0) + 1.0, 2.0));
+            
+            vec3 specular = F0 * D;
+            vec3 diffuse = baseColor * (1.0 - metallic) * NdotL;
+            
+            vec3 ambient = baseColor * 0.1;
+            
+            vec3 finalColor = ambient + diffuse + specular + emissive;
+            
+            // Gamma correction
+            finalColor = pow(finalColor, vec3(1.0/2.2));
+            
+            FragColor = vec4(finalColor, 1.0);
         }
     )";
     
@@ -184,7 +219,7 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
 void ViewerNodeEditor::newOpenGLContextCreated()
 {
     createGeometries();
-    compileShaderProgram("void EvaluateTexture(in vec2 vUV, out vec4 outColor) { outColor = vec4(vUV.x, vUV.y, 1.0, 1.0); }");
+    compileShaderProgram("void EvaluateMaterial(in vec2 vUV, in vec3 worldPosition, in vec3 worldNormal, in vec3 cameraVector, in float time, out vec3 baseColor, out float metallic, out float roughness, out vec3 normal) { baseColor = vec3(vUV.x, vUV.y, 1.0); metallic=0.0; roughness=0.5; normal=vec3(0.5,0.5,1.0); }\nvec3 EvaluateWorldPositionOffset(in vec3 localPosition, in vec3 worldPosition, in vec3 worldNormal, in vec3 cameraVector, in float time, in vec2 vUV) { return vec3(0.0); }");
 }
 
 void ViewerNodeEditor::renderOpenGL()

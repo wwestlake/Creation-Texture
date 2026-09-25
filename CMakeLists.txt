@@ -73,6 +73,13 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     set(CREATION_TEXTURE_INTEROP_TARGET creation_suite_interop)
 endif()
 
+
+set(CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/MaterialSystem/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/MaterialSystem" "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedMaterialSystem")
+    set(CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET creation_suite_material_system)
+endif()
+
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime"
                      "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedFrustPluginRuntime")
@@ -125,10 +132,6 @@ target_sources(CreationTextureApp PRIVATE
     Source/ViewerPanel.cpp
     Source/NodeGraphPanel.h
     Source/ViewerPanel.h
-    Source/TextureNodeCatalog.cpp
-    Source/TextureNodeCatalog.h
-    Source/TextureCompiler.cpp
-    Source/TextureCompiler.h
     Source/ViewerNodeEditor.cpp
     Source/ViewerNodeEditor.h
     Source/ContrastAdjustmentEditor.cpp
@@ -155,6 +158,7 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_INTEROP_TARGET}
     ${CREATION_TEXTURE_NODE_EDITOR_UI_TARGET}
     creation_suite_node_system
+    ${CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET}
     creation_texture_language_host
     juce::juce_gui_extra
     juce::juce_opengl

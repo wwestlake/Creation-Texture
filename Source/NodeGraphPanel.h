@@ -2,7 +2,9 @@
 
 #include <JuceHeader.h>
 #include <node_system/graph.h>
-#include <node_system/node_library.h>
+#include <node_system/type_registry.h>
+#include <creation/material/material_nodes.h>
+#include <creation/material/material_compiler.h>
 #include <creation/node_editor_ui/NodeGraphComponent.h>
 #include <creation/node_editor_ui/NodePalette.h>
 #include <creation/ui/FrustyComponent.h>
@@ -32,10 +34,12 @@ public:
     void loadGraph(const juce::File& file);
     void setProjectSession(creation::assets::ProjectSession* session) { projectSession = session; }
     std::function<bool(juce::String&)> onEnsureProjectSessionActive;
+    std::function<void(const juce::String&)> onSaveRequested;
+    void loadGraphFromJson(const juce::String& json);
 private:
     void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
 
-    ce::node_system::NodeLibraryRegistry registry;
+    ce::node_system::NodeTypeRegistry registry;
     ce::node_system::Graph graph;
 
     creation::node_editor_ui::NodeGraphComponent graphComponent;
@@ -43,6 +47,7 @@ private:
     creation::ui::FrustyComponent frusty;
     
     juce::TextButton compileButton{"Compile Graph"};
+    juce::TextButton saveButton{"Save to Project"};
     std::shared_ptr<TextureFrameSnapshot> currentSnapshot;
     juce::Array<juce::Component::SafePointer<ViewerNodeEditor>> activeViewers;
     creation::assets::ProjectSession* projectSession = nullptr;
