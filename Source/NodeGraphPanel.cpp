@@ -1,53 +1,96 @@
 #include <creation/assets/ProjectAssetService.h>
 #include "NodeGraphPanel.h"
-#include "TextureNodeCatalog.h"
+#include "node_system/frgraph_serialization.h"
 #include "ViewerNodeEditor.h"
 #include "ContrastAdjustmentEditor.h"
-#include "TextureCompiler.h"
+
+namespace {
+    ce::node_system::NodeTypeRegistry BuildMaterialRegistry() {
+        ce::node_system::NodeTypeRegistry reg;
+        ce::material::RegisterMaterialNodes(reg);
+        return reg;
+    }
+}
 
 NodeGraphPanel::NodeGraphPanel()
-    : registry(creation_texture::nodes::BuildTextureNodeCatalog()),
-      graph("Procedural", ce::node_system::GraphTarget::Dataflow),
-      graphComponent(graph, registry.TypeRegistry()),
-      paletteComponent(registry.TypeRegistry())
+    : registry(BuildMaterialRegistry()),
+      graph("Material", ce::node_system::GraphTarget::Material),
+      graphComponent(graph, registry),
+      paletteComponent(registry)
 {
     addAndMakeVisible(paletteComponent);
     addAndMakeVisible(graphComponent);
     addAndMakeVisible(frusty);
-    
     addAndMakeVisible(compileButton);
+    addAndMakeVisible(saveButton);
+
+    auto* colorNode = ce::node_system::AddRegisteredNode(graph, registry, "material.constant.color");
+    auto* outputNode = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output");
+    if (colorNode && outputNode) {
+        colorNode->SetEditorPosition(20.0f, 100.0f);
+        outputNode->SetEditorPosition(240.0f, 100.0f);
+        const auto valueInput = std::find_if(colorNode->Inputs().begin(), colorNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "value"; });
+        if (valueInput != colorNode->Inputs().end()) {
+            if (auto* colorValuePin = colorNode->FindPin(valueInput->id)) colorValuePin->defaultValue = ce::node_system::Vec3Default{ 0.8f, 0.8f, 0.8f };
+        }
+        const auto baseColorInput = std::find_if(outputNode->Inputs().begin(), outputNode->Inputs().end(), [](const ce::node_system::Pin& pin) { return pin.name == "baseColor"; });
+        if (baseColorInput != outputNode->Inputs().end()) graph.Connect(colorNode->Id(), colorNode->Outputs().front().id, outputNode->Id(), baseColorInput->id);
+    }
+    graphComponent.GraphReplaced();
+
+    saveButton.onClick = [this]() {
+        if (onSaveRequested) {
+            std::string jsonStr = ce::node_system::SerializeGraph(graph);
+            onSaveRequested(juce::String(jsonStr));
+        }
+    };
+
     compileButton.onClick = [this]() {
-        auto result = creation_texture::CompileTextureGraph(graph, registry.TypeRegistry());
-        if (result.ok) {
+        ce::material::MaterialCompileResult res = ce::material::CompileMaterialGraph(graph, registry);
+        if (!res.ok) {
+            juce::String errStr;
+            for (const auto& err : res.errors) errStr += juce::String(err) + "\n";
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compile Error", errStr);
+        } else {
             currentSnapshot = std::make_shared<TextureFrameSnapshot>();
-            currentSnapshot->generatedGlsl = result.source.declarations + "\n" + result.source.evaluateFunction;
-            currentSnapshot->textures = result.source.textures;
+            currentSnapshot->generatedGlsl = res.source.declarations + "\n" + res.source.evaluateFunction;
+            for (size_t i = 0; i < res.source.textures.size(); ++i) {
+                  const auto& tex = res.source.textures[i];
+                  TextureFrameImageSlot slot;
+                  slot.uniformName = tex.uniformName;
+                  if (projectSession && projectSession->isValid()) {
+                      juce::MemoryBlock block;
+                      if (projectSession->readEntry(tex.path, block)) {
+                          slot.image = juce::ImageFileFormat::loadFrom(block.getData(), block.getSize());
+                      } else {
+                          juce::File f(juce::String(tex.path));
+                          if (f.existsAsFile()) {
+                              slot.image = juce::ImageFileFormat::loadFrom(f);
+                          }
+                      }
+                  }
+                  currentSnapshot->imageSlots.push_back(slot);
+            }
             currentSnapshot->debugColour = juce::Colour(0xff121212);
-            
             for (auto& viewer : activeViewers) {
                 if (viewer != nullptr) viewer->setSnapshot(currentSnapshot);
             }
-        } else {
-            juce::String errs = "Compile Failed:\n";
-            for (const auto& err : result.errors) errs += juce::String(err) + "\n";
-            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compiler Error", errs);
         }
     };
 
     graphComponent.onGetNodeExtraHeight = [this](ce::node_system::NodeId id) {
         if (auto* node = graph.FindNode(id)) {
-            if (node->TypeName() == creation_texture::nodes::NodeType::ImageInput)
-                return 120.0f;
+            if (node->TypeName() == "material.texture.sample2d") return 120.0f;
         }
         return 0.0f;
     };
 
     graphComponent.onPaintNode = [this](juce::Graphics& g, ce::node_system::NodeId id, juce::Rectangle<float> bounds) {
         if (auto* node = graph.FindNode(id)) {
-            if (node->TypeName() == creation_texture::nodes::NodeType::ImageInput) {
+            if (node->TypeName() == "material.texture.sample2d") {
                 std::string assetPath;
                 for (const auto& pin : node->Inputs()) {
-                    if (pin.name == creation_texture::nodes::PinName::AssetPath) {
+                    if (pin.name == "texture") {
                         if (std::holds_alternative<std::string>(pin.defaultValue))
                             assetPath = std::get<std::string>(pin.defaultValue);
                         break;
@@ -91,21 +134,66 @@ void NodeGraphPanel::paint(juce::Graphics& g)
 void NodeGraphPanel::resized()
 {
     auto bounds = getLocalBounds();
-    paletteComponent.setBounds(bounds.removeFromLeft(250));
+    paletteComponent.setBounds(bounds.removeFromLeft(200));
+    frusty.setBounds(bounds.removeFromRight(300));
     
     auto topBar = bounds.removeFromTop(40);
-    compileButton.setBounds(topBar.reduced(4).removeFromLeft(120));
+    saveButton.setBounds(topBar.removeFromLeft(100).reduced(5));
+    compileButton.setBounds(topBar.removeFromLeft(100).reduced(5));
     
     graphComponent.setBounds(bounds);
-    
-    frusty.setBounds(getLocalBounds().getRight() - 140, getLocalBounds().getBottom() - 140, 120, 120);
+}
+
+void NodeGraphPanel::handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds)
+{
+    auto* node = graph.FindNode(id);
+    if (!node) return;
+
+    if (node->TypeName() == "material.texture.sample2d")
+    {
+        if (!projectSession || !projectSession->isValid()) {
+            juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Texture Picker", "No active project.");
+            return;
+        }
+        auto patchAssets = projectSession->getManifest().assetCatalog.query({ creation::assets::AssetKind::texture });
+        juce::PopupMenu menu;
+        menu.addSectionHeader("Load Texture");
+        if (patchAssets.isEmpty()) {
+            menu.addItem(1, "No textures found in project", false);
+        } else {
+            int itemId = 100;
+            std::vector<creation::assets::AssetDescriptor> assets;
+            for (const auto& a : patchAssets) {
+                menu.addItem(itemId++, a.displayName);
+                assets.push_back(a);
+            }
+            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this),
+                [this, id, assets](int result) {
+                    if (result >= 100) {
+                        int index = result - 100;
+                        if (index < assets.size()) {
+                            if (auto* n = graph.FindNode(id)) {
+                                for (auto& pin : n->Inputs()) {
+                                    if (pin.name == "texture") {
+                                        if (auto* mutablePin = n->FindPin(pin.id))
+                                            mutablePin->defaultValue = assets[index].logicalPath.toStdString();
+                                        break;
+                                    }
+                                }
+                                graphComponent.repaint();
+                            }
+                        }
+                    }
+                });
+        }
+    }
 }
 
 bool NodeGraphPanel::isInterestedInFileDrag(const juce::StringArray& files)
 {
-    for (const auto& f : files)
-    {
-        if (f.endsWithIgnoreCase(".png") || f.endsWithIgnoreCase(".jpg") || f.endsWithIgnoreCase(".jpeg"))
+    for (const auto& f : files) {
+        juce::File file(f);
+        if (file.hasFileExtension("png") || file.hasFileExtension("jpg") || file.hasFileExtension("jpeg"))
             return true;
     }
     return false;
@@ -115,52 +203,7 @@ void NodeGraphPanel::fileDragEnter(const juce::StringArray& files, int x, int y)
 void NodeGraphPanel::fileDragMove(const juce::StringArray& files, int x, int y) {}
 void NodeGraphPanel::fileDragExit(const juce::StringArray& files) {}
 
-void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y)
-{
-    juce::String err;
-    if (onEnsureProjectSessionActive && !onEnsureProjectSessionActive(err))
-        return;
-
-    if (!projectSession || !projectSession->isValid())
-        return;
-
-    const auto world = graphComponent.ScreenToWorld(juce::Point<float>((float)x, (float)y));
-    float currentY = world.y;
-
-    for (const auto& file : files)
-    {
-        if (file.endsWithIgnoreCase(".png") || file.endsWithIgnoreCase(".jpg") || file.endsWithIgnoreCase(".jpeg"))
-        {
-            juce::File sourceFile(file);
-            creation::assets::ProjectAssetService::ImportOptions options;
-            options.kind = creation::assets::AssetKind::binary;
-            creation::assets::AssetDescriptor descriptor;
-            juce::String errorMessage;
-            
-            if (creation::assets::ProjectAssetService::importFile(*projectSession, sourceFile, options, descriptor, errorMessage))
-            {
-                std::string error;
-                auto* node = ce::node_system::AddRegisteredNode(graph, registry.TypeRegistry(), creation_texture::nodes::NodeType::ImageInput, &error);
-                if (node)
-                {
-                    node->SetEditorPosition(world.x, currentY);
-                    
-                    for (const auto& inputPin : node->Inputs())
-                    {
-                        if (inputPin.name == creation_texture::nodes::PinName::AssetPath)
-                        {
-                            if (auto* mutablePin = node->FindPin(inputPin.id))
-                                mutablePin->defaultValue = descriptor.logicalPath.toStdString();
-                            break;
-                        }
-                    }
-                    currentY += 100.0f;
-                }
-            }
-        }
-    }
-    graphComponent.repaint();
-}
+void NodeGraphPanel::filesDropped(const juce::StringArray& files, int x, int y) {}
 
 class EditorDocumentWindow : public juce::DocumentWindow {
 public:
@@ -170,62 +213,14 @@ public:
         setUsingNativeTitleBar(true);
         setContentOwned(content, true);
         setResizable(true, true);
-        setDropShadowEnabled(true);
+        centreWithSize(800, 600);
+        setVisible(true);
     }
     void closeButtonPressed() override { delete this; }
 };
 
-void NodeGraphPanel::handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds)
-{
-    auto* node = graph.FindNode(id);
-    if (!node) return;
 
-    if (node->TypeName() == creation_texture::nodes::NodeType::Viewer)
-    {
-        auto viewer = new ViewerNodeEditor();
-        viewer->setSnapshot(currentSnapshot);
-        activeViewers.add(viewer);
-        
-        auto window = new EditorDocumentWindow("Viewer", viewer);
-        window->setBounds(juce::Rectangle<int>(400, 400).withCentre(localPointToGlobal(bounds.getCentre()).toInt()));
-        window->setVisible(true);
-    }
-    else if (node->TypeName() == creation_texture::nodes::NodeType::ContrastAdjustment)
-    {
-        auto window = new EditorDocumentWindow("Contrast Adjustment", new ContrastAdjustmentEditor());
-        window->setBounds(juce::Rectangle<int>(350, 350).withCentre(localPointToGlobal(bounds.getCentre()).toInt()));
-        window->setVisible(true);
-    }
-}
-#include <node_system/frgraph_serialization.h>
-
-void NodeGraphPanel::saveGraph(const juce::File& file)
-{
-    auto text = ce::node_system::SerializeGraph(graph);
-    file.replaceWithText(text);
-}
-
-void NodeGraphPanel::loadGraph(const juce::File& file)
-{
-    if (!file.existsAsFile()) return;
-    
-    std::string errStr;
-    auto newGraph = ce::node_system::DeserializeGraph(file.loadFileAsString().toStdString(), errStr);
-    
-    if (newGraph)
-    {
-        graph = std::move(*newGraph);
-        graphComponent.GraphReplaced();
-        graphComponent.repaint();
-    }
-    else
-    {
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Load Error", "Failed to load graph:\n" + juce::String(errStr));
-    }
-}
-
-
-
-
+void NodeGraphPanel::saveGraph(const juce::File& f) {}
+void NodeGraphPanel::loadGraph(const juce::File& f) {}
 
 
