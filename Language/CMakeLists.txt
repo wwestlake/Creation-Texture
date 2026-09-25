@@ -1,4 +1,4 @@
-﻿add_library(creation_texture_language_host STATIC
+add_library(creation_texture_language_host STATIC
     AppLanguagePolicy.cpp
     AppLanguagePolicy.h
     TexturePluginHost.cpp
@@ -26,3 +26,6 @@ else()
     target_compile_definitions(creation_texture_language_host PUBLIC CREATION_TEXTURE_ENABLE_FRUST_PLUGINS=0)
 endif()
 
+
+# Auto-generated output name overrides
+set_target_properties(creation_texture_language_host PROPERTIES OUTPUT_NAME "djehuti_texture_language_host")

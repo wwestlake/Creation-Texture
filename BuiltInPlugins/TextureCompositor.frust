@@ -1,0 +1,115 @@
+manifest "{\"name\":\"texture_compositor\",\"version\":\"0.1.0\",\"description\":\"Non-destructive layer compositing with GIMP-style blend modes for Creation Texture.\",\"entryPoints\":[\"texture_composite_layers\"],\"requiredHostFunctions\":[],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Blend mode constants
+// 0: Normal
+// 1: Multiply
+// 2: Screen
+// 3: Overlay
+
+fn blend_normal(bg: f64, fg: f64, fg_alpha: f64) -> f64 = {
+    (fg * fg_alpha) + (bg * (1.0 - fg_alpha))
+}
+
+fn blend_multiply(bg: f64, fg: f64, fg_alpha: f64) -> f64 = {
+    let result: f64 = bg * fg;
+    (result * fg_alpha) + (bg * (1.0 - fg_alpha))
+}
+
+fn blend_screen(bg: f64, fg: f64, fg_alpha: f64) -> f64 = {
+    let result: f64 = 1.0 - ((1.0 - bg) * (1.0 - fg));
+    (result * fg_alpha) + (bg * (1.0 - fg_alpha))
+}
+
+fn blend_overlay(bg: f64, fg: f64, fg_alpha: f64) -> f64 = {
+    let result: f64 = if (bg < 0.5) {
+        2.0 * bg * fg
+    } else {
+        1.0 - 2.0 * (1.0 - bg) * (1.0 - fg)
+    };
+    (result * fg_alpha) + (bg * (1.0 - fg_alpha))
+}
+
+fn clamp01(value: f64) -> f64 = {
+    if (value < 0.0) { 0.0 } else if (value > 1.0) { 1.0 } else { value }
+}
+
+// Composites the foreground onto the background, writing to output.
+// All buffers must be the same size (width * height * 4).
+pub fn texture_composite_layers(
+    bg_pixels: raw* u8,
+    fg_pixels: raw* u8,
+    out_pixels: raw* u8,
+    width: i64,
+    height: i64,
+    stride: i64,
+    blend_mode: i64,
+    global_opacity: f64
+) -> i64 = {
+
+    let mut y: i64 = 0;
+    let mut x: i64 = 0;
+    let mut offset: i64 = 0;
+
+    let mut bg_r: f64 = 0.0;
+    let mut bg_g: f64 = 0.0;
+    let mut bg_b: f64 = 0.0;
+    let mut bg_a: f64 = 0.0;
+
+    let mut fg_r: f64 = 0.0;
+    let mut fg_g: f64 = 0.0;
+    let mut fg_b: f64 = 0.0;
+    let mut fg_a: f64 = 0.0;
+
+    let mut out_r: f64 = 0.0;
+    let mut out_g: f64 = 0.0;
+    let mut out_b: f64 = 0.0;
+    let mut out_a: f64 = 0.0;
+
+    while (y < height) {
+        x = 0;
+        while (x < width) {
+            offset = y * stride + x * 4;
+
+            bg_r = *(bg_pixels + offset) / 255.0;
+            bg_g = *(bg_pixels + offset + 1) / 255.0;
+            bg_b = *(bg_pixels + offset + 2) / 255.0;
+            bg_a = *(bg_pixels + offset + 3) / 255.0;
+
+            fg_r = *(fg_pixels + offset) / 255.0;
+            fg_g = *(fg_pixels + offset + 1) / 255.0;
+            fg_b = *(fg_pixels + offset + 2) / 255.0;
+            fg_a = (*(fg_pixels + offset + 3) / 255.0) * global_opacity;
+
+            if (blend_mode == 1) {
+                out_r = blend_multiply(bg_r, fg_r, fg_a);
+                out_g = blend_multiply(bg_g, fg_g, fg_a);
+                out_b = blend_multiply(bg_b, fg_b, fg_a);
+            } else if (blend_mode == 2) {
+                out_r = blend_screen(bg_r, fg_r, fg_a);
+                out_g = blend_screen(bg_g, fg_g, fg_a);
+                out_b = blend_screen(bg_b, fg_b, fg_a);
+            } else if (blend_mode == 3) {
+                out_r = blend_overlay(bg_r, fg_r, fg_a);
+                out_g = blend_overlay(bg_g, fg_g, fg_a);
+                out_b = blend_overlay(bg_b, fg_b, fg_a);
+            } else {
+                // Normal blending default
+                out_r = blend_normal(bg_r, fg_r, fg_a);
+                out_g = blend_normal(bg_g, fg_g, fg_a);
+                out_b = blend_normal(bg_b, fg_b, fg_a);
+            }
+
+            // Output Alpha is simplified: standard over operator
+            out_a = fg_a + bg_a * (1.0 - fg_a);
+
+            *(out_pixels + offset) = clamp01(out_r) * 255.0;
+            *(out_pixels + offset + 1) = clamp01(out_g) * 255.0;
+            *(out_pixels + offset + 2) = clamp01(out_b) * 255.0;
+            *(out_pixels + offset + 3) = clamp01(out_a) * 255.0;
+
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}

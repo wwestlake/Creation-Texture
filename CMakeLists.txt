@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.22)
 
 set(CreationTexture_VERSION "0.0.1" CACHE STRING "Djehuti Texture product version")
 project(CreationTexture VERSION ${CreationTexture_VERSION} LANGUAGES CXX)
@@ -52,11 +52,32 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/UI/CMakeLists.txt")
     set(CREATION_TEXTURE_UI_TARGET creation_suite_ui)
 endif()
 
+set(CREATION_TEXTURE_DOCK_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/JuceDocking/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/JuceDocking"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedJuceDocking")
+    set(CREATION_TEXTURE_DOCK_TARGET CreationDock)
+endif()
+
+set(CREATION_TEXTURE_RENDER_TARGET "")
+if(EXISTS "/Render/CMakeLists.txt")
+    add_subdirectory("/Render"
+                     "/CreationSuiteSharedRender")
+    set(CREATION_TEXTURE_RENDER_TARGET creation_suite_render)
+endif()
+
 set(CREATION_TEXTURE_INTEROP_TARGET "")
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Interop/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/Interop"
                      "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedInterop")
     set(CREATION_TEXTURE_INTEROP_TARGET creation_suite_interop)
+endif()
+
+
+set(CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/MaterialSystem/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/MaterialSystem" "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedMaterialSystem")
+    set(CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET creation_suite_material_system)
 endif()
 
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/FrustPluginRuntime/CMakeLists.txt")
@@ -83,7 +104,7 @@ endif()
 add_subdirectory(Language)
 
 juce_add_gui_app(CreationTextureApp
-    PRODUCT_NAME "Djehuti Texture"
+    PRODUCT_NAME "DjehutiTexture"
     COMPANY_NAME "LagDaemon Software"
     BUNDLE_ID "com.lagdaemon.creationtexture"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/UI/assets/creation_texture.png"
@@ -107,6 +128,14 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
+    Source/NodeGraphPanel.cpp
+    Source/ViewerPanel.cpp
+    Source/NodeGraphPanel.h
+    Source/ViewerPanel.h
+    Source/ViewerNodeEditor.cpp
+    Source/ViewerNodeEditor.h
+    Source/ContrastAdjustmentEditor.cpp
+    Source/ContrastAdjustmentEditor.h
     Source/Branding.cpp
     Source/Branding.h
     Source/Shared/CreationSuiteHeaderBar.h
@@ -124,9 +153,12 @@ target_link_libraries(CreationTextureApp PRIVATE
     ${CREATION_TEXTURE_VFS_TARGET}
     ${CREATION_TEXTURE_SERVICES_TARGET}
     ${CREATION_TEXTURE_UI_TARGET}
+    ${CREATION_TEXTURE_DOCK_TARGET}
+    ${CREATION_TEXTURE_RENDER_TARGET}
     ${CREATION_TEXTURE_INTEROP_TARGET}
     ${CREATION_TEXTURE_NODE_EDITOR_UI_TARGET}
     creation_suite_node_system
+    ${CREATION_TEXTURE_MATERIAL_SYSTEM_TARGET}
     creation_texture_language_host
     juce::juce_gui_extra
     juce::juce_opengl
@@ -143,7 +175,7 @@ if(MSVC)
 endif()
 
 install(TARGETS CreationTextureApp RUNTIME DESTINATION . COMPONENT CreationTexture)
-install(FILES BuiltInPlugins/TextureAdjustments.frust DESTINATION plugins COMPONENT CreationTexture)
+install(FILES BuiltInPlugins/TextureAdjustments.frust BuiltInPlugins/TextureCompositor.frust DESTINATION plugins COMPONENT CreationTexture)
 
 add_executable(CreationTexturePluginSmoke tests/TexturePluginSmoke.cpp)
 target_link_libraries(CreationTexturePluginSmoke PRIVATE creation_suite_frust_plugin_runtime)
@@ -151,3 +183,13 @@ target_compile_definitions(CreationTexturePluginSmoke PRIVATE
     CREATION_TEXTURE_ADJUSTMENTS_PLUGIN="${CMAKE_CURRENT_SOURCE_DIR}/BuiltInPlugins/TextureAdjustments.frust"
 )
 
+
+add_custom_command(TARGET CreationTextureApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "D:/CreationSuite-Workspaces/gemini-$<LOWER_CASE:$<CONFIG>>-bin"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CreationTextureApp>" "D:/CreationSuite-Workspaces/gemini-$<LOWER_CASE:$<CONFIG>>-bin/"
+    COMMENT "Copying CreationTextureApp to the shared gemini bin directory"
+)
+
+# Auto-generated output name overrides
+set_target_properties(CreationTexturePluginSmoke PROPERTIES OUTPUT_NAME "DjehutiTexturePluginSmoke")
+set_target_properties(CreationTextureApp PROPERTIES OUTPUT_NAME "DjehutiTextureApp")
