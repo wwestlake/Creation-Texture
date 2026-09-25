@@ -42,6 +42,8 @@ private:
     void compileShaderProgram(const std::string& evaluateTextureFunc);
 
     Geometry plane, cube, sphere, cylinder, cone, djehuti;
+    // A 3.2 core context draws nothing unless a vertex array object is bound.
+    GLuint vertexArray = 0;
     
     void buildPlane();
     void buildCube();
@@ -59,6 +61,8 @@ private:
     std::atomic<std::shared_ptr<const TextureFrameSnapshot>> publishedSnapshot;
     std::unique_ptr<juce::OpenGLShaderProgram> shaderProgram;
     std::string currentShaderCode;
+    // The material code whose shader last failed to compile, so it is not retried every frame.
+    std::string failedShaderCode;
     
     float rotationX = 0.0f;
     float rotationY = 0.0f;

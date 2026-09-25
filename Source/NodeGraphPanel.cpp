@@ -90,15 +90,15 @@ NodeGraphPanel::NodeGraphPanel()
         handleNodeDoubleClicked(id, bounds);
     };
     
-    currentSnapshot = std::make_shared<TextureFrameSnapshot>();
-    currentSnapshot->debugColour = juce::Colour(0xff121212);
-    currentSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { outColor = vec4(vUV.x, vUV.y, 1.0, 1.0); }";
 
     compileGraph();
 }
 
 void NodeGraphPanel::addViewer(ViewerNodeEditor* v) {
     activeViewers.add(v);
+    // The graph compiled before this viewer was attached; show that result now, not only after the next compile.
+    if (currentSnapshot != nullptr)
+        v->setSnapshot(currentSnapshot);
     v->onCompileRequested = [this]() { compileGraph(); };
     v->onSaveRequested = [this]() {
         if (this->onSaveRequested) {
