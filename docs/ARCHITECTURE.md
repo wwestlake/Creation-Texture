@@ -1,4 +1,4 @@
-﻿# Creation Texture Architecture
+# Creation Texture Architecture
 
 This app is a domain client of the Creation Suite platform.
 
@@ -16,4 +16,3 @@ This app is a domain client of the Creation Suite platform.
 - domain editing surfaces
 - domain-specific automation and task flows
 - app-local language policy and capability gating
-

@@ -1,0 +1,65 @@
+manifest "{\"name\":\"texture_adjustments\",\"version\":\"0.1.0\",\"description\":\"Offline brightness, contrast, saturation, and gamma processing for Creation Texture.\",\"entryPoints\":[\"texture_apply_adjustments\"],\"requiredHostFunctions\":[{\"name\":\"suite_texture_pow\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+extern fn suite_texture_pow(value: f64, exponent: f64) -> f64;
+
+fn clamp01(value: f64) -> f64 = {
+    if (value < 0.0) {
+        0.0
+    } else if (value > 1.0) {
+        1.0
+    } else {
+        value
+    }
+}
+
+pub fn texture_apply_adjustments(pixels: raw* u8,
+                                 width: i64,
+                                 height: i64,
+                                 stride: i64,
+                                 brightness: f64,
+                                 contrast: f64,
+                                 saturation: f64,
+                                 gamma: f64) -> i64 = {
+    let safeGamma: f64 = if (gamma < 0.01) { 0.01 } else { gamma };
+    let inverseGamma: f64 = 1.0 / safeGamma;
+    let mut y: i64 = 0;
+    let mut x: i64 = 0;
+    let mut offset: i64 = 0;
+    let mut redByte: raw* u8 = pixels;
+    let mut greenByte: raw* u8 = pixels;
+    let mut blueByte: raw* u8 = pixels;
+    let mut red: f64 = 0.0;
+    let mut green: f64 = 0.0;
+    let mut blue: f64 = 0.0;
+    let mut luminance: f64 = 0.0;
+
+    while (y < height) {
+        x = 0;
+        while (x < width) {
+            offset = y * stride + x * 4;
+            redByte = pixels + offset;
+            greenByte = redByte + 1;
+            blueByte = redByte + 2;
+
+            red = *redByte / 255.0;
+            green = *greenByte / 255.0;
+            blue = *blueByte / 255.0;
+
+            red = ((red - 0.5) * contrast) + 0.5 + brightness;
+            green = ((green - 0.5) * contrast) + 0.5 + brightness;
+            blue = ((blue - 0.5) * contrast) + 0.5 + brightness;
+
+            luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+            red = luminance + (red - luminance) * saturation;
+            green = luminance + (green - luminance) * saturation;
+            blue = luminance + (blue - luminance) * saturation;
+
+            *redByte = suite_texture_pow(clamp01(red), inverseGamma) * 255.0;
+            *greenByte = suite_texture_pow(clamp01(green), inverseGamma) * 255.0;
+            *blueByte = suite_texture_pow(clamp01(blue), inverseGamma) * 255.0;
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}

@@ -1,23 +1,16 @@
-﻿#pragma once
+#pragma once
 
 #include <JuceHeader.h>
-#include <creation/assets/ProjectManifest.h>
-#include <creation/assets/ProjectSession.h>
-#include <creation/assets/ProjectWorkspaceService.h>
-#include <creation/interop/ProjectRegistry.h>
-#include <creation/services/SuiteAiChatClient.h>
-#include <creation/services/SuiteAiSettings.h>
-#include <creation/services/SuiteContextEngine.h>
-#include <creation/services/SuiteProcessRegistry.h>
-#include <creation/suite/SuiteSettings.h>
-#include <creation/suite/SuiteStoragePaths.h>
-#include <creation/ui/CreationSuiteHeaderBar.h>
-#include <creation/ui/SuiteAiChatPanel.h>
-#include <creation/ui/SuiteShellController.h>
 #include <CreationDock/DockManager.h>
+#include "NodeGraphPanel.h"
+#include "ViewerPanel.h"
+#include <creation/ui/SuiteShellController.h>
+#include <creation/ui/CreationSuiteHeaderBar.h>
+#include <creation/assets/ProjectSession.h>
+#include <creation/ui/FrustyComponent.h>
 
-class MainComponent final : public juce::Component,
-                             private juce::MenuBarModel
+class MainComponent final : public juce::Component, public juce::DragAndDropContainer,
+                            public juce::MenuBarModel
 {
 public:
     MainComponent();
@@ -25,62 +18,43 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    
+    // MenuBarModel overrides
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
 
 private:
-    void configureHeader();
-    void configurePanels();
-    void configureAiPanel();
-    void loadSuiteState();
-    void refreshShellSummary();
     void openProject(const juce::String& projectId);
-    void launchAiCompletion(const creation::services::SuiteContextPacket& packet);
-    creation::assets::SuiteAppDomain currentDomain() const noexcept;
-    juce::String domainDisplayName() const;
-    juce::String registrySummaryText() const;
-    juce::String configSummaryText() const;
-    juce::String workbenchSummaryText() const;
+    bool ensureProjectSessionActive(juce::String& errorMessage);
 
-    juce::StringArray getMenuBarNames() override;
-    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String&) override;
-    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
-    void initialiseDockingWorkspace();
-    void toggleDockPanel(const juce::String& panelId, CreationDock::DockTargetZone fallbackZone);
+    class NonOwningPanelHost : public juce::Component
+    {
+    public:
+        explicit NonOwningPanelHost(juce::Component& contentToHost) : content(contentToHost)
+        {
+            addAndMakeVisible(content);
+        }
+
+        void resized() override
+        {
+            content.setBounds(getLocalBounds());
+        }
+
+    private:
+        juce::Component& content;
+    };
+
+    CreationSuiteHeaderBar headerBar;
+    creation::ui::SuiteShellController suiteShellController;
+    creation::assets::ProjectSession projectSession;
 
     std::unique_ptr<juce::MenuBarComponent> menuBar;
     std::unique_ptr<CreationDock::DockManager> dockManager;
 
-    CreationSuiteHeaderBar headerBar;
-    creation::ui::SuiteShellController suiteShellController;
-    juce::Label titleLabel;
-    juce::Label subtitleLabel;
-    juce::Label runtimeLabel;
-
-    juce::GroupComponent workbenchGroup;
-    juce::GroupComponent resourcesGroup;
-    juce::GroupComponent configGroup;
-
-    juce::TextEditor workbenchSummary;
-    juce::TextEditor resourcesSummary;
-    juce::TextEditor configSummary;
-
-    creation::ui::SuiteAiChatPanel aiPanel;
-    creation::services::SuiteContextEngine contextEngine;
-    creation::services::SuiteAiChatClient aiChatClient;
-    creation::services::SuiteProcessRegistration processRegistration;
-
-    creation::suite::SuiteSettingsStore suiteSettingsStore;
-    creation::services::SuiteAiSettingsStore suiteAiSettingsStore;
-    creation::suite::SuiteSettings suiteSettings;
-    creation::services::SuiteAiSettings suiteAiSettings;
-    creation::assets::ProjectSession projectSession;
-    creation::services::SuiteAiResolvedRuntimeSettings resolvedAiSettings;
-
-    juce::String lastRegistryError;
-    int domainProjectCount = 0;
-    int totalProjectCount = 0;
-
-    juce::String pendingAiPrompt;
-    bool aiCompletionInFlight = false;
+    NodeGraphPanel nodeGraphPanel;
+    ViewerPanel viewerPanel;
+    creation::ui::FrustyComponent frustyPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
