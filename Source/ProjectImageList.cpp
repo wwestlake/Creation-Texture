@@ -1,63 +1,56 @@
-#include "TextureSampleNodePanel.h"
+#include "ProjectImageList.h"
 
 namespace
 {
 constexpr int rowHeight = 64;
-constexpr int titleHeight = 32;
-constexpr int panelWidth = 340;
 constexpr int maxVisibleRows = 6;
 }
 
-TextureSampleNodePanel::TextureSampleNodePanel(juce::Array<ImageChoice> choices,
-                                               const juce::String& currentLogicalPath,
-                                               std::function<void(const juce::String&)> onImageChosen)
+ProjectImageList::ProjectImageList(juce::Array<ImageChoice> choices,
+                                   const juce::String& currentLogicalPath,
+                                   std::function<void(const juce::String&)> onImageChosen)
     : images(std::move(choices)),
       onChosen(std::move(onImageChosen))
 {
-    title.setText("Texture Sample - images in this project", juce::dontSendNotification);
-    title.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    title.setColour(juce::Label::textColourId, juce::Colours::white);
-    addAndMakeVisible(title);
-
     emptyMessage.setText("There are no images in this project yet.", juce::dontSendNotification);
-    emptyMessage.setJustificationType(juce::Justification::centred);
+    emptyMessage.setJustificationType(juce::Justification::centredLeft);
     emptyMessage.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     addChildComponent(emptyMessage);
     emptyMessage.setVisible(images.isEmpty());
 
     list.setModel(this);
     list.setRowHeight(rowHeight);
-    list.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff1e2227));
+    list.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff161a1f));
     addAndMakeVisible(list);
     list.setVisible(! images.isEmpty());
 
     for (int i = 0; i < images.size(); ++i)
         if (images.getReference(i).logicalPath == currentLogicalPath)
             list.selectRow(i);
-
-    const int rows = juce::jlimit(1, maxVisibleRows, images.size());
-    setSize(panelWidth, titleHeight + rows * rowHeight + 8);
 }
 
-void TextureSampleNodePanel::paint(juce::Graphics& g)
+int ProjectImageList::getPreferredHeight() const
 {
-    g.fillAll(juce::Colour(0xff1e2227));
+    return images.isEmpty() ? 28 : juce::jmin(maxVisibleRows, images.size()) * rowHeight + 2;
 }
 
-void TextureSampleNodePanel::resized()
+void ProjectImageList::paint(juce::Graphics& g)
 {
-    auto bounds = getLocalBounds().reduced(4);
-    title.setBounds(bounds.removeFromTop(titleHeight - 4));
-    list.setBounds(bounds);
-    emptyMessage.setBounds(bounds);
+    g.fillAll(juce::Colour(0xff161a1f));
 }
 
-int TextureSampleNodePanel::getNumRows()
+void ProjectImageList::resized()
+{
+    list.setBounds(getLocalBounds());
+    emptyMessage.setBounds(getLocalBounds());
+}
+
+int ProjectImageList::getNumRows()
 {
     return images.size();
 }
 
-void TextureSampleNodePanel::paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool rowIsSelected)
+void ProjectImageList::paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool rowIsSelected)
 {
     if (! juce::isPositiveAndBelow(row, images.size()))
         return;
@@ -83,14 +76,8 @@ void TextureSampleNodePanel::paintListBoxItem(int row, juce::Graphics& g, int wi
     g.drawText(image.details, textArea, juce::Justification::topLeft, true);
 }
 
-void TextureSampleNodePanel::listBoxItemClicked(int row, const juce::MouseEvent&)
+void ProjectImageList::listBoxItemClicked(int row, const juce::MouseEvent&)
 {
-    if (! juce::isPositiveAndBelow(row, images.size()))
-        return;
-
-    if (onChosen)
+    if (juce::isPositiveAndBelow(row, images.size()) && onChosen)
         onChosen(images.getReference(row).logicalPath);
-
-    if (auto* callOut = findParentComponentOfClass<juce::CallOutBox>())
-        callOut->dismiss();
 }

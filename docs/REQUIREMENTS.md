@@ -15,18 +15,28 @@ Do not rename nodes, move controls, or change these workflows without the owner 
 - The suite header's asset window is not the route into Texture's graphs. (It currently shows a Station-era
   "add selected asset to a track" button that does not belong here - separate cleanup.)
 
-## 2. The Texture Sample node
+## 2. The Properties panel - every node, driven by selection
+
+Decided 2026-09-26, replacing an earlier double-click design:
+
+- **No double-click.** Selecting a node shows it in a **Properties panel that can be docked** anywhere in the
+  layout. Select a different node and the panel follows it.
+- **This is for all nodes**, not just Texture Sample. The panel is built from whatever node is selected.
+- **Every value that is editable in that situation is editable in Properties** - not just shown. Each input that
+  is not wired gets an editor for its type (number, colour, vector, toggle, text, image). An input that is wired
+  shows what it is wired from. It is a real editing surface, not a drop-down menu.
+
+### Texture Sample in Properties
 
 - The node is named **Texture Sample** (`material.texture.sample2d`). Its name does not change without the
   owner's say-so.
-- Workflow: place a Texture Sample node on the graph -> **double-click it** -> **a panel opens for that node**
-  -> the panel lists **only the assets this node accepts**: PNG and the other image formats **already in the
-  project**. No audio, no 3D models, nothing the node cannot use. Pick one and the node uses it.
+- Its image input is chosen in its Properties: the panel lists **only the assets this node accepts** - PNG and
+  the other image formats **already in the project**. No audio, no 3D models, nothing the node cannot use.
 - Images are recognised by what they are (image file formats), not by an asset-kind label that nothing sets.
 
 ## 3. The same rule for every node that takes an asset
 
-Any node that consumes an asset gets its own panel on double-click, and that panel shows only the kinds of
+Any node that consumes an asset chooses it in its own Properties, and the list there shows only the kinds of
 asset that node accepts.
 
 ## 4. What the app is for

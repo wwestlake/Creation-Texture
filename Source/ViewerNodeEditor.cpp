@@ -252,7 +252,11 @@ void ViewerNodeEditor::renderOpenGL()
     if (currentSnapshot->generatedGlsl != currentShaderCode && currentSnapshot->generatedGlsl != failedShaderCode
         && !currentSnapshot->generatedGlsl.empty()) {
         compileShaderProgram(currentSnapshot->generatedGlsl);
+    }
+
+    if (currentSnapshot.get() != texturesLoadedFor) {
         loadedTextures.clear();
+        texturesLoadedFor = currentSnapshot.get();
     }
 
     juce::OpenGLHelpers::clear(currentSnapshot->debugColour);

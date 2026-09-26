@@ -66,6 +66,9 @@ private:
     std::string currentShaderCode;
     // The material code whose shader last failed to compile, so it is not retried every frame.
     std::string failedShaderCode;
+    // The snapshot whose images are loaded on the GPU. A new snapshot can reuse the same uniform names with
+    // different images (picking another image does not change the shader), so images reload per snapshot.
+    const TextureFrameSnapshot* texturesLoadedFor = nullptr;
     
     float rotationX = 0.0f;
     float rotationY = 0.0f;

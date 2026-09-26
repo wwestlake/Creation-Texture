@@ -9,6 +9,7 @@
 #include <creation/node_editor_ui/NodePalette.h>
 #include <creation/assets/ProjectSession.h>
 #include "ViewerNodeEditor.h"
+#include "ProjectImageList.h"
 
 class NodeGraphPanel : public juce::Component,
                                  public juce::FileDragAndDropTarget
@@ -36,9 +37,17 @@ public:
     void setProjectSession(creation::assets::ProjectSession* session) { projectSession = session; }
     std::function<void()> onSaveRequested;
     std::function<void()> onGraphEdited;
+    // Selection and wiring changes, for the Properties panel.
+    std::function<void(ce::node_system::NodeId)> onSelectionChanged;
+    std::function<void()> onGraphStructureChanged;
     void compileGraph();
+
+    ce::node_system::Graph& getGraph() noexcept { return graph; }
+    const ce::node_system::NodeTypeRegistry& getRegistry() const noexcept { return registry; }
+    juce::Array<ProjectImageList::ImageChoice> listProjectImages();
+    // A value was changed in the Properties panel.
+    void applyPropertyEdit();
 private:
-    void handleNodeDoubleClicked(ce::node_system::NodeId id, juce::Rectangle<float> bounds);
     static bool isImageAsset(const creation::assets::AssetDescriptor& asset);
     juce::Image getProjectImage(const juce::String& logicalPath);
 

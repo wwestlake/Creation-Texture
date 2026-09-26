@@ -5,6 +5,7 @@
 #include "NodeGraphPanel.h"
 #include "ViewerPanel.h"
 #include "MaterialDocument.h"
+#include "NodePropertiesPanel.h"
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
@@ -64,6 +65,7 @@ private:
 
     NodeGraphPanel nodeGraphPanel;
     ViewerPanel viewerPanel;
+    NodePropertiesPanel propertiesPanel;
     creation::ui::FrustyComponent frustyPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)

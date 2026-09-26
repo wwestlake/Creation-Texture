@@ -48,11 +48,21 @@ MainComponent::MainComponent()
     // Register dock panels
     dockManager->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), CreationDock::DockTargetZone::CenterTab);
     dockManager->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), CreationDock::DockTargetZone::Right);
+    dockManager->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), CreationDock::DockTargetZone::Right);
 
     setSize(1600, 1000);
 
     nodeGraphPanel.setProjectSession(&projectSession);
     nodeGraphPanel.onSaveRequested = [this]() { saveMaterial(); };
+
+    NodePropertiesPanel::Host propertiesHost;
+    propertiesHost.graph = &nodeGraphPanel.getGraph();
+    propertiesHost.registry = &nodeGraphPanel.getRegistry();
+    propertiesHost.listProjectImages = [this]() { return nodeGraphPanel.listProjectImages(); };
+    propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
+    propertiesPanel.setHost(std::move(propertiesHost));
+    nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
+    nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
     nodeGraphPanel.onGraphEdited = [this]() {
         materialDocument.markEdited();
         refreshTitle();
@@ -129,6 +139,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
         menu.addItem(20, "Virtual Engineer");
         menu.addItem(21, "Node Graph");
         menu.addItem(22, "3D Preview");
+        menu.addItem(23, "Properties");
     }
     else if (menuName == "Help")
     {
@@ -163,6 +174,10 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
     else if (menuItemID == 22)
     {
         dockManager->activatePanel("Viewer");
+    }
+    else if (menuItemID == 23)
+    {
+        dockManager->activatePanel("Properties");
     }
     else if (menuItemID >= 30 && menuItemID <= 31)
     {
