@@ -3,7 +3,7 @@
 #include <JuceHeader.h>
 #include <node_system/graph.h>
 #include <node_system/type_registry.h>
-#include "ProjectImageList.h"
+#include "ProjectImagePicker.h"
 
 // Shows the selected node and lets every value that can be changed right now be edited: each input that is not
 // wired gets an editor for its type (number, colour, vector, toggle, text, project image). Built generically from
@@ -15,7 +15,7 @@ public:
     {
         ce::node_system::Graph* graph = nullptr;
         const ce::node_system::NodeTypeRegistry* registry = nullptr;
-        std::function<juce::Array<ProjectImageList::ImageChoice>()> listProjectImages;
+        project_images::Source projectImages;
         // A value was changed in the panel: the graph needs repainting, recompiling, and marking edited.
         std::function<void()> onValueEdited;
     };

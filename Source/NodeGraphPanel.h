@@ -9,7 +9,7 @@
 #include <creation/node_editor_ui/NodePalette.h>
 #include <creation/assets/ProjectSession.h>
 #include "ViewerNodeEditor.h"
-#include "ProjectImageList.h"
+#include "ProjectImagePicker.h"
 
 class NodeGraphPanel : public juce::Component,
                                  public juce::FileDragAndDropTarget
@@ -44,12 +44,14 @@ public:
 
     ce::node_system::Graph& getGraph() noexcept { return graph; }
     const ce::node_system::NodeTypeRegistry& getRegistry() const noexcept { return registry; }
-    juce::Array<ProjectImageList::ImageChoice> listProjectImages();
+    // The project's images, for an image input's slot and picker.
+    project_images::Source projectImageSource();
     // A value was changed in the Properties panel.
     void applyPropertyEdit();
 private:
     static bool isImageAsset(const creation::assets::AssetDescriptor& asset);
     juce::Image getProjectImage(const juce::String& logicalPath);
+    juce::Image getProjectThumbnail(const juce::String& logicalPath);
 
     ce::node_system::NodeTypeRegistry registry;
     ce::node_system::Graph graph;
@@ -60,6 +62,7 @@ private:
     juce::Array<juce::Component::SafePointer<ViewerNodeEditor>> activeViewers;
     creation::assets::ProjectSession* projectSession = nullptr;
     std::map<std::string, juce::Image> imagePreviewCache;
+    std::map<std::string, juce::Image> thumbnailCache;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NodeGraphPanel)
 };
