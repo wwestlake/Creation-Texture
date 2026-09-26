@@ -17,6 +17,12 @@ ViewerNodeEditor::ViewerNodeEditor()
     addAndMakeVisible(compileButton);
     addAndMakeVisible(saveButton);
 
+    statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xffff8a80));
+    statusLabel.setColour(juce::Label::backgroundColourId, juce::Colour(0xcc1e2227));
+    statusLabel.setJustificationType(juce::Justification::topLeft);
+    statusLabel.setMinimumHorizontalScale(1.0f);
+    addChildComponent(statusLabel);
+
     compileButton.onClick = [this]() {
         if (onCompileRequested) onCompileRequested();
     };
@@ -26,7 +32,7 @@ ViewerNodeEditor::ViewerNodeEditor()
 
     auto defaultSnapshot = std::make_shared<TextureFrameSnapshot>();
     defaultSnapshot->debugColour = juce::Colour(0xff121212);
-    defaultSnapshot->generatedGlsl = "void EvaluateTexture(in vec2 vUV, out vec4 outColor) { float f = mod(floor(vUV.x * 10.0) + floor(vUV.y * 10.0), 2.0); outColor = vec4(vec3(f * 0.5 + 0.2), 1.0); }";
+    defaultSnapshot->generatedGlsl = "void EvaluateMaterial(in vec2 vUV, in vec3 worldPosition, in vec3 worldNormal, in vec3 cameraVector, in float time, out vec3 baseColor, out float metallic, out float roughness, out vec3 normal) { float f = mod(floor(vUV.x * 10.0) + floor(vUV.y * 10.0), 2.0); baseColor = vec3(f * 0.5 + 0.2); metallic = 0.0; roughness = 0.5; normal = vec3(0.5, 0.5, 1.0); }";
     publishedSnapshot.store(defaultSnapshot);
 
     openGLContext.setRenderer(this);
@@ -208,7 +214,7 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
             
             vec3 ambient = baseColor * 0.1;
             
-            vec3 finalColor = ambient + diffuse + specular + emissive;
+            vec3 finalColor = ambient + diffuse + specular;
             
             // Gamma correction
             finalColor = pow(finalColor, vec3(1.0/2.2));
@@ -221,13 +227,19 @@ void ViewerNodeEditor::compileShaderProgram(const std::string& evaluateTextureFu
     if (newProgram->addVertexShader(vShader) && newProgram->addFragmentShader(fShader) && newProgram->link()) {
         shaderProgram = std::move(newProgram);
         currentShaderCode = evaluateTextureFunc;
+        failedShaderCode.clear();
+        reportShaderStatus({});
     } else {
-        std::cout << "Shader compile failed: " << newProgram->getLastError() << std::endl;
+        failedShaderCode = evaluateTextureFunc;
+        reportShaderStatus("The preview could not compile this material, so it is still showing the previous one.\n"
+                           + newProgram->getLastError().trim());
     }
 }
 
 void ViewerNodeEditor::newOpenGLContextCreated()
 {
+    openGLContext.extensions.glGenVertexArrays(1, &vertexArray);
+    openGLContext.extensions.glBindVertexArray(vertexArray);
     createGeometries();
     compileShaderProgram("void EvaluateMaterial(in vec2 vUV, in vec3 worldPosition, in vec3 worldNormal, in vec3 cameraVector, in float time, out vec3 baseColor, out float metallic, out float roughness, out vec3 normal) { baseColor = vec3(vUV.x, vUV.y, 1.0); metallic=0.0; roughness=0.5; normal=vec3(0.5,0.5,1.0); }\nvec3 EvaluateWorldPositionOffset(in vec3 localPosition, in vec3 worldPosition, in vec3 worldNormal, in vec3 cameraVector, in float time, in vec2 vUV) { return vec3(0.0); }");
 }
@@ -237,9 +249,14 @@ void ViewerNodeEditor::renderOpenGL()
     auto currentSnapshot = publishedSnapshot.load();
     if (!currentSnapshot) return;
 
-    if (currentSnapshot->generatedGlsl != currentShaderCode && !currentSnapshot->generatedGlsl.empty()) {
+    if (currentSnapshot->generatedGlsl != currentShaderCode && currentSnapshot->generatedGlsl != failedShaderCode
+        && !currentSnapshot->generatedGlsl.empty()) {
         compileShaderProgram(currentSnapshot->generatedGlsl);
+    }
+
+    if (currentSnapshot.get() != texturesLoadedFor) {
         loadedTextures.clear();
+        texturesLoadedFor = currentSnapshot.get();
     }
 
     juce::OpenGLHelpers::clear(currentSnapshot->debugColour);
@@ -285,6 +302,7 @@ void ViewerNodeEditor::renderOpenGL()
 
 
     shaderProgram->use();
+    openGLContext.extensions.glBindVertexArray(vertexArray);
     
     openGLContext.extensions.glUniformMatrix4fv(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), "projection"), 1, juce::gl::GL_FALSE, proj.mat);
     openGLContext.extensions.glUniformMatrix4fv(openGLContext.extensions.glGetUniformLocation(shaderProgram->getProgramID(), "view"), 1, juce::gl::GL_FALSE, view.mat);
@@ -339,17 +357,34 @@ void ViewerNodeEditor::openGLContextClosing()
         if(g.ebo) openGLContext.extensions.glDeleteBuffers(1, &g.ebo);
     };
     del(plane); del(cube); del(sphere); del(cylinder); del(cone); del(djehuti);
+    if (vertexArray != 0)
+        openGLContext.extensions.glDeleteVertexArrays(1, &vertexArray);
+    vertexArray = 0;
 }
 
 void ViewerNodeEditor::paint(juce::Graphics& g) {}
 
+// Called on the OpenGL thread; the label lives on the message thread.
+void ViewerNodeEditor::reportShaderStatus(const juce::String& message)
+{
+    juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<ViewerNodeEditor>(this), message]() {
+        if (safeThis == nullptr)
+            return;
+        safeThis->statusLabel.setText(message, juce::dontSendNotification);
+        safeThis->statusLabel.setVisible(message.isNotEmpty());
+    });
+}
+
 void ViewerNodeEditor::resized()
 {
     auto bounds = getLocalBounds();
-    auto topBar = bounds.removeFromTop(30);
-    viewModeSelector.setBounds(topBar.reduced(2).removeFromLeft(150));
-    saveButton.setBounds(topBar.reduced(2).removeFromLeft(100));
-    compileButton.setBounds(topBar.reduced(2).removeFromLeft(100));
+    auto topBar = bounds.removeFromTop(30).reduced(2);
+    viewModeSelector.setBounds(topBar.removeFromLeft(150));
+    topBar.removeFromLeft(4);
+    compileButton.setBounds(topBar.removeFromLeft(110));
+    topBar.removeFromLeft(4);
+    saveButton.setBounds(topBar.removeFromLeft(110));
+    statusLabel.setBounds(bounds.removeFromBottom(juce::jmin(90, bounds.getHeight())).reduced(4));
 }
 
 void ViewerNodeEditor::mouseDown(const juce::MouseEvent& e)

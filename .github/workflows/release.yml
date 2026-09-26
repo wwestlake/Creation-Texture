@@ -1,0 +1,182 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "creation-texture-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/CreationTexture
+
+    steps:
+      - name: Checkout Creation Suite umbrella (for shared/)
+        uses: actions/checkout@v4
+        with:
+          repository: wwestlake/Creation-Suite
+          ref: claude/development
+
+      - name: Checkout this app at the release tag
+        uses: actions/checkout@v4
+        with:
+          path: apps/CreationTexture
+
+      - name: Fetch JUCE
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch 8.0.7 https://github.com/juce-framework/JUCE.git "$env:RUNNER_TEMP\JUCE"
+
+      - name: Install WinFlexBison (prebuilt binary, no compile)
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/lexxmark/winflexbison/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "*win_flex_bison*.zip" } | Select-Object -First 1
+          if (-not $asset) {
+            throw "Could not find a WinFlexBison release zip asset."
+          }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$env:RUNNER_TEMP\winflexbison.zip"
+          New-Item -ItemType Directory -Force -Path "C:\tools\winflexbison" | Out-Null
+          Expand-Archive -Path "$env:RUNNER_TEMP\winflexbison.zip" -DestinationPath "C:\tools\winflexbison" -Force
+          if (-not (Test-Path "C:\tools\winflexbison\win_bison.exe")) {
+            throw "win_bison.exe missing after WinFlexBison extraction."
+          }
+
+      - name: Classify release
+        id: classify
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+
+          if ($tag -match '^creation-texture-v(?<version>\d+\.\d+\.\d+)(?:-(?<channel>[0-9A-Za-z.-]+))?$') {
+            $versionText = $Matches.version
+            $explicitChannel = $Matches.channel
+          }
+          else {
+            throw "Tag '$tag' must start with creation-texture-v."
+          }
+
+          $channel = "stable"
+          $prerelease = "false"
+
+          if ($explicitChannel) {
+            $channel = $explicitChannel
+            $prerelease = "true"
+          }
+          else {
+            $parts = $versionText.Split('.')
+            $major = [int]$parts[0]
+            $minor = [int]$parts[1]
+
+            if ($major -eq 0 -and $minor -lt 5) {
+              $channel = "alpha"
+              $prerelease = "true"
+            }
+            elseif ($major -eq 0) {
+              $channel = "beta"
+              $prerelease = "true"
+            }
+          }
+
+          $suffix = ""
+          if ($channel -ne "stable") {
+            $suffix = " ($channel)"
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$tag"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$versionText"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "prerelease=$prerelease"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "suffix=$suffix"
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DJUCE_DIR="$env:RUNNER_TEMP\JUCE" -DCE_WINFLEXBISON_DIR="C:\tools\winflexbison" "-DCreationTexture_VERSION=${{ steps.classify.outputs.version }}"
+
+      - name: Build app
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target CreationTextureApp
+
+      - name: Install MSI packaging tools
+        shell: pwsh
+        run: |
+          choco install wixtoolset --no-progress -y
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          $stageRoot = Join-Path $PWD "artifacts\stage"
+          New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+
+          $installRoot = Join-Path $stageRoot "creation-texture"
+          New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+
+          cmake --install build --config Release --prefix $installRoot
+
+          $exe = Get-ChildItem $installRoot -Recurse -File | Where-Object { $_.Extension -eq '.exe' } | Select-Object -First 1
+          if (-not $exe) {
+            throw "Could not find the packaged executable for Creation Texture."
+          }
+
+          $zipName = Join-Path $PWD ("artifacts\{0}.zip" -f "${{ steps.classify.outputs.tag }}")
+          if (Test-Path $zipName) {
+            Remove-Item $zipName -Force
+          }
+
+          Compress-Archive -Path (Join-Path $stageRoot "creation-texture\*") -DestinationPath $zipName -Force
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $wixBins = @(
+            "${env:ProgramFiles(x86)}\WiX Toolset v3.14\bin",
+            "${env:ProgramFiles(x86)}\WiX Toolset v3.11\bin"
+          )
+
+          foreach ($wixBin in $wixBins) {
+            if (Test-Path $wixBin) {
+              $env:PATH = "$wixBin;$env:PATH"
+            }
+          }
+
+          $cpack = "${env:ProgramFiles}\CMake\bin\cpack.exe"
+          if (-not (Test-Path $cpack)) {
+            $cpack = "cpack"
+          }
+
+          & $cpack -C Release -G WIX --config build\CPackConfig.cmake
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSI packaging failed."
+          }
+
+          $msi = Get-ChildItem $PWD -Recurse -File -Filter *.msi | Select-Object -First 1
+          if (-not $msi) {
+            throw "Could not find the packaged MSI for Creation Texture."
+          }
+
+          $msiName = Join-Path $PWD ("artifacts\{0}.msi" -f "${{ steps.classify.outputs.tag }}")
+          if (Test-Path $msiName) {
+            Remove-Item $msiName -Force
+          }
+
+          Move-Item -Path $msi.FullName -Destination $msiName -Force
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-creation-texture
+          path: apps/CreationTexture/artifacts/*
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Creation Texture ${{ steps.classify.outputs.version }}${{ steps.classify.outputs.suffix }}
+          prerelease: ${{ steps.classify.outputs.prerelease }}
+          files: apps/CreationTexture/artifacts/*
