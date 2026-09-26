@@ -42,6 +42,8 @@ private:
     void compileShaderProgram(const std::string& evaluateTextureFunc);
 
     Geometry plane, cube, sphere, cylinder, cone, djehuti;
+    // A 3.2 core context draws nothing unless a vertex array object is bound.
+    GLuint vertexArray = 0;
     
     void buildPlane();
     void buildCube();
@@ -53,12 +55,20 @@ private:
     juce::ComboBox viewModeSelector;
     juce::TextButton compileButton{"Compile Graph"};
     juce::TextButton saveButton{"Save to Project"};
+    // Why the preview is not showing the material, in words - empty when the shader compiled.
+    juce::Label statusLabel;
+    void reportShaderStatus(const juce::String& message);
     
     juce::OpenGLContext openGLContext;
 
     std::atomic<std::shared_ptr<const TextureFrameSnapshot>> publishedSnapshot;
     std::unique_ptr<juce::OpenGLShaderProgram> shaderProgram;
     std::string currentShaderCode;
+    // The material code whose shader last failed to compile, so it is not retried every frame.
+    std::string failedShaderCode;
+    // The snapshot whose images are loaded on the GPU. A new snapshot can reuse the same uniform names with
+    // different images (picking another image does not change the shader), so images reload per snapshot.
+    const TextureFrameSnapshot* texturesLoadedFor = nullptr;
     
     float rotationX = 0.0f;
     float rotationY = 0.0f;

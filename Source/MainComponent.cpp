@@ -2,6 +2,7 @@
 #include "Branding.h"
 #include <creation/assets/ProjectWorkspaceService.h>
 #include <creation/assets/ProjectContainerService.h>
+#include <creation/assets/ProjectAssetService.h>
 
 MainComponent::MainComponent()
 {
@@ -11,7 +12,7 @@ MainComponent::MainComponent()
     headerBar.setTransportControlsVisible(false); headerBar.audioButton.setVisible(false); 
     
     suiteShellController.onProjectOpenRequested = [this](const juce::String& projectId) {
-        openProject(projectId);
+        confirmDiscardingEdits([this, projectId]() { openProject(projectId); });
     };
 
     creation::ui::SuiteAssetManagerCapability assetCapability;
@@ -47,15 +48,30 @@ MainComponent::MainComponent()
     // Register dock panels
     dockManager->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), CreationDock::DockTargetZone::CenterTab);
     dockManager->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), CreationDock::DockTargetZone::Right);
+    dockManager->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), CreationDock::DockTargetZone::Right);
 
     setSize(1600, 1000);
 
     nodeGraphPanel.setProjectSession(&projectSession);
-    nodeGraphPanel.onEnsureProjectSessionActive = [this](juce::String& err) { return ensureProjectSessionActive(err); };
+    nodeGraphPanel.onSaveRequested = [this]() { saveMaterial(); };
+
+    NodePropertiesPanel::Host propertiesHost;
+    propertiesHost.graph = &nodeGraphPanel.getGraph();
+    propertiesHost.registry = &nodeGraphPanel.getRegistry();
+    propertiesHost.listProjectImages = [this]() { return nodeGraphPanel.listProjectImages(); };
+    propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
+    propertiesPanel.setHost(std::move(propertiesHost));
+    nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
+    nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
+    nodeGraphPanel.onGraphEdited = [this]() {
+        materialDocument.markEdited();
+        refreshTitle();
+    };
 
     juce::String error;
     ensureProjectSessionActive(error);
     nodeGraphPanel.addViewer(viewerPanel.getViewer());
+    refreshTitle();
 }
 
 MainComponent::~MainComponent()
@@ -74,16 +90,9 @@ void MainComponent::openProject(const juce::String& projectId)
         return;
     }
     
-    headerBar.setProjectLabel("Project: " + projectSession.getManifest().projectName);
-    
-    juce::MemoryBlock block;
-    if (projectSession.readEntry("material.frgraph", block))
-    {
-        // For now, save out to temp file and load since loadGraph takes File
-        auto tempFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("material.frgraph");
-        tempFile.replaceWithData(block.getData(), block.getSize());
-        nodeGraphPanel.loadGraph(tempFile);
-    }
+    materialDocument.reset();
+    nodeGraphPanel.clearGraph();
+    refreshTitle();
 }
 
 void MainComponent::paint(juce::Graphics& g)
@@ -110,10 +119,10 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
     if (menuName == "File")
     {
         menu.addItem(1, "New Material");
-        menu.addItem(2, "Load Material...");
+        menu.addItem(2, "Open Material...", projectSession.isValid());
         menu.addSeparator();
-        menu.addItem(3, "Save Material");
-        menu.addItem(4, "Save Material As...");
+        menu.addItem(3, "Save Material", projectSession.isValid());
+        menu.addItem(4, "Save Material As...", projectSession.isValid());
     }
     else if (menuName == "Edit")
     {
@@ -130,6 +139,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
         menu.addItem(20, "Virtual Engineer");
         menu.addItem(21, "Node Graph");
         menu.addItem(22, "3D Preview");
+        menu.addItem(23, "Properties");
     }
     else if (menuName == "Help")
     {
@@ -141,35 +151,14 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
 
 void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
 {
-    if (menuItemID >= 1 && menuItemID <= 4)
-    {
-        if (menuItemID == 3) // Save Material
-        {
-            if (projectSession.isValid())
-            {
-                auto tempFile = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("material.frgraph");
-                nodeGraphPanel.saveGraph(tempFile);
-                
-                juce::MemoryBlock block;
-                tempFile.loadFileAsData(block);
-                projectSession.writeEntry("material.frgraph", block);
-                
-                juce::String err;
-                if (projectSession.commit(err))
-                    headerBar.setStatusText("Material saved to project.");
-                else
-                    headerBar.setStatusText("Failed to save material: " + err);
-            }
-            else
-            {
-                headerBar.setStatusText("No project is open. Cannot save.");
-            }
-        }
-        else
-        {
-            headerBar.setStatusText("File action to be implemented");
-        }
-    }
+    if (menuItemID == 1)
+        confirmDiscardingEdits([this]() { newMaterial(); });
+    else if (menuItemID == 2)
+        confirmDiscardingEdits([this]() { showOpenMaterialMenu(); });
+    else if (menuItemID == 3)
+        saveMaterial();
+    else if (menuItemID == 4)
+        saveMaterialAs();
     else if (menuItemID >= 10 && menuItemID <= 15)
     {
         headerBar.setStatusText("Edit action to be implemented");
@@ -185,6 +174,10 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
     else if (menuItemID == 22)
     {
         dockManager->activatePanel("Viewer");
+    }
+    else if (menuItemID == 23)
+    {
+        dockManager->activatePanel("Properties");
     }
     else if (menuItemID >= 30 && menuItemID <= 31)
     {
@@ -217,11 +210,117 @@ bool MainComponent::ensureProjectSessionActive(juce::String& errorMessage)
         }
     }
     if (creation::assets::ProjectWorkspaceService::openProject(settings, projects.getReference(latestIdx).projectId, projectSession, errorMessage)) {
-        headerBar.setProjectLabel("Project: " + projectSession.getManifest().projectName);
+        refreshTitle();
         return true;
     }
     return false;
 }
 
+void MainComponent::newMaterial()
+{
+    materialDocument.reset();
+    nodeGraphPanel.clearGraph();
+    refreshTitle();
+}
 
+void MainComponent::showOpenMaterialMenu()
+{
+    const auto materials = materialDocument.listMaterials();
 
+    juce::PopupMenu menu;
+    menu.addSectionHeader("Materials in this project");
+    if (materials.isEmpty())
+        menu.addItem(1, "No saved materials yet", false);
+    for (int i = 0; i < materials.size(); ++i)
+        menu.addItem(100 + i, materials.getReference(i).displayName);
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(menuBar.get()),
+                       [this, materials](int result) {
+                           const int index = result - 100;
+                           if (index >= 0 && index < materials.size())
+                               openMaterial(materials.getReference(index));
+                       });
+}
+
+void MainComponent::openMaterial(const creation::assets::AssetDescriptor& asset)
+{
+    juce::String graphText, error;
+    if (! materialDocument.open(asset, graphText, error) || ! nodeGraphPanel.loadGraphText(graphText, error))
+    {
+        headerBar.setStatusText("Could not open material: " + error);
+        materialDocument.reset();
+        refreshTitle();
+        return;
+    }
+
+    headerBar.setStatusText("Opened " + asset.displayName + ".");
+    refreshTitle();
+}
+
+void MainComponent::saveMaterial()
+{
+    if (! materialDocument.hasName())
+    {
+        saveMaterialAs();
+        return;
+    }
+
+    juce::String error;
+    if (materialDocument.save(nodeGraphPanel.getGraphText(), error))
+        headerBar.setStatusText("Saved " + materialDocument.getName() + ".");
+    else
+        headerBar.setStatusText("Could not save material: " + error);
+    refreshTitle();
+}
+
+void MainComponent::saveMaterialAs()
+{
+    if (! projectSession.isValid())
+    {
+        headerBar.setStatusText("No project is open. Open or create a project first.");
+        return;
+    }
+
+    auto* prompt = new juce::AlertWindow("Save Material", "Name this material:", juce::MessageBoxIconType::NoIcon, this);
+    prompt->addTextEditor("name", materialDocument.getName());
+    prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    prompt->enterModalState(true, juce::ModalCallbackFunction::create([this, prompt](int result) {
+        if (result != 1)
+            return;
+
+        juce::String error;
+        const auto name = prompt->getTextEditorContents("name");
+        if (materialDocument.saveAs(name, nodeGraphPanel.getGraphText(), error))
+            headerBar.setStatusText("Saved " + materialDocument.getName() + ".");
+        else
+            headerBar.setStatusText("Could not save material: " + error);
+        refreshTitle();
+    }), true);
+}
+
+void MainComponent::confirmDiscardingEdits(std::function<void()> proceed)
+{
+    if (! materialDocument.hasUnsavedEdits())
+    {
+        proceed();
+        return;
+    }
+
+    const auto materialName = materialDocument.hasName() ? materialDocument.getName() : juce::String("This material");
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
+                                       "Unsaved changes",
+                                       materialName + " has changes that are not saved. Discard them?",
+                                       "Discard", "Cancel", this,
+                                       juce::ModalCallbackFunction::create([proceed](int result) {
+                                           if (result == 1)
+                                               proceed();
+                                       }));
+}
+
+void MainComponent::refreshTitle()
+{
+    const auto projectName = projectSession.isValid() ? projectSession.getManifest().projectName
+                                                      : juce::String("No project open");
+    headerBar.setProjectLabel("Project: " + projectName + "  |  " + materialDocument.getTitle());
+}

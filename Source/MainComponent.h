@@ -4,6 +4,8 @@
 #include <CreationDock/DockManager.h>
 #include "NodeGraphPanel.h"
 #include "ViewerPanel.h"
+#include "MaterialDocument.h"
+#include "NodePropertiesPanel.h"
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
@@ -28,6 +30,14 @@ private:
     void openProject(const juce::String& projectId);
     bool ensureProjectSessionActive(juce::String& errorMessage);
 
+    void newMaterial();
+    void showOpenMaterialMenu();
+    void openMaterial(const creation::assets::AssetDescriptor& asset);
+    void saveMaterial();
+    void saveMaterialAs();
+    void confirmDiscardingEdits(std::function<void()> proceed);
+    void refreshTitle();
+
     class NonOwningPanelHost : public juce::Component
     {
     public:
@@ -48,12 +58,14 @@ private:
     CreationSuiteHeaderBar headerBar;
     creation::ui::SuiteShellController suiteShellController;
     creation::assets::ProjectSession projectSession;
+    MaterialDocument materialDocument { projectSession };
 
     std::unique_ptr<juce::MenuBarComponent> menuBar;
     std::unique_ptr<CreationDock::DockManager> dockManager;
 
     NodeGraphPanel nodeGraphPanel;
     ViewerPanel viewerPanel;
+    NodePropertiesPanel propertiesPanel;
     creation::ui::FrustyComponent frustyPanel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)

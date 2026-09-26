@@ -128,6 +128,12 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
+    Source/MaterialDocument.cpp
+    Source/MaterialDocument.h
+    Source/ProjectImageList.cpp
+    Source/ProjectImageList.h
+    Source/NodePropertiesPanel.cpp
+    Source/NodePropertiesPanel.h
     Source/NodeGraphPanel.cpp
     Source/ViewerPanel.cpp
     Source/NodeGraphPanel.h
@@ -188,6 +194,12 @@ add_custom_command(TARGET CreationTextureApp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "D:/CreationSuite-Workspaces/gemini-$<LOWER_CASE:$<CONFIG>>-bin"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CreationTextureApp>" "D:/CreationSuite-Workspaces/gemini-$<LOWER_CASE:$<CONFIG>>-bin/"
     COMMENT "Copying CreationTextureApp to the shared gemini bin directory"
+)
+
+add_custom_command(TARGET CreationTextureApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "D:/CreationSuite-Workspaces/claude-$<LOWER_CASE:$<CONFIG>>-bin"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:CreationTextureApp>" "D:/CreationSuite-Workspaces/claude-$<LOWER_CASE:$<CONFIG>>-bin/"
+    COMMENT "Copying CreationTextureApp to the shared claude bin directory"
 )
 
 # Auto-generated output name overrides
