@@ -49,6 +49,8 @@ MainComponent::MainComponent()
     dockManager->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), CreationDock::DockTargetZone::CenterTab);
     dockManager->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), CreationDock::DockTargetZone::Right);
     dockManager->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), CreationDock::DockTargetZone::Right);
+    dockManager->registerPanel("ImageLab", "Image Lab", std::make_unique<NonOwningPanelHost>(imageLabPanel), CreationDock::DockTargetZone::CenterTab);
+    dockManager->activatePanel("NodeGraph");
 
     setSize(1600, 1000);
 
@@ -61,6 +63,10 @@ MainComponent::MainComponent()
     propertiesHost.projectImages = nodeGraphPanel.projectImageSource();
     propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
     propertiesPanel.setHost(std::move(propertiesHost));
+
+    imageLabPanel.setProjectSession(&projectSession);
+    imageLabPanel.setImageSource(nodeGraphPanel.projectImageSource());
+    imageLabPanel.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
     nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
     nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
     nodeGraphPanel.onGraphEdited = [this]() {
@@ -140,6 +146,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
         menu.addItem(21, "Node Graph");
         menu.addItem(22, "3D Preview");
         menu.addItem(23, "Properties");
+        menu.addItem(24, "Image Lab");
     }
     else if (menuName == "Help")
     {
@@ -159,7 +166,15 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
         saveMaterial();
     else if (menuItemID == 4)
         saveMaterialAs();
-    else if (menuItemID >= 10 && menuItemID <= 15)
+    else if (menuItemID == 10)
+    {
+        imageLabPanel.getDocument().getUndoManager().undo();
+    }
+    else if (menuItemID == 11)
+    {
+        imageLabPanel.getDocument().getUndoManager().redo();
+    }
+    else if (menuItemID >= 12 && menuItemID <= 15)
     {
         headerBar.setStatusText("Edit action to be implemented");
     }
@@ -178,6 +193,10 @@ void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
     else if (menuItemID == 23)
     {
         dockManager->activatePanel("Properties");
+    }
+    else if (menuItemID == 24)
+    {
+        dockManager->activatePanel("ImageLab");
     }
     else if (menuItemID >= 30 && menuItemID <= 31)
     {

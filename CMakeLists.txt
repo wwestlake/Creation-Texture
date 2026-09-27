@@ -134,6 +134,10 @@ target_sources(CreationTextureApp PRIVATE
     Source/ProjectImagePicker.cpp
     Source/ProjectImagePicker.h
     Source/NodePropertiesPanel.cpp
+    Source/ImageLabDocument.cpp
+    Source/ImageLabDocument.h
+    Source/ImageLabPanel.cpp
+    Source/ImageLabPanel.h
     Source/NodePropertiesPanel.h
     Source/NodeGraphPanel.cpp
     Source/ViewerPanel.cpp
@@ -156,6 +160,7 @@ target_compile_definitions(CreationTextureApp PRIVATE
 )
 
 target_link_libraries(CreationTextureApp PRIVATE
+    creation_texture_image_lab
     ${CREATION_TEXTURE_ASSET_SYSTEM_TARGET}
     ${CREATION_TEXTURE_VFS_TARGET}
     ${CREATION_TEXTURE_SERVICES_TARGET}
