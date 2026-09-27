@@ -58,7 +58,7 @@ MainComponent::MainComponent()
     NodePropertiesPanel::Host propertiesHost;
     propertiesHost.graph = &nodeGraphPanel.getGraph();
     propertiesHost.registry = &nodeGraphPanel.getRegistry();
-    propertiesHost.listProjectImages = [this]() { return nodeGraphPanel.listProjectImages(); };
+    propertiesHost.projectImages = nodeGraphPanel.projectImageSource();
     propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
     propertiesPanel.setHost(std::move(propertiesHost));
     nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };

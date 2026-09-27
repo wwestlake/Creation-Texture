@@ -370,9 +370,23 @@ void ViewerNodeEditor::reportShaderStatus(const juce::String& message)
     juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<ViewerNodeEditor>(this), message]() {
         if (safeThis == nullptr)
             return;
-        safeThis->statusLabel.setText(message, juce::dontSendNotification);
-        safeThis->statusLabel.setVisible(message.isNotEmpty());
+        safeThis->shaderProblem = message;
+        safeThis->updateStatusLine();
     });
+}
+
+void ViewerNodeEditor::setGraphProblem(const juce::String& message)
+{
+    graphProblem = message;
+    updateStatusLine();
+}
+
+// A graph problem comes first: while the graph cannot compile, the shader is not what needs fixing.
+void ViewerNodeEditor::updateStatusLine()
+{
+    const auto message = graphProblem.isNotEmpty() ? graphProblem : shaderProblem;
+    statusLabel.setText(message, juce::dontSendNotification);
+    statusLabel.setVisible(message.isNotEmpty());
 }
 
 void ViewerNodeEditor::resized()

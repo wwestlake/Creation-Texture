@@ -89,36 +89,48 @@ void NodeGraphPanel::resized()
     graphComponent.setBounds(bounds);
 }
 
-juce::Array<ProjectImageList::ImageChoice> NodeGraphPanel::listProjectImages()
+project_images::Source NodeGraphPanel::projectImageSource()
 {
-    juce::Array<ProjectImageList::ImageChoice> choices;
-    if (projectSession == nullptr || ! projectSession->isValid())
-        return choices;
+    project_images::Source source;
+    source.list = [this]() {
+        juce::Array<project_images::Entry> entries;
+        if (projectSession == nullptr || ! projectSession->isValid())
+            return entries;
 
-    for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (isImageAsset(asset))
+                entries.add({ asset.displayName.isNotEmpty() ? asset.displayName
+                                                             : asset.logicalPath.fromLastOccurrenceOf("/", false, false),
+                              asset.logicalPath });
+        return entries;
+    };
+    source.thumbnail = [this](const juce::String& logicalPath) { return getProjectThumbnail(logicalPath); };
+    source.image = [this](const juce::String& logicalPath) { return getProjectImage(logicalPath); };
+    return source;
+}
+
+juce::Image NodeGraphPanel::getProjectThumbnail(const juce::String& logicalPath)
+{
+    const auto key = logicalPath.toStdString();
+    auto cached = thumbnailCache.find(key);
+    if (cached != thumbnailCache.end())
+        return cached->second;
+
+    juce::Image thumbnail;
+    const auto image = getProjectImage(logicalPath);
+    if (image.isValid())
     {
-        if (! isImageAsset(asset))
-            continue;
-
-        ProjectImageList::ImageChoice choice;
-        choice.displayName = asset.displayName.isNotEmpty() ? asset.displayName
-                                                            : asset.logicalPath.fromLastOccurrenceOf("/", false, false);
-        choice.logicalPath = asset.logicalPath;
-        const auto image = getProjectImage(asset.logicalPath);
-        if (image.isValid())
-        {
-            choice.thumbnail = image.rescaled(juce::jmin(96, image.getWidth()), juce::jmin(96, image.getHeight()),
-                                              juce::Graphics::mediumResamplingQuality);
-            choice.details = asset.logicalPath.fromLastOccurrenceOf(".", false, false).toUpperCase()
-                           + "  " + juce::String(image.getWidth()) + " x " + juce::String(image.getHeight());
-        }
-        else
-        {
-            choice.details = "Could not be read";
-        }
-        choices.add(choice);
+        const float scale = juce::jmin(1.0f, 96.0f / static_cast<float>(juce::jmax(image.getWidth(), image.getHeight())));
+        thumbnail = image.rescaled(juce::jmax(1, juce::roundToInt(static_cast<float>(image.getWidth()) * scale)),
+                                   juce::jmax(1, juce::roundToInt(static_cast<float>(image.getHeight()) * scale)),
+                                   juce::Graphics::mediumResamplingQuality);
+        // The slot shows the real size, not the thumbnail's.
+        thumbnail.getProperties()->set("sourceWidth", image.getWidth());
+        thumbnail.getProperties()->set("sourceHeight", image.getHeight());
     }
-    return choices;
+
+    thumbnailCache[key] = thumbnail;
+    return thumbnail;
 }
 
 void NodeGraphPanel::applyPropertyEdit()
@@ -166,10 +178,13 @@ bool NodeGraphPanel::isInterestedInFileDrag(const juce::StringArray& files)
 void NodeGraphPanel::compileGraph() {
     ce::material::MaterialCompileResult res = ce::material::CompileMaterialGraph(graph, registry);
     if (!res.ok) {
-        juce::String errStr;
-        for (const auto& err : res.errors) errStr += juce::String(err) + "\n";
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compile Error", errStr);
+        juce::StringArray problems;
+        for (const auto& err : res.errors) problems.add(juce::String(err));
+        for (auto& viewer : activeViewers)
+            if (viewer != nullptr) viewer->setGraphProblem("The material cannot be previewed yet: " + problems.joinIntoString(" "));
     } else {
+        for (auto& viewer : activeViewers)
+            if (viewer != nullptr) viewer->setGraphProblem({});
         currentSnapshot = std::make_shared<TextureFrameSnapshot>();
         currentSnapshot->generatedGlsl = res.source.declarations + "\n" + res.source.evaluateFunction;
         for (size_t i = 0; i < res.source.textures.size(); ++i) {
@@ -225,6 +240,7 @@ bool NodeGraphPanel::loadGraphText(const juce::String& frgraphText, juce::String
     graph = std::move(*loaded);
     graph.SetTarget(ce::node_system::GraphTarget::Material);
     imagePreviewCache.clear();
+    thumbnailCache.clear();
     graphComponent.GraphReplaced();
     compileGraph();
     return true;
@@ -237,6 +253,7 @@ void NodeGraphPanel::clearGraph()
     if (auto* output = ce::node_system::AddRegisteredNode(graph, registry, "material.surface.output"))
         output->SetEditorPosition(400.0f, 150.0f);
     imagePreviewCache.clear();
+    thumbnailCache.clear();
     graphComponent.GraphReplaced();
     compileGraph();
 }

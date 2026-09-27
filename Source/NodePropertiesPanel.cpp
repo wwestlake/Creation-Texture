@@ -250,13 +250,16 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
     {
         const auto current = std::holds_alternative<std::string>(pin.defaultValue)
                                ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String();
-        auto choices = host.listProjectImages ? host.listProjectImages() : juce::Array<ProjectImageList::ImageChoice>();
-        auto list = std::make_unique<ProjectImageList>(choices, current, [this, graph, id, pinId](const juce::String& path) {
+        auto slot = std::make_unique<ProjectImageSlot>(host.projectImages, current, [this, graph, id, pinId](const juce::String& path) {
             setPinValue(graph, id, pinId, path.toStdString());
             valueEdited();
+            // Show the new image in the slot. Async: this runs from inside the picker, not the slot.
+            juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<NodePropertiesPanel>(this)]() {
+                if (safeThis != nullptr)
+                    safeThis->refresh();
+            });
         });
-        const int height = list->getPreferredHeight();
-        addRow(labelText, std::move(list), height);
+        addRow(labelText, std::move(slot), ProjectImageSlot::preferredHeight);
         return;
     }
 
