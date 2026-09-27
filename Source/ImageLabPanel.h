@@ -5,33 +5,36 @@
 #include "ImageLabDocument.h"
 #include "ProjectImagePicker.h"
 
-// The Image Lab work area: the canvas showing the composite, and a GIMP-style Layers panel (mode and opacity of
-// the active layer at the top, the stack with visibility/thumbnail/name, drag to reorder, and the layer commands).
-// See docs/REQUIREMENTS.md sections 5-8.
-class ImageLabPanel final : public juce::Component,
-                            private juce::ChangeListener
+// The Image Lab work area: one document and its commands, shown through three dockable panels - the Canvas (the
+// composite), Layers (GIMP-style stack with the active layer's mode and opacity), and History (the undo list).
+// See docs/REQUIREMENTS.md sections 4-8.
+class ImageLabWorkspace final : private juce::ChangeListener
 {
 public:
-    ImageLabPanel();
-    ~ImageLabPanel() override;
+    ImageLabWorkspace();
+    ~ImageLabWorkspace() override;
 
     void setProjectSession(creation::assets::ProjectSession* session) { projectSession = session; }
     void setImageSource(project_images::Source source) { images = std::move(source); }
     std::function<void(const juce::String&)> onStatus;
 
     ImageLabDocument& getDocument() noexcept { return document; }
+    juce::Component& getCanvas() noexcept;
+    juce::Component& getLayersPanel() noexcept;
+    juce::Component& getHistoryPanel() noexcept;
+
+    // Commands, shared by the panels and the Layer menu.
     void addImageLayer();
     void saveImage();
-
-    void resized() override;
-    void paint(juce::Graphics& g) override;
+    void undo() { document.getUndoManager().undo(); }
+    void redo() { document.getUndoManager().redo(); }
 
 private:
     class Canvas;
-    class LayerList;
+    class LayersPanel;
+    class HistoryPanel;
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
-    void refreshControls();
     void status(const juce::String& text);
 
     ImageLabDocument document;
@@ -39,17 +42,8 @@ private:
     project_images::Source images;
 
     std::unique_ptr<Canvas> canvas;
-    std::unique_ptr<LayerList> layerList;
+    std::unique_ptr<LayersPanel> layersPanel;
+    std::unique_ptr<HistoryPanel> historyPanel;
 
-    juce::Label layersTitle;
-    juce::ComboBox modeBox;
-    juce::Slider opacitySlider;
-    juce::TextButton addButton { "Add Image..." };
-    juce::TextButton duplicateButton { "Duplicate" };
-    juce::TextButton deleteButton { "Delete" };
-    juce::TextButton undoButton { "Undo" };
-    juce::TextButton redoButton { "Redo" };
-    juce::TextButton saveButton { "Save Image..." };
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ImageLabPanel)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ImageLabWorkspace)
 };

@@ -3,6 +3,8 @@
 #include <creation/assets/ProjectWorkspaceService.h>
 #include <creation/assets/ProjectContainerService.h>
 #include <creation/assets/ProjectAssetService.h>
+#include <creation/services/SuiteVfsJsonStore.h>
+#include <creation/ui/SuiteJUCEApplication.h>
 
 MainComponent::MainComponent()
 {
@@ -42,15 +44,36 @@ MainComponent::MainComponent()
     menuBar = std::make_unique<juce::MenuBarComponent>(this);
     addAndMakeVisible(menuBar.get());
 
-    dockManager = std::make_unique<CreationDock::DockManager>(*this);
-    addAndMakeVisible(dockManager.get());
-    
-    // Register dock panels
-    dockManager->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), CreationDock::DockTargetZone::CenterTab);
-    dockManager->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), CreationDock::DockTargetZone::Right);
-    dockManager->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), CreationDock::DockTargetZone::Right);
-    dockManager->registerPanel("ImageLab", "Image Lab", std::make_unique<NonOwningPanelHost>(imageLabPanel), CreationDock::DockTargetZone::CenterTab);
-    dockManager->activatePanel("NodeGraph");
+    // Work-area switcher, under the header: each area swaps in its own whole layout.
+    for (auto* tab : { &materialsTab, &imageLabTab })
+    {
+        tab->setClickingTogglesState(false);
+        tab->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2f5d8a));
+        addAndMakeVisible(*tab);
+    }
+    materialsTab.setConnectedEdges(juce::Button::ConnectedOnRight);
+    imageLabTab.setConnectedEdges(juce::Button::ConnectedOnLeft);
+    materialsTab.onClick = [this]() { showWorkArea(WorkArea::materials); };
+    imageLabTab.onClick = [this]() { showWorkArea(WorkArea::imageLab); };
+
+    using Zone = CreationDock::DockTargetZone;
+    materialsDock = std::make_unique<CreationDock::DockManager>(*this);
+    materialsDock->registerPanel("Nodes", "Nodes", std::make_unique<NonOwningPanelHost>(nodeGraphPanel.getPalette()), Zone::Left);
+    materialsDock->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), Zone::CenterTab);
+    materialsDock->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), Zone::Right);
+    materialsDock->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), Zone::Right);
+    materialsDock->activatePanel("Viewer");
+    addChildComponent(materialsDock.get());
+
+    imageLabDock = std::make_unique<CreationDock::DockManager>(*this);
+    imageLabDock->registerPanel("Canvas", "Canvas", std::make_unique<NonOwningPanelHost>(imageLab.getCanvas()), Zone::CenterTab);
+    imageLabDock->registerPanel("Layers", "Layers", std::make_unique<NonOwningPanelHost>(imageLab.getLayersPanel()), Zone::Right);
+    imageLabDock->registerPanel("History", "History", std::make_unique<NonOwningPanelHost>(imageLab.getHistoryPanel()), Zone::Right);
+    imageLabDock->activatePanel("Layers");
+    addChildComponent(imageLabDock.get());
+
+    loadLayouts();
+    showWorkArea(currentArea);
 
     setSize(1600, 1000);
 
@@ -64,9 +87,9 @@ MainComponent::MainComponent()
     propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
     propertiesPanel.setHost(std::move(propertiesHost));
 
-    imageLabPanel.setProjectSession(&projectSession);
-    imageLabPanel.setImageSource(nodeGraphPanel.projectImageSource());
-    imageLabPanel.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
+    imageLab.setProjectSession(&projectSession);
+    imageLab.setImageSource(nodeGraphPanel.projectImageSource());
+    imageLab.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
     nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
     nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
     nodeGraphPanel.onGraphEdited = [this]() {
@@ -82,8 +105,10 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
+    saveLayouts();
     menuBar.reset();
-    dockManager.reset();
+    materialsDock.reset();
+    imageLabDock.reset();
 }
 
 void MainComponent::openProject(const juce::String& projectId)
@@ -111,100 +136,156 @@ void MainComponent::resized()
     auto bounds = getLocalBounds();
     headerBar.setBounds(bounds.removeFromTop(96));
     menuBar->setBounds(bounds.removeFromTop(juce::LookAndFeel::getDefaultLookAndFeel().getDefaultMenuBarHeight()));
-    dockManager->setBounds(bounds);
+    auto tabs = bounds.removeFromTop(34).reduced(8, 4);
+    materialsTab.setBounds(tabs.removeFromLeft(120));
+    imageLabTab.setBounds(tabs.removeFromLeft(120));
+    materialsDock->setBounds(bounds);
+    imageLabDock->setBounds(bounds);
 }
 
 juce::StringArray MainComponent::getMenuBarNames()
 {
-    return { "File", "Edit", "View", "Help" };
+    if (currentArea == WorkArea::imageLab)
+        return { "File", "Edit", "Layer", "View", "Help" };
+    return { "File", "View", "Help" };
 }
 
-juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName)
+juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName)
 {
     juce::PopupMenu menu;
-    if (menuName == "File")
+    const bool project = projectSession.isValid();
+    const bool imageLabArea = currentArea == WorkArea::imageLab;
+    auto& layers = imageLab.getDocument();
+
+    if (menuName == "File" && ! imageLabArea)
     {
         menu.addItem(1, "New Material");
-        menu.addItem(2, "Open Material...", projectSession.isValid());
+        menu.addItem(2, "Open Material...", project);
         menu.addSeparator();
-        menu.addItem(3, "Save Material", projectSession.isValid());
-        menu.addItem(4, "Save Material As...", projectSession.isValid());
+        menu.addItem(3, "Save Material", project);
+        menu.addItem(4, "Save Material As...", project);
+    }
+    else if (menuName == "File")
+    {
+        menu.addItem(5, "Save Image...", project && layers.getNumLayers() > 0);
     }
     else if (menuName == "Edit")
     {
-        menu.addItem(10, "Undo");
-        menu.addItem(11, "Redo");
-        menu.addSeparator();
-        menu.addItem(12, "Cut");
-        menu.addItem(13, "Copy");
-        menu.addItem(14, "Paste");
-        menu.addItem(15, "Delete");
+        auto& undo = layers.getUndoManager();
+        menu.addItem(10, "Undo " + undo.getUndoDescription(), undo.canUndo());
+        menu.addItem(11, "Redo " + (undo.getRedoDescriptions().isEmpty() ? juce::String() : undo.getRedoDescriptions()[0]), undo.canRedo());
+    }
+    else if (menuName == "Layer")
+    {
+        const bool hasLayer = layers.getLayer(layers.getActiveIndex()) != nullptr;
+        menu.addItem(40, "Add Image Layer...", project);
+        menu.addItem(41, "Duplicate Layer", hasLayer);
+        menu.addItem(42, "Delete Layer", hasLayer);
     }
     else if (menuName == "View")
     {
-        menu.addItem(20, "Virtual Engineer");
-        menu.addItem(21, "Node Graph");
-        menu.addItem(22, "3D Preview");
-        menu.addItem(23, "Properties");
-        menu.addItem(24, "Image Lab");
+        if (imageLabArea)
+        {
+            menu.addItem(25, "Canvas");
+            menu.addItem(26, "Layers");
+            menu.addItem(27, "History");
+        }
+        else
+        {
+            menu.addItem(20, "Nodes");
+            menu.addItem(21, "Node Graph");
+            menu.addItem(22, "3D Preview");
+            menu.addItem(23, "Properties");
+        }
+        menu.addSeparator();
+        menu.addItem(29, "Reset Layout");
     }
     else if (menuName == "Help")
     {
-        menu.addItem(30, "Documentation");
         menu.addItem(31, "About Djehuti Texture");
     }
     return menu;
 }
 
-void MainComponent::menuItemSelected(int menuItemID, int topLevelMenuIndex)
+void MainComponent::menuItemSelected(int menuItemID, int)
 {
-    if (menuItemID == 1)
-        confirmDiscardingEdits([this]() { newMaterial(); });
-    else if (menuItemID == 2)
-        confirmDiscardingEdits([this]() { showOpenMaterialMenu(); });
-    else if (menuItemID == 3)
-        saveMaterial();
-    else if (menuItemID == 4)
-        saveMaterialAs();
-    else if (menuItemID == 10)
+    auto& dock = dockFor(currentArea);
+    switch (menuItemID)
     {
-        imageLabPanel.getDocument().getUndoManager().undo();
-    }
-    else if (menuItemID == 11)
-    {
-        imageLabPanel.getDocument().getUndoManager().redo();
-    }
-    else if (menuItemID >= 12 && menuItemID <= 15)
-    {
-        headerBar.setStatusText("Edit action to be implemented");
-    }
-    else if (menuItemID == 20)
-    {
-        dockManager->activatePanel("Frusty");
-    }
-    else if (menuItemID == 21)
-    {
-        dockManager->activatePanel("NodeGraph");
-    }
-    else if (menuItemID == 22)
-    {
-        dockManager->activatePanel("Viewer");
-    }
-    else if (menuItemID == 23)
-    {
-        dockManager->activatePanel("Properties");
-    }
-    else if (menuItemID == 24)
-    {
-        dockManager->activatePanel("ImageLab");
-    }
-    else if (menuItemID >= 30 && menuItemID <= 31)
-    {
-        headerBar.setStatusText("Help action to be implemented");
+        case 1: confirmDiscardingEdits([this]() { newMaterial(); }); break;
+        case 2: confirmDiscardingEdits([this]() { showOpenMaterialMenu(); }); break;
+        case 3: saveMaterial(); break;
+        case 4: saveMaterialAs(); break;
+        case 5: imageLab.saveImage(); break;
+        case 10: imageLab.undo(); break;
+        case 11: imageLab.redo(); break;
+        case 20: dock.activatePanel("Nodes"); break;
+        case 21: dock.activatePanel("NodeGraph"); break;
+        case 22: dock.activatePanel("Viewer"); break;
+        case 23: dock.activatePanel("Properties"); break;
+        case 25: dock.activatePanel("Canvas"); break;
+        case 26: dock.activatePanel("Layers"); break;
+        case 27: dock.activatePanel("History"); break;
+        case 29: dock.resetLayout(); saveLayouts(); break;
+        case 31:
+            if (auto* app = dynamic_cast<creation::ui::SuiteJUCEApplication*>(juce::JUCEApplication::getInstance()))
+                app->showAboutBox();
+            break;
+        case 40: imageLab.addImageLayer(); break;
+        case 41: imageLab.getDocument().duplicateActive(); break;
+        case 42: imageLab.getDocument().removeActive(); break;
+        default: break;
     }
 }
 
+CreationDock::DockManager& MainComponent::dockFor(WorkArea area)
+{
+    return area == WorkArea::imageLab ? *imageLabDock : *materialsDock;
+}
 
+void MainComponent::showWorkArea(WorkArea area)
+{
+    currentArea = area;
+    materialsDock->setVisible(area == WorkArea::materials);
+    imageLabDock->setVisible(area == WorkArea::imageLab);
+    materialsTab.setToggleState(area == WorkArea::materials, juce::dontSendNotification);
+    imageLabTab.setToggleState(area == WorkArea::imageLab, juce::dontSendNotification);
+    menuItemsChanged();
+    saveLayouts();
+}
+
+namespace
+{
+constexpr const char* layoutStorePath = "texture-layout.json";
+}
+
+// Each work area's arrangement, and which one was open, live in the suite's VFS settings store.
+void MainComponent::loadLayouts()
+{
+    juce::String error;
+    const auto stored = creation::services::SuiteVfsJsonStore::loadJson(layoutStorePath, error);
+    if (! stored.isObject())
+        return;
+
+    if (stored["materials"].isObject())
+        materialsDock->applyLayout(stored["materials"]);
+    if (stored["imageLab"].isObject())
+        imageLabDock->applyLayout(stored["imageLab"]);
+    currentArea = stored["workArea"].toString() == "imageLab" ? WorkArea::imageLab : WorkArea::materials;
+}
+
+void MainComponent::saveLayouts()
+{
+    if (materialsDock == nullptr || imageLabDock == nullptr)
+        return;
+
+    auto* state = new juce::DynamicObject();
+    state->setProperty("workArea", currentArea == WorkArea::imageLab ? "imageLab" : "materials");
+    state->setProperty("materials", materialsDock->captureLayout());
+    state->setProperty("imageLab", imageLabDock->captureLayout());
+    juce::String error;
+    creation::services::SuiteVfsJsonStore::saveJson(layoutStorePath, juce::var(state), error);
+}
 
 bool MainComponent::ensureProjectSessionActive(juce::String& errorMessage)
 {

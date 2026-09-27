@@ -7,7 +7,6 @@ namespace
 {
 const juce::Colour panelBackground { 0xff1e2227 };
 const juce::Colour listBackground { 0xff161a1f };
-constexpr int layersWidth = 280;
 constexpr int layerRowHeight = 52;
 constexpr int eyeWidth = 28;
 const juce::String layerDragId = "image-lab-layer";
@@ -37,7 +36,7 @@ void drawCheckerboard(juce::Graphics& g, juce::Rectangle<int> area, int cell)
 }
 
 // Shows the composite: fitted to the view to start, mouse wheel zooms, drag pans. Transparency shows as a checkerboard.
-class ImageLabPanel::Canvas final : public juce::Component
+class ImageLabWorkspace::Canvas final : public juce::Component
 {
 public:
     explicit Canvas(ImageLabDocument& d) : document(d) {}
@@ -128,12 +127,12 @@ private:
 };
 
 // The layer stack, top layer first. Click a row to make it active, click the eye to show/hide, drag to reorder.
-class ImageLabPanel::LayerList final : public juce::Component,
+class ImageLabLayerList final : public juce::Component,
                                        private juce::ListBoxModel,
                                        public juce::DragAndDropTarget
 {
 public:
-    explicit LayerList(ImageLabDocument& d) : document(d)
+    explicit ImageLabLayerList(ImageLabDocument& d) : document(d)
     {
         list.setModel(this);
         list.setRowHeight(layerRowHeight);
@@ -255,126 +254,216 @@ private:
     int dropRow = -1;
 };
 
-ImageLabPanel::ImageLabPanel()
-    : canvas(std::make_unique<Canvas>(document)),
-      layerList(std::make_unique<LayerList>(document))
+// Layers: the active layer's blend mode and opacity at the top (like GIMP's Layers dock), the stack, and the
+// layer commands.
+class ImageLabWorkspace::LayersPanel final : public juce::Component
 {
-    addAndMakeVisible(*canvas);
-    addAndMakeVisible(*layerList);
+public:
+    LayersPanel(ImageLabWorkspace& w, ImageLabDocument& d) : workspace(w), document(d), layerList(d)
+    {
+        modeBox.addItemList(image_lab::blendModeNames(), 1);
+        modeBox.onChange = [this]() {
+            const int id = modeBox.getSelectedId();
+            if (id > 0)
+                document.setBlendMode(document.getActiveIndex(), static_cast<image_lab::BlendMode>(id - 1));
+        };
+        modeBox.setTooltip("Blend mode of the active layer");
+        addAndMakeVisible(modeBox);
 
-    layersTitle.setText("Layers", juce::dontSendNotification);
-    layersTitle.setFont(juce::FontOptions(15.0f, juce::Font::bold));
-    layersTitle.setColour(juce::Label::textColourId, juce::Colours::white);
-    addAndMakeVisible(layersTitle);
+        opacitySlider.setSliderStyle(juce::Slider::LinearBar);
+        opacitySlider.setRange(0.0, 100.0, 1.0);
+        opacitySlider.setTextValueSuffix("% opacity");
+        opacitySlider.onDragStart = [this]() { document.beginEdit("Layer opacity"); };
+        opacitySlider.onValueChange = [this]() {
+            if (! opacitySlider.isMouseButtonDown())
+                document.beginEdit("Layer opacity");
+            document.setOpacity(document.getActiveIndex(), static_cast<float>(opacitySlider.getValue() / 100.0));
+        };
+        addAndMakeVisible(opacitySlider);
 
-    modeBox.addItemList(image_lab::blendModeNames(), 1);
-    modeBox.onChange = [this]() {
-        const int id = modeBox.getSelectedId();
-        if (id > 0)
-            document.setBlendMode(document.getActiveIndex(), static_cast<image_lab::BlendMode>(id - 1));
-    };
-    addAndMakeVisible(modeBox);
+        addAndMakeVisible(layerList);
 
-    opacitySlider.setSliderStyle(juce::Slider::LinearBar);
-    opacitySlider.setRange(0.0, 100.0, 1.0);
-    opacitySlider.setTextValueSuffix("%");
-    opacitySlider.onDragStart = [this]() { document.beginEdit("Layer opacity"); };
-    opacitySlider.onValueChange = [this]() {
-        if (! opacitySlider.isMouseButtonDown())
-            document.beginEdit("Layer opacity");
-        document.setOpacity(document.getActiveIndex(), static_cast<float>(opacitySlider.getValue() / 100.0));
-    };
-    addAndMakeVisible(opacitySlider);
+        addButton.onClick = [this]() { workspace.addImageLayer(); };
+        duplicateButton.onClick = [this]() { document.duplicateActive(); };
+        deleteButton.onClick = [this]() { document.removeActive(); };
+        saveButton.onClick = [this]() { workspace.saveImage(); };
+        for (auto* button : { &addButton, &duplicateButton, &deleteButton, &saveButton })
+            addAndMakeVisible(*button);
 
-    addButton.onClick = [this]() { addImageLayer(); };
-    duplicateButton.onClick = [this]() { document.duplicateActive(); };
-    deleteButton.onClick = [this]() { document.removeActive(); };
-    undoButton.onClick = [this]() { document.getUndoManager().undo(); };
-    redoButton.onClick = [this]() { document.getUndoManager().redo(); };
-    saveButton.onClick = [this]() { saveImage(); };
-    for (auto* button : { &addButton, &duplicateButton, &deleteButton, &undoButton, &redoButton, &saveButton })
-        addAndMakeVisible(*button);
+        refresh();
+    }
 
+    void refresh()
+    {
+        const auto* layer = document.getLayer(document.getActiveIndex());
+        const bool hasLayer = layer != nullptr;
+        modeBox.setEnabled(hasLayer);
+        opacitySlider.setEnabled(hasLayer);
+        duplicateButton.setEnabled(hasLayer);
+        deleteButton.setEnabled(hasLayer);
+        saveButton.setEnabled(document.getNumLayers() > 0);
+        if (hasLayer)
+        {
+            modeBox.setSelectedId(static_cast<int>(layer->mode) + 1, juce::dontSendNotification);
+            if (! opacitySlider.isMouseButtonDown())
+                opacitySlider.setValue(layer->opacity * 100.0, juce::dontSendNotification);
+        }
+        layerList.update();
+    }
+
+    void paint(juce::Graphics& g) override { g.fillAll(panelBackground); }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(8);
+        modeBox.setBounds(area.removeFromTop(26));
+        area.removeFromTop(6);
+        opacitySlider.setBounds(area.removeFromTop(24));
+        area.removeFromTop(8);
+
+        auto bottom = area.removeFromBottom(62);
+        auto row1 = bottom.removeFromTop(28);
+        const int third = row1.getWidth() / 3;
+        addButton.setBounds(row1.removeFromLeft(third).reduced(2, 0));
+        duplicateButton.setBounds(row1.removeFromLeft(third).reduced(2, 0));
+        deleteButton.setBounds(row1.reduced(2, 0));
+        bottom.removeFromTop(6);
+        saveButton.setBounds(bottom.removeFromTop(28).reduced(2, 0));
+
+        area.removeFromBottom(8);
+        layerList.setBounds(area);
+    }
+
+private:
+    ImageLabWorkspace& workspace;
+    ImageLabDocument& document;
+    ImageLabLayerList layerList;
+    juce::ComboBox modeBox;
+    juce::Slider opacitySlider;
+    juce::TextButton addButton { "Add Image..." };
+    juce::TextButton duplicateButton { "Duplicate" };
+    juce::TextButton deleteButton { "Delete" };
+    juce::TextButton saveButton { "Save Image..." };
+};
+
+// History: every step, oldest first, with the current position highlighted. Click a step to go back (or forward) to
+// just after it; "Start" is before the first step.
+class ImageLabWorkspace::HistoryPanel final : public juce::Component,
+                                                private juce::ListBoxModel
+{
+public:
+    explicit HistoryPanel(ImageLabDocument& d) : document(d)
+    {
+        list.setModel(this);
+        list.setRowHeight(24);
+        list.setColour(juce::ListBox::backgroundColourId, listBackground);
+        addAndMakeVisible(list);
+
+        undoButton.onClick = [this]() { document.getUndoManager().undo(); };
+        redoButton.onClick = [this]() { document.getUndoManager().redo(); };
+        addAndMakeVisible(undoButton);
+        addAndMakeVisible(redoButton);
+        refresh();
+    }
+
+    void refresh()
+    {
+        auto& undo = document.getUndoManager();
+        done = undo.getUndoDescriptions(); // most recent first
+        pending = undo.getRedoDescriptions(); // next redo first
+        undoButton.setEnabled(undo.canUndo());
+        redoButton.setEnabled(undo.canRedo());
+        list.updateContent();
+        list.selectRow(done.size(), true, true);
+        list.repaint();
+    }
+
+    void paint(juce::Graphics& g) override { g.fillAll(panelBackground); }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(8);
+        auto buttons = area.removeFromBottom(28);
+        undoButton.setBounds(buttons.removeFromLeft(buttons.getWidth() / 2).reduced(2, 0));
+        redoButton.setBounds(buttons.reduced(2, 0));
+        area.removeFromBottom(6);
+        list.setBounds(area);
+    }
+
+private:
+    // Row 0 is "Start"; rows 1..done.size() are the steps done, oldest first; after that, the steps that can be redone.
+    int getNumRows() override { return 1 + done.size() + pending.size(); }
+
+    juce::String rowText(int row) const
+    {
+        if (row == 0)
+            return "Start";
+        if (row <= done.size())
+            return done[done.size() - row];
+        return pending[row - done.size() - 1];
+    }
+
+    void paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool rowIsSelected) override
+    {
+        if (rowIsSelected)
+            g.fillAll(juce::Colour(0xff2f5d8a));
+        const bool undone = row > done.size();
+        g.setColour(undone ? juce::Colours::grey : juce::Colours::white);
+        g.setFont(juce::FontOptions(13.0f, row == 0 ? juce::Font::italic : juce::Font::plain));
+        auto text = rowText(row);
+        g.drawText(text.isNotEmpty() ? text : juce::String("Change"), 8, 0, width - 16, height, juce::Justification::centredLeft, true);
+    }
+
+    void listBoxItemClicked(int row, const juce::MouseEvent&) override
+    {
+        auto& undo = document.getUndoManager();
+        int current = done.size();
+        while (current > row && undo.undo())
+            --current;
+        while (current < row && undo.redo())
+            ++current;
+    }
+
+    ImageLabDocument& document;
+    juce::ListBox list;
+    juce::StringArray done, pending;
+    juce::TextButton undoButton { "Undo" };
+    juce::TextButton redoButton { "Redo" };
+};
+
+ImageLabWorkspace::ImageLabWorkspace()
+    : canvas(std::make_unique<Canvas>(document)),
+      layersPanel(std::make_unique<LayersPanel>(*this, document)),
+      historyPanel(std::make_unique<HistoryPanel>(document))
+{
     document.addChangeListener(this);
-    refreshControls();
+    document.getUndoManager().addChangeListener(this);
 }
 
-ImageLabPanel::~ImageLabPanel()
+ImageLabWorkspace::~ImageLabWorkspace()
 {
+    document.getUndoManager().removeChangeListener(this);
     document.removeChangeListener(this);
 }
 
-void ImageLabPanel::paint(juce::Graphics& g)
+juce::Component& ImageLabWorkspace::getCanvas() noexcept { return *canvas; }
+juce::Component& ImageLabWorkspace::getLayersPanel() noexcept { return *layersPanel; }
+juce::Component& ImageLabWorkspace::getHistoryPanel() noexcept { return *historyPanel; }
+
+void ImageLabWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
 {
-    g.fillAll(panelBackground);
-}
-
-void ImageLabPanel::resized()
-{
-    auto area = getLocalBounds();
-    auto side = area.removeFromRight(layersWidth).reduced(8);
-    canvas->setBounds(area);
-
-    layersTitle.setBounds(side.removeFromTop(24));
-    side.removeFromTop(4);
-    auto modeRow = side.removeFromTop(26);
-    modeBox.setBounds(modeRow);
-    side.removeFromTop(6);
-    opacitySlider.setBounds(side.removeFromTop(24));
-    side.removeFromTop(8);
-
-    auto bottom = side.removeFromBottom(98);
-    auto row1 = bottom.removeFromTop(28);
-    const int third = row1.getWidth() / 3;
-    addButton.setBounds(row1.removeFromLeft(third).reduced(2, 0));
-    duplicateButton.setBounds(row1.removeFromLeft(third).reduced(2, 0));
-    deleteButton.setBounds(row1.reduced(2, 0));
-    bottom.removeFromTop(6);
-    auto row2 = bottom.removeFromTop(28);
-    undoButton.setBounds(row2.removeFromLeft(row2.getWidth() / 2).reduced(2, 0));
-    redoButton.setBounds(row2.reduced(2, 0));
-    bottom.removeFromTop(6);
-    saveButton.setBounds(bottom.removeFromTop(28).reduced(2, 0));
-
-    side.removeFromBottom(8);
-    layerList->setBounds(side);
-}
-
-void ImageLabPanel::changeListenerCallback(juce::ChangeBroadcaster*)
-{
-    refreshControls();
-    layerList->update();
+    layersPanel->refresh();
+    historyPanel->refresh();
     canvas->repaint();
 }
 
-void ImageLabPanel::refreshControls()
-{
-    const auto* layer = document.getLayer(document.getActiveIndex());
-    const bool hasLayer = layer != nullptr;
-
-    modeBox.setEnabled(hasLayer);
-    opacitySlider.setEnabled(hasLayer);
-    duplicateButton.setEnabled(hasLayer);
-    deleteButton.setEnabled(hasLayer);
-    saveButton.setEnabled(document.getNumLayers() > 0);
-    undoButton.setEnabled(document.getUndoManager().canUndo());
-    redoButton.setEnabled(document.getUndoManager().canRedo());
-
-    if (hasLayer)
-    {
-        modeBox.setSelectedId(static_cast<int>(layer->mode) + 1, juce::dontSendNotification);
-        if (! opacitySlider.isMouseButtonDown())
-            opacitySlider.setValue(layer->opacity * 100.0, juce::dontSendNotification);
-    }
-}
-
-void ImageLabPanel::status(const juce::String& text)
+void ImageLabWorkspace::status(const juce::String& text)
 {
     if (onStatus)
         onStatus(text);
 }
 
-void ImageLabPanel::addImageLayer()
+void ImageLabWorkspace::addImageLayer()
 {
     // The same image dialog Properties uses: pick from the project's images.
     juce::DialogWindow::LaunchOptions options;
@@ -404,7 +493,7 @@ void ImageLabPanel::addImageLayer()
             canvas->resetView();
         status("Added layer " + name + ".");
     }));
-    options.componentToCentreAround = getTopLevelComponent();
+    options.componentToCentreAround = canvas->getTopLevelComponent();
     options.dialogBackgroundColour = listBackground;
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
@@ -412,7 +501,7 @@ void ImageLabPanel::addImageLayer()
     options.launchAsync();
 }
 
-void ImageLabPanel::saveImage()
+void ImageLabWorkspace::saveImage()
 {
     if (projectSession == nullptr || ! projectSession->isValid())
     {
@@ -421,7 +510,7 @@ void ImageLabPanel::saveImage()
     }
 
     auto* prompt = new juce::AlertWindow("Save Image", "Save the combined layers as a new image in the project:",
-                                         juce::MessageBoxIconType::NoIcon, this);
+                                         juce::MessageBoxIconType::NoIcon, canvas.get());
     prompt->addTextEditor("name", "Image Lab image");
     prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
     prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
