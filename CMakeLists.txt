@@ -102,6 +102,7 @@ if(NOT TARGET node_system)
 endif()
 
 add_subdirectory(Language)
+add_subdirectory(ImageLab)
 
 juce_add_gui_app(CreationTextureApp
     PRODUCT_NAME "DjehutiTexture"

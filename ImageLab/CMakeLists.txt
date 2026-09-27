@@ -1,0 +1,39 @@
+# Image Lab core: layers, colour conversion, and the FRust pixel routines - no UI.
+# The FRust sources are embedded in the library and compiled on first use; nothing is loaded from disk.
+
+juce_add_binary_data(creation_texture_image_lab_frust
+    HEADER_NAME ImageLabFrustSources.h
+    NAMESPACE ImageLabFrust
+    SOURCES
+        Frust/image_lab_core.frust
+)
+
+add_library(creation_texture_image_lab STATIC
+    ImageLabCore.cpp
+    ImageLabCore.h
+)
+
+target_include_directories(creation_texture_image_lab PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(creation_texture_image_lab
+    PUBLIC
+        juce::juce_graphics
+    PRIVATE
+        creation_texture_image_lab_frust
+        creation_suite_frust_plugin_runtime
+)
+target_compile_features(creation_texture_image_lab PUBLIC cxx_std_20)
+
+if(MSVC)
+    target_compile_options(creation_texture_image_lab PRIVATE /FS /MP1)
+endif()
+
+add_executable(CreationTextureImageLabSmoke "${CMAKE_CURRENT_SOURCE_DIR}/../tests/ImageLabSmoke.cpp")
+target_link_libraries(CreationTextureImageLabSmoke PRIVATE creation_texture_image_lab)
+
+set_target_properties(creation_texture_image_lab PROPERTIES OUTPUT_NAME "djehuti_texture_image_lab")
+set_target_properties(CreationTextureImageLabSmoke PROPERTIES OUTPUT_NAME "DjehutiTextureImageLabSmoke")
+
+# Developer tool: compile one FRust file in-process, with crash dialogs off.
+add_executable(CreationTextureFrustProbe "${CMAKE_CURRENT_SOURCE_DIR}/../tests/FrustProbe.cpp")
+target_link_libraries(CreationTextureFrustProbe PRIVATE creation_suite_frust_plugin_runtime)
+set_target_properties(CreationTextureFrustProbe PROPERTIES OUTPUT_NAME "DjehutiTextureFrustProbe")
