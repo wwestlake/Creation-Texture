@@ -105,6 +105,7 @@ project_images::Source NodeGraphPanel::projectImageSource()
         return entries;
     };
     source.thumbnail = [this](const juce::String& logicalPath) { return getProjectThumbnail(logicalPath); };
+    source.image = [this](const juce::String& logicalPath) { return getProjectImage(logicalPath); };
     return source;
 }
 
@@ -177,10 +178,13 @@ bool NodeGraphPanel::isInterestedInFileDrag(const juce::StringArray& files)
 void NodeGraphPanel::compileGraph() {
     ce::material::MaterialCompileResult res = ce::material::CompileMaterialGraph(graph, registry);
     if (!res.ok) {
-        juce::String errStr;
-        for (const auto& err : res.errors) errStr += juce::String(err) + "\n";
-        juce::AlertWindow::showMessageBoxAsync(juce::AlertWindow::WarningIcon, "Compile Error", errStr);
+        juce::StringArray problems;
+        for (const auto& err : res.errors) problems.add(juce::String(err));
+        for (auto& viewer : activeViewers)
+            if (viewer != nullptr) viewer->setGraphProblem("The material cannot be previewed yet: " + problems.joinIntoString(" "));
     } else {
+        for (auto& viewer : activeViewers)
+            if (viewer != nullptr) viewer->setGraphProblem({});
         currentSnapshot = std::make_shared<TextureFrameSnapshot>();
         currentSnapshot->generatedGlsl = res.source.declarations + "\n" + res.source.evaluateFunction;
         for (size_t i = 0; i < res.source.textures.size(); ++i) {

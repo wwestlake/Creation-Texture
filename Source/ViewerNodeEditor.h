@@ -29,6 +29,8 @@ public:
     };
 
     void setSnapshot(std::shared_ptr<const TextureFrameSnapshot> snapshot);
+    // Why the graph did not compile (message thread). Empty clears it. Shown in the status line, never a popup.
+    void setGraphProblem(const juce::String& message);
 
     std::function<void()> onCompileRequested;
     std::function<void()> onSaveRequested;
@@ -58,6 +60,9 @@ private:
     // Why the preview is not showing the material, in words - empty when the shader compiled.
     juce::Label statusLabel;
     void reportShaderStatus(const juce::String& message);
+    void updateStatusLine();
+    juce::String graphProblem;
+    juce::String shaderProblem;
     
     juce::OpenGLContext openGLContext;
 
