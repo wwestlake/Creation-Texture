@@ -55,14 +55,15 @@ automation results), with the originals never overwritten.
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own
 complete window layout, like DaVinci Resolve's pages or Blender's workspaces:
 
-- A **work-area switcher** across the top, under the header: **Materials | Image Lab** (Automations later).
+- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab** (Automations
+  later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
   Choosing one swaps the whole layout; only that area's panels are shown. Panels of other areas never linger.
 - **Materials:** node palette on the left, Node Graph in the centre, 3D Preview on the right with Properties
   (the selected node) below it.
 - **Image Lab:** the canvas in the centre as the main thing, Layers on the right with History (the undo list)
   below it; effects and tools on the left once they exist. No empty placeholder panels.
 - **Each area remembers its arrangement** (saved per work area through the suite's VFS settings store), with
-  **Reset Layout** to go back to the default.
+  **Layout > Reset Layout** to go back to the default.
 - **Menus follow the work area**: Image Lab has its own Layer menu; Materials keeps the material menus. No
   commands that do not apply to the current area.
 

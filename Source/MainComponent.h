@@ -74,8 +74,6 @@ private:
 
     // Declared after the panels they host, so they are destroyed first.
     std::unique_ptr<juce::MenuBarComponent> menuBar;
-    juce::TextButton materialsTab { "Materials" };
-    juce::TextButton imageLabTab { "Image Lab" };
     std::unique_ptr<CreationDock::DockManager> materialsDock;
     std::unique_ptr<CreationDock::DockManager> imageLabDock;
     WorkArea currentArea = WorkArea::materials;

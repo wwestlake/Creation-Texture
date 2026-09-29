@@ -44,18 +44,7 @@ MainComponent::MainComponent()
     menuBar = std::make_unique<juce::MenuBarComponent>(this);
     addAndMakeVisible(menuBar.get());
 
-    // Work-area switcher, under the header: each area swaps in its own whole layout.
-    for (auto* tab : { &materialsTab, &imageLabTab })
-    {
-        tab->setClickingTogglesState(false);
-        tab->setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2f5d8a));
-        addAndMakeVisible(*tab);
-    }
-    materialsTab.setConnectedEdges(juce::Button::ConnectedOnRight);
-    imageLabTab.setConnectedEdges(juce::Button::ConnectedOnLeft);
-    materialsTab.onClick = [this]() { showWorkArea(WorkArea::materials); };
-    imageLabTab.onClick = [this]() { showWorkArea(WorkArea::imageLab); };
-
+    // Work areas are chosen from the Layout menu; each swaps in its own whole layout.
     using Zone = CreationDock::DockTargetZone;
     materialsDock = std::make_unique<CreationDock::DockManager>(*this);
     materialsDock->registerPanel("Nodes", "Nodes", std::make_unique<NonOwningPanelHost>(nodeGraphPanel.getPalette()), Zone::Left);
@@ -136,9 +125,6 @@ void MainComponent::resized()
     auto bounds = getLocalBounds();
     headerBar.setBounds(bounds.removeFromTop(96));
     menuBar->setBounds(bounds.removeFromTop(juce::LookAndFeel::getDefaultLookAndFeel().getDefaultMenuBarHeight()));
-    auto tabs = bounds.removeFromTop(34).reduced(8, 4);
-    materialsTab.setBounds(tabs.removeFromLeft(120));
-    imageLabTab.setBounds(tabs.removeFromLeft(120));
     materialsDock->setBounds(bounds);
     imageLabDock->setBounds(bounds);
 }
@@ -146,8 +132,8 @@ void MainComponent::resized()
 juce::StringArray MainComponent::getMenuBarNames()
 {
     if (currentArea == WorkArea::imageLab)
-        return { "File", "Edit", "Layer", "View", "Help" };
-    return { "File", "View", "Help" };
+        return { "File", "Edit", "Layer", "View", "Layout", "Help" };
+    return { "File", "View", "Layout", "Help" };
 }
 
 juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName)
@@ -197,6 +183,11 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
             menu.addItem(22, "3D Preview");
             menu.addItem(23, "Properties");
         }
+    }
+    else if (menuName == "Layout")
+    {
+        menu.addItem(50, "Materials", true, ! imageLabArea);
+        menu.addItem(51, "Image Lab", true, imageLabArea);
         menu.addSeparator();
         menu.addItem(29, "Reset Layout");
     }
@@ -231,6 +222,8 @@ void MainComponent::menuItemSelected(int menuItemID, int)
             if (auto* app = dynamic_cast<creation::ui::SuiteJUCEApplication*>(juce::JUCEApplication::getInstance()))
                 app->showAboutBox();
             break;
+        case 50: showWorkArea(WorkArea::materials); break;
+        case 51: showWorkArea(WorkArea::imageLab); break;
         case 40: imageLab.addImageLayer(); break;
         case 41: imageLab.getDocument().duplicateActive(); break;
         case 42: imageLab.getDocument().removeActive(); break;
@@ -248,8 +241,6 @@ void MainComponent::showWorkArea(WorkArea area)
     currentArea = area;
     materialsDock->setVisible(area == WorkArea::materials);
     imageLabDock->setVisible(area == WorkArea::imageLab);
-    materialsTab.setToggleState(area == WorkArea::materials, juce::dontSendNotification);
-    imageLabTab.setToggleState(area == WorkArea::imageLab, juce::dontSendNotification);
     menuItemsChanged();
     saveLayouts();
 }
