@@ -50,6 +50,17 @@ Texture is the suite's surface lab, with work areas:
 Everything the app produces goes back into the project as assets (saved materials, processed images,
 automation results), with the originals never overwritten.
 
+### Every tool saves a document that reopens it exactly (owner, 2026-09-30)
+
+Every tool saves a JSON document that lets it be reopened exactly as it was - every source, setting and
+choice - so adjustments can be made later. A tool's output (an image, a texture set) is not enough on its own.
+
+- Materials: the material graph (`.frgraph`) - File > Open Material.
+- Surface Map: the texture set manifest records the source image and every setting - File > Open Surface Map
+  reopens it with all knobs as saved; saving again under the same name updates it.
+- Image Lab: needs its own document (the layer stack, each layer's source and settings, the history of applied
+  effects). Not built yet - today it only saves the flattened image.
+
 ### Work areas own the whole layout (decided 2026-09-27)
 
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own

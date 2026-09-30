@@ -108,8 +108,102 @@ private:
     std::atomic<bool> busy { false };
 };
 
+
+// A setting as two knobs and a type-in box, VST style: Coarse covers the whole range, Fine adds up to +/-5% of it,
+// and the box shows (and takes) the resulting value. Typing sets Coarse to the value and centres Fine;
+// double-clicking a knob resets it (Coarse to the default, Fine to centre).
+class KnobPair final : public juce::Component
+{
+public:
+    static constexpr int rowHeight = 62;
+
+    KnobPair(double lo, double hi, double value, double defaultValue, std::function<void(float)> onChange)
+        : low(lo), high(hi), changed(std::move(onChange))
+    {
+        const double span = (hi - lo) * 0.05;
+        setUp(coarse, lo, hi, value, defaultValue);
+        setUp(fine, -span, span, 0.0, 0.0);
+        fine.setMouseDragSensitivity(400);
+
+        for (auto* caption : { &coarseCaption, &fineCaption })
+        {
+            caption->setJustificationType(juce::Justification::centred);
+            caption->setFont(juce::FontOptions(11.0f));
+            caption->setColour(juce::Label::textColourId, juce::Colours::grey);
+            addAndMakeVisible(*caption);
+        }
+
+        box.setJustification(juce::Justification::centred);
+        box.setInputRestrictions(10, "0123456789.-");
+        box.onReturnKey = [this]() { typed(); };
+        box.onFocusLost = [this]() { typed(); };
+        addAndMakeVisible(box);
+        showValue();
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds();
+        auto knobArea = [&area](juce::Rectangle<int>& knob, juce::Label& caption) {
+            auto column = area.removeFromLeft(52);
+            caption.setBounds(column.removeFromBottom(14));
+            knob = column.withSizeKeepingCentre(46, 46);
+        };
+        juce::Rectangle<int> coarseArea, fineArea;
+        knobArea(coarseArea, coarseCaption);
+        knobArea(fineArea, fineCaption);
+        coarse.setBounds(coarseArea);
+        fine.setBounds(fineArea);
+        area.removeFromLeft(6);
+        box.setBounds(area.withSizeKeepingCentre(juce::jmin(area.getWidth(), 70), 26));
+    }
+
+private:
+    void setUp(juce::Slider& knob, double lo, double hi, double value, double resetTo)
+    {
+        knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        knob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        knob.setRange(lo, hi, 0.0);
+        knob.setValue(value, juce::dontSendNotification);
+        knob.setDoubleClickReturnValue(true, resetTo);
+        knob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff5b8fc7));
+        knob.onValueChange = [this]() { valueChanged(); };
+        addAndMakeVisible(knob);
+    }
+
+    float combined() const { return static_cast<float>(juce::jlimit(low, high, coarse.getValue() + fine.getValue())); }
+
+    void showValue() { box.setText(juce::String(combined(), 3), juce::dontSendNotification); }
+
+    void valueChanged()
+    {
+        showValue();
+        if (changed)
+            changed(combined());
+    }
+
+    void typed()
+    {
+        const auto text = box.getText().trim();
+        if (text.isEmpty())
+        {
+            showValue();
+            return;
+        }
+        fine.setValue(0.0, juce::dontSendNotification);
+        coarse.setValue(juce::jlimit(low, high, text.getDoubleValue()), juce::dontSendNotification);
+        valueChanged();
+    }
+
+    double low, high;
+    std::function<void(float)> changed;
+    juce::Slider coarse, fine;
+    juce::Label coarseCaption { {}, "Coarse" }, fineCaption { {}, "Fine" };
+    juce::TextEditor box;
+};
+
 //==============================================================================
-// Source image slot, raised/sunken, and CrazyBump's sliders.
+// Source image slot, raised/sunken, and CrazyBump's controls as knob pairs.
 class SurfaceMapWorkspace::SettingsPanel final : public juce::Component
 {
 public:
@@ -126,6 +220,7 @@ public:
         rows.clear();
         content.removeAllChildren();
         const auto& s = workspace.getSettings();
+        const surface_maps::Settings defaults;
 
         heading("Source image");
         auto slot = std::make_unique<ProjectImageSlot>(workspace.getImageSource(), workspace.getSourcePath(),
@@ -140,14 +235,14 @@ public:
         heading("Height");
         auto shape = std::make_unique<ShapeChoice>(s.sunken, [this](bool sunken) { edit([sunken](auto& st) { st.sunken = sunken; }); });
         add(std::move(shape), 28);
-        slider("Intensity", 0.0, 4.0, s.intensity, [](auto& st, float v) { st.intensity = v; });
-        slider("Sharpen", 0.0, 2.0, s.sharpen, [](auto& st, float v) { st.sharpen = v; });
-        slider("Noise Removal", 0.0, 8.0, s.noiseRemoval, [](auto& st, float v) { st.noiseRemoval = v; });
-        slider("Fine Detail", 0.0, 1.0, s.fine, [](auto& st, float v) { st.fine = v; });
-        slider("Medium Detail", 0.0, 1.0, s.medium, [](auto& st, float v) { st.medium = v; });
-        slider("Large Detail", 0.0, 1.0, s.large, [](auto& st, float v) { st.large = v; });
-        slider("Very Large Detail", 0.0, 1.0, s.veryLarge, [](auto& st, float v) { st.veryLarge = v; });
-        slider("Huge Detail", 0.0, 1.0, s.huge, [](auto& st, float v) { st.huge = v; });
+        slider("Intensity", 0.0, 4.0, s.intensity, defaults.intensity, [](auto& st, float v) { st.intensity = v; });
+        slider("Sharpen", 0.0, 2.0, s.sharpen, defaults.sharpen, [](auto& st, float v) { st.sharpen = v; });
+        slider("Noise Removal", 0.0, 8.0, s.noiseRemoval, defaults.noiseRemoval, [](auto& st, float v) { st.noiseRemoval = v; });
+        slider("Fine Detail", 0.0, 1.0, s.fine, defaults.fine, [](auto& st, float v) { st.fine = v; });
+        slider("Medium Detail", 0.0, 1.0, s.medium, defaults.medium, [](auto& st, float v) { st.medium = v; });
+        slider("Large Detail", 0.0, 1.0, s.large, defaults.large, [](auto& st, float v) { st.large = v; });
+        slider("Very Large Detail", 0.0, 1.0, s.veryLarge, defaults.veryLarge, [](auto& st, float v) { st.veryLarge = v; });
+        slider("Huge Detail", 0.0, 1.0, s.huge, defaults.huge, [](auto& st, float v) { st.huge = v; });
 
         heading("Normal");
         auto dx = std::make_unique<juce::ToggleButton>("DirectX green (flip Y)");
@@ -156,17 +251,17 @@ public:
         add(std::move(dx), 26);
 
         heading("Occlusion");
-        slider("Strength", 0.0, 2.0, s.occlusion, [](auto& st, float v) { st.occlusion = v; });
+        slider("Strength", 0.0, 2.0, s.occlusion, defaults.occlusion, [](auto& st, float v) { st.occlusion = v; });
 
         heading("Specular");
-        slider("Level", 0.0, 1.0, s.specularLevel, [](auto& st, float v) { st.specularLevel = v; });
-        slider("Contrast", 0.0, 12.0, s.specularContrast, [](auto& st, float v) { st.specularContrast = v; });
+        slider("Level", 0.0, 1.0, s.specularLevel, defaults.specularLevel, [](auto& st, float v) { st.specularLevel = v; });
+        slider("Contrast", 0.0, 12.0, s.specularContrast, defaults.specularContrast, [](auto& st, float v) { st.specularContrast = v; });
 
         heading("Diffuse");
-        slider("De-light", 0.0, 1.0, s.delight, [](auto& st, float v) { st.delight = v; });
+        slider("De-light", 0.0, 1.0, s.delight, defaults.delight, [](auto& st, float v) { st.delight = v; });
 
         heading("Metallic");
-        slider("Metallic", 0.0, 1.0, s.metallic, [](auto& st, float v) { st.metallic = v; });
+        slider("Metallic", 0.0, 1.0, s.metallic, defaults.metallic, [](auto& st, float v) { st.metallic = v; });
 
         layout();
     }
@@ -241,35 +336,33 @@ private:
         rows.push_back({ nullptr, std::move(editor), height });
     }
 
-    void slider(const juce::String& name, double lo, double hi, float value, std::function<void(surface_maps::Settings&, float)> setter)
+    void slider(const juce::String& name, double lo, double hi, float value, float defaultValue,
+                std::function<void(surface_maps::Settings&, float)> setter)
     {
         auto label = std::make_unique<juce::Label>();
         label->setText(name, juce::dontSendNotification);
         label->setColour(juce::Label::textColourId, juce::Colours::white);
-        auto s = std::make_unique<juce::Slider>(juce::Slider::LinearBar, juce::Slider::TextBoxLeft);
-        s->setRange(lo, hi, 0.0);
-        s->setNumDecimalPlacesToDisplay(2);
-        s->setValue(value, juce::dontSendNotification);
-        s->onValueChange = [this, setter, raw = s.get()]() {
-            const float v = static_cast<float>(raw->getValue());
+        label->setJustificationType(juce::Justification::centredLeft);
+        auto knobs = std::make_unique<KnobPair>(lo, hi, value, defaultValue, [this, setter](float v) {
             edit([&setter, v](auto& st) { setter(st, v); });
-        };
+        });
         content.addAndMakeVisible(*label);
-        content.addAndMakeVisible(*s);
-        rows.push_back({ std::move(label), std::move(s), 24 });
+        content.addAndMakeVisible(*knobs);
+        rows.push_back({ std::move(label), std::move(knobs), KnobPair::rowHeight });
     }
 
     void layout()
     {
         const int width = juce::jmax(220, viewport.getWidth() - viewport.getScrollBarThickness());
-        const int labelWidth = 120;
         int y = 8;
         for (auto& row : rows)
         {
             if (row.label != nullptr && row.editor != nullptr)
             {
-                row.label->setBounds(8, y, labelWidth, row.height);
-                row.editor->setBounds(8 + labelWidth, y, width - labelWidth - 16, row.height);
+                // The setting's name on its own line, its knobs and value box below it.
+                row.label->setBounds(8, y, width - 16, 18);
+                y += 18;
+                row.editor->setBounds(8, y, width - 16, row.height);
             }
             else if (row.label != nullptr)
             {
@@ -478,6 +571,8 @@ void SurfaceMapWorkspace::setSettings(const surface_maps::Settings& newSettings)
 
 void SurfaceMapWorkspace::setSource(const juce::String& logicalPath)
 {
+    if (logicalPath != sourcePath)
+        openSetName.clear();
     sourcePath = logicalPath;
     sourceName.clear();
     sourceImage = {};
@@ -559,7 +654,7 @@ void SurfaceMapWorkspace::saveSurfaceMap()
 
     auto* prompt = new juce::AlertWindow("Save Surface Map", "Save these maps as one texture set in the project:",
                                          juce::MessageBoxIconType::NoIcon, mapsPanel.get());
-    prompt->addTextEditor("name", sourceName);
+    prompt->addTextEditor("name", openSetName.isNotEmpty() ? openSetName : sourceName);
     prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
     prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     prompt->enterModalState(true, juce::ModalCallbackFunction::create([this, prompt](int result) {
@@ -595,8 +690,66 @@ void SurfaceMapWorkspace::saveSurfaceMap()
                 status("Could not save the texture set: " + saveError);
                 return;
             }
+            openSetName = name;
             status("Saved texture set " + name + ".");
         });
         job->launchThread();
     }), true);
+}
+
+void SurfaceMapWorkspace::openSurfaceMap()
+{
+    if (! canOpen())
+    {
+        status("Open a project first.");
+        return;
+    }
+
+    // The project's texture sets, shown by their base colour map.
+    project_images::Source sets;
+    sets.noun = "texture set";
+    sets.list = [this]() {
+        juce::Array<project_images::Entry> entries;
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath.endsWith(".texset.json"))
+                entries.add({ asset.displayName, asset.logicalPath });
+        return entries;
+    };
+    auto baseColourOf = [](const juce::String& manifestPath) {
+        return manifestPath.upToLastOccurrenceOf(".texset.json", false, false) + ".texset/basecolor.png";
+    };
+    sets.thumbnail = [this, baseColourOf](const juce::String& path) { return images.thumbnail ? images.thumbnail(baseColourOf(path)) : juce::Image(); };
+    sets.image = [this, baseColourOf](const juce::String& path) { return images.image ? images.image(baseColourOf(path)) : juce::Image(); };
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "Open Surface Map";
+    options.content.setOwned(new ProjectImagePicker(sets, {}, [this](const juce::String& manifestPath) {
+        if (manifestPath.isEmpty())
+            return;
+
+        juce::MemoryBlock bytes;
+        if (! projectSession->readEntry(manifestPath, bytes))
+        {
+            status("Could not read " + manifestPath + ".");
+            return;
+        }
+        const auto manifest = juce::JSON::parse(bytes.toString());
+        if (manifest["format"].toString() != texture_set::formatName)
+        {
+            status(manifestPath + " is not a texture set.");
+            return;
+        }
+
+        settings = surface_maps::Settings::fromVar(manifest["settings"]);
+        setSource(manifest["source"].toString());          // recomputes the maps with the saved settings
+        openSetName = manifest["name"].toString();          // after setSource, which starts a new set on a new image
+        settingsPanel->rebuild();
+        status("Opened " + openSetName + ".");
+    }));
+    options.componentToCentreAround = mapsPanel->getTopLevelComponent();
+    options.dialogBackgroundColour = juce::Colour(0xff161a1f);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = true;
+    options.launchAsync();
 }

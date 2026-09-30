@@ -19,6 +19,8 @@ struct Source
     std::function<juce::Array<Entry>()> list;
     // A small preview for one image; the caller caches. Invalid if the image cannot be read.
     std::function<juce::Image(const juce::String& logicalPath)> thumbnail;
+    // What the list holds, for the dialog's wording ("image", "texture set").
+    juce::String noun { "image" };
     // The full image, for the dialog's larger preview.
     std::function<juce::Image(const juce::String& logicalPath)> image;
 };

@@ -46,6 +46,7 @@ ProjectImagePicker::ProjectImagePicker(project_images::Source source,
     list.setColour(juce::ListBox::backgroundColourId, pickerBackground);
     addAndMakeVisible(list);
 
+    useButton.setButtonText("Use " + images.noun.substring(0, 1).toUpperCase() + images.noun.substring(1));
     useButton.onClick = [this]() { finish(true, highlightedPath()); };
     clearButton.onClick = [this]() { finish(true, {}); };
     cancelButton.onClick = [this]() { finish(false, {}); };
@@ -69,7 +70,8 @@ void ProjectImagePicker::applyFilter()
         if (needle.isEmpty() || entry.displayName.containsIgnoreCase(needle) || entry.logicalPath.containsIgnoreCase(needle))
             shown.add(entry);
 
-    emptyMessage.setText(all.isEmpty() ? "There are no images in this project yet." : "No images match the filter.",
+    emptyMessage.setText(all.isEmpty() ? "There are no " + images.noun + "s in this project yet."
+                                       : "No " + images.noun + "s match the filter.",
                          juce::dontSendNotification);
     emptyMessage.setVisible(shown.isEmpty());
     list.updateContent();

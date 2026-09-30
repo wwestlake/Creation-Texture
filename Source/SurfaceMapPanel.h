@@ -25,6 +25,9 @@ public:
 
     bool canSave() const noexcept;
     void saveSurfaceMap();
+    // Reopens a saved texture set exactly as it was saved: its source image and every setting.
+    bool canOpen() const noexcept { return projectSession != nullptr && projectSession->isValid(); }
+    void openSurfaceMap();
 
     // Used by the panels.
     const surface_maps::Settings& getSettings() const noexcept { return settings; }
@@ -48,6 +51,7 @@ private:
     surface_maps::Settings settings;
 
     juce::String sourcePath, sourceName;
+    juce::String openSetName;             // the texture set being edited, if one was opened or saved
     juce::Image sourceImage;              // full size, for saving
     std::vector<float> previewPixels;     // linear rgba, at most 1024 px on a side
     int previewWidth = 0, previewHeight = 0;
