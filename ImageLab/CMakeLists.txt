@@ -7,6 +7,7 @@ juce_add_binary_data(creation_texture_image_lab_frust
     SOURCES
         Frust/image_lab_core.frust
         Frust/surface_maps.frust
+        Frust/image_graph.frust
 )
 
 add_library(creation_texture_image_lab STATIC
@@ -16,12 +17,15 @@ add_library(creation_texture_image_lab STATIC
     SurfaceMaps.h
     TextureSet.cpp
     TextureSet.h
+    ImageGraph.cpp
+    ImageGraph.h
 )
 
 target_include_directories(creation_texture_image_lab PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(creation_texture_image_lab
     PUBLIC
         juce::juce_graphics
+        creation_suite_node_system
     PRIVATE
         creation_texture_image_lab_frust
         creation_suite_frust_plugin_runtime
@@ -51,3 +55,7 @@ set_target_properties(CreationTextureFrustProbe PROPERTIES OUTPUT_NAME "DjehutiT
 add_executable(CreationTextureSurfaceMapsBench "${CMAKE_CURRENT_SOURCE_DIR}/../tests/SurfaceMapsBench.cpp")
 target_link_libraries(CreationTextureSurfaceMapsBench PRIVATE creation_texture_image_lab)
 set_target_properties(CreationTextureSurfaceMapsBench PROPERTIES OUTPUT_NAME "DjehutiTextureSurfaceMapsBench")
+
+add_executable(CreationTextureImageGraphSmoke "${CMAKE_CURRENT_SOURCE_DIR}/../tests/ImageGraphSmoke.cpp")
+target_link_libraries(CreationTextureImageGraphSmoke PRIVATE creation_texture_image_lab)
+set_target_properties(CreationTextureImageGraphSmoke PROPERTIES OUTPUT_NAME "DjehutiTextureImageGraphSmoke")

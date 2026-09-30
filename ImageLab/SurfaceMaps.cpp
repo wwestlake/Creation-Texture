@@ -3,6 +3,7 @@
 
 #include <creation/frust/PluginRuntime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -208,8 +209,9 @@ bool Engine::specular(const std::vector<float>& gray, const std::vector<float>& 
 }
 
 bool Engine::compute(const std::vector<float>& source, int width, int height, const Settings& s, Maps& out, juce::String& error,
-                     const Progress& progress)
+                     const Progress& progress, const Wanted& wanted)
 {
+    const bool needHeight = wanted.height || wanted.normal || wanted.occlusion;
     auto report = [&progress](float fraction, const char* step) { if (progress) progress(fraction, step); };
     if (! isReady()) { error = getError(); return false; }
     const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
@@ -251,17 +253,21 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
     std::vector<std::vector<float>> levels(6);
     levels[0] = gray;
     const char* levelNames[5] = { "Fine detail", "Medium detail", "Large detail", "Very large detail", "Huge detail" };
-    for (int i = 0; i < 5; ++i)
+    const int levelsNeeded = needHeight ? 5 : (wanted.specular ? 2 : 0);
+    for (int i = 0; i < levelsNeeded; ++i)
     {
         report(0.06f + 0.08f * static_cast<float>(i), levelNames[i]);
         if (! gaussianish(gray, levels[static_cast<size_t>(i + 1)], width, height, radius(radii[i]), error))
             return false;
     }
 
-    report(0.46f, "Height map");
     out.width = width;
     out.height = height;
-    out.heightMap.assign(count, 0.0f);
+    out.heightMap.assign(count, 0.5f);  // flat unless made below
+    if (needHeight)
+    {
+    report(0.46f, "Height map");
+    std::fill(out.heightMap.begin(), out.heightMap.end(), 0.0f);
     for (int i = 0; i < 5; ++i)
         implementation->addBand(out.heightMap.data(), levels[static_cast<size_t>(i)].data(), levels[static_cast<size_t>(i + 1)].data(),
                                 static_cast<std::int64_t>(count), weights[i] * static_cast<float>(i + 1));
@@ -269,15 +275,21 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
         return false;
     if (s.sunken)
         implementation->invert(out.heightMap.data(), static_cast<std::int64_t>(count));
+    }
 
-    report(0.5f, "Normal map");
-    if (! normalFromHeight(out.heightMap, out.normal, width, height, s.intensity * 8.0f * scale, s.directX, error))
-        return false;
+    if (wanted.normal)
+    {
+        report(0.5f, "Normal map");
+        if (! normalFromHeight(out.heightMap, out.normal, width, height, s.intensity * 8.0f * scale, s.directX, error))
+            return false;
+    }
 
     out.occlusion.assign(count, 1.0f);
     float occlusionStage = 0.56f;
     for (float at512 : { 3.0f, 8.0f, 20.0f })
     {
+        if (! wanted.occlusion)
+            break;
         report(occlusionStage, "Occlusion");
         occlusionStage += 0.08f;
         std::vector<float> blurredHeight;
@@ -286,13 +298,18 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
             return false;
     }
 
-    report(0.8f, "Specular and roughness");
-    if (! specular(gray, levels[2], out.specular, s.specularLevel, s.specularContrast, error))
-        return false;
-    out.roughness.resize(count);
-    for (size_t i = 0; i < count; ++i)
-        out.roughness[i] = 1.0f - out.specular[i];
+    if (wanted.specular)
+    {
+        report(0.8f, "Specular and roughness");
+        if (! specular(gray, levels[2], out.specular, s.specularLevel, s.specularContrast, error))
+            return false;
+        out.roughness.resize(count);
+        for (size_t i = 0; i < count; ++i)
+            out.roughness[i] = 1.0f - out.specular[i];
+    }
 
+    if (wanted.diffuse)
+    {
     report(0.84f, "Removing lighting from the colour");
     double sum = 0.0;
     for (float v : levels[0])
@@ -302,6 +319,7 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
     if (! gaussianish(gray, lighting, width, height, radius(96.0f), error)
         || ! delight(source, lighting, out.diffuse, mean, s.delight, error))
         return false;
+    }
 
     out.metallic = s.metallic;
     report(1.0f, "Maps done");

@@ -1,0 +1,342 @@
+manifest "{\"name\":\"image_graph\",\"version\":\"0.1.0\",\"description\":\"Image Graph node routines: fill, value-noise fBm, cells, checker, gradient, invert, grayscale, levels. 32-bit float linear RGBA.\",\"entryPoints\":[\"ig_fill\",\"ig_noise\",\"ig_cells\",\"ig_checker\",\"ig_gradient\",\"ig_invert\",\"ig_grayscale\",\"ig_levels\"],\"requiredHostFunctions\":[{\"name\":\"ig_host_floor\"},{\"name\":\"ig_host_pow\"},{\"name\":\"ig_host_sqrt\"},{\"name\":\"ig_host_i64_to_f32\"},{\"name\":\"ig_host_f32_to_i64\"},{\"name\":\"ig_host_hash\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Image Graph node routines for Djehuti Texture. Buffers are rgba, 32-bit float, linear light; `w`, `h` in pixels.
+// Written with no Texture-specific code so they can move into a Frate pod.
+// FRust today: a dereference must start an expression, pointer arithmetic is base + one offset, no `||`, and
+// `out` is reserved - so offsets are computed first and pixels are read into locals.
+
+extern fn ig_host_floor(v: f32) -> f32;
+extern fn ig_host_pow(base: f32, e: f32) -> f32;
+extern fn ig_host_sqrt(v: f32) -> f32;
+extern fn ig_host_i64_to_f32(v: i64) -> f32;
+extern fn ig_host_f32_to_i64(v: f32) -> i64;
+// A repeatable pseudo-random value in 0..1 for a lattice point and seed.
+extern fn ig_host_hash(x: i64, y: i64, seed: i64) -> f32;
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+fn smooth(t: f32) -> f32 = {
+    let three: f32 = 3.0;
+    let two: f32 = 2.0;
+    t * t * (three - two * t)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 = {
+    a + (b - a) * t
+}
+
+// Writes one grey value (all three channels) and alpha 1.
+fn put_gray(rgba: raw* f32, index: i64, v: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let mut p: raw* f32 = rgba;
+    let mut o: i64 = index * 4;
+    p = rgba + o;
+    *p = v;
+    p = p + 1;
+    *p = v;
+    p = p + 1;
+    *p = v;
+    p = p + 1;
+    *p = one;
+    1
+}
+
+// Value noise that tiles with period `period` cells (so generated textures wrap).
+fn value_noise(x: f32, y: f32, period: i64, seed: i64) -> f32 = {
+    let fx: f32 = ig_host_floor(x);
+    let fy: f32 = ig_host_floor(y);
+    let tx: f32 = smooth(x - fx);
+    let ty: f32 = smooth(y - fy);
+    let mut ix: i64 = ig_host_f32_to_i64(fx);
+    let mut iy: i64 = ig_host_f32_to_i64(fy);
+    let mut ix1: i64 = ix + 1;
+    let mut iy1: i64 = iy + 1;
+    if (ix >= period) { ix = ix - period; };
+    if (iy >= period) { iy = iy - period; };
+    if (ix1 >= period) { ix1 = ix1 - period; };
+    if (iy1 >= period) { iy1 = iy1 - period; };
+    let a: f32 = ig_host_hash(ix, iy, seed);
+    let b: f32 = ig_host_hash(ix1, iy, seed);
+    let c: f32 = ig_host_hash(ix, iy1, seed);
+    let d: f32 = ig_host_hash(ix1, iy1, seed);
+    lerp(lerp(a, b, tx), lerp(c, d, tx), ty)
+}
+
+pub fn ig_fill(rgba: raw* f32, count: i64, r: f32, g: f32, b: f32, a: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut o: i64 = 0;
+    let mut p: raw* f32 = rgba;
+    while (i < count) {
+        o = i * 4;
+        p = rgba + o;
+        *p = r;
+        p = p + 1;
+        *p = g;
+        p = p + 1;
+        *p = b;
+        p = p + 1;
+        *p = a;
+        i = i + 1;
+    };
+    1
+}
+
+// Fractal value noise, tiling: `scale` cells across the image, `octaves` layers each twice as fine and half as
+// strong. Output grey 0..1 (normalised by the total amplitude).
+pub fn ig_noise(rgba: raw* f32, w: i64, h: i64, scale: i64, octaves: i64, seed: i64) -> i64 = {
+    if (scale < 1) {
+        0
+    } else {
+        let zero: f32 = 0.0;
+        let one: f32 = 1.0;
+        let half: f32 = 0.5;
+        let two: f32 = 2.0;
+        let fw: f32 = ig_host_i64_to_f32(w);
+        let fh: f32 = ig_host_i64_to_f32(h);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut k: i64 = 0;
+        let mut period: i64 = scale;
+        let mut freq: f32 = 0.0;
+        let mut amp: f32 = 0.0;
+        let mut total: f32 = 0.0;
+        let mut norm: f32 = 0.0;
+        let mut u: f32 = 0.0;
+        let mut v: f32 = 0.0;
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                u = ig_host_i64_to_f32(x) / fw;
+                v = ig_host_i64_to_f32(y) / fh;
+                total = zero;
+                norm = zero;
+                amp = one;
+                period = scale;
+                k = 0;
+                while (k < octaves) {
+                    freq = ig_host_i64_to_f32(period);
+                    total = total + amp * value_noise(u * freq, v * freq, period, seed + k * 101);
+                    norm = norm + amp;
+                    amp = amp * half;
+                    period = period * 2;
+                    k = k + 1;
+                };
+                if (norm > zero) { total = total / norm; };
+                put_gray(rgba, y * w + x, clamp01(total));
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Cells (Worley): distance to the nearest random point, one point per cell, `scale` cells across, tiling.
+// Output grey: 0 at a point, brighter away from it (distance in cell units, clamped at 1).
+pub fn ig_cells(rgba: raw* f32, w: i64, h: i64, scale: i64, seed: i64) -> i64 = {
+    if (scale < 1) {
+        0
+    } else {
+        let big: f32 = 100.0;
+        let fw: f32 = ig_host_i64_to_f32(w);
+        let fh: f32 = ig_host_i64_to_f32(h);
+        let fs: f32 = ig_host_i64_to_f32(scale);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut dx: i64 = 0;
+        let mut dy: i64 = 0;
+        let mut cx: i64 = 0;
+        let mut cy: i64 = 0;
+        let mut wx: i64 = 0;
+        let mut wy: i64 = 0;
+        let mut u: f32 = 0.0;
+        let mut v: f32 = 0.0;
+        let mut px: f32 = 0.0;
+        let mut py: f32 = 0.0;
+        let mut ex: f32 = 0.0;
+        let mut ey: f32 = 0.0;
+        let mut d: f32 = 0.0;
+        let mut best: f32 = 0.0;
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                u = ig_host_i64_to_f32(x) / fw * fs;
+                v = ig_host_i64_to_f32(y) / fh * fs;
+                cx = ig_host_f32_to_i64(ig_host_floor(u));
+                cy = ig_host_f32_to_i64(ig_host_floor(v));
+                best = big;
+                dy = 0 - 1;
+                while (dy <= 1) {
+                    dx = 0 - 1;
+                    while (dx <= 1) {
+                        wx = cx + dx;
+                        wy = cy + dy;
+                        // The point for the wrapped cell, placed in the unwrapped neighbour.
+                        if (wx < 0) { wx = wx + scale; };
+                        if (wy < 0) { wy = wy + scale; };
+                        if (wx >= scale) { wx = wx - scale; };
+                        if (wy >= scale) { wy = wy - scale; };
+                        px = ig_host_i64_to_f32(cx + dx) + ig_host_hash(wx, wy, seed);
+                        py = ig_host_i64_to_f32(cy + dy) + ig_host_hash(wx, wy, seed + 7919);
+                        ex = u - px;
+                        ey = v - py;
+                        d = ig_host_sqrt(ex * ex + ey * ey);
+                        if (d < best) { best = d; };
+                        dx = dx + 1;
+                    };
+                    dy = dy + 1;
+                };
+                put_gray(rgba, y * w + x, clamp01(best));
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Checkerboard, `scale` squares across, grey a / grey b.
+pub fn ig_checker(rgba: raw* f32, w: i64, h: i64, scale: i64, a: f32, b: f32) -> i64 = {
+    if (scale < 1) {
+        0
+    } else {
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut cx: i64 = 0;
+        let mut cy: i64 = 0;
+        let mut parity: i64 = 0;
+        while (y < h) {
+            x = 0;
+            cy = y * scale / h;
+            while (x < w) {
+                cx = x * scale / w;
+                parity = cx + cy;
+                parity = parity - (parity / 2) * 2;
+                if (parity == 0) { put_gray(rgba, y * w + x, a); } else { put_gray(rgba, y * w + x, b); };
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Gradient from 0 to 1: direction 0 = left to right, 1 = top to bottom, 2 = radial from the centre (1 at the corners).
+pub fn ig_gradient(rgba: raw* f32, w: i64, h: i64, direction: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let fw: f32 = ig_host_i64_to_f32(w - 1);
+    let fh: f32 = ig_host_i64_to_f32(h - 1);
+    let corner: f32 = ig_host_sqrt(half * half + half * half);
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut u: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            u = ig_host_i64_to_f32(x) / fw;
+            v = ig_host_i64_to_f32(y) / fh;
+            if (direction == 1) {
+                g = v;
+            } else if (direction == 2) {
+                g = ig_host_sqrt((u - half) * (u - half) + (v - half) * (v - half)) / corner;
+            } else {
+                g = u;
+            };
+            put_gray(rgba, y * w + x, clamp01(g));
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// rgb = 1 - rgb, alpha kept. In place.
+pub fn ig_invert(rgba: raw* f32, count: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut c: i64 = 0;
+    let mut o: i64 = 0;
+    let mut p: raw* f32 = rgba;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        c = 0;
+        while (c < 3) {
+            o = i * 4 + c;
+            p = rgba + o;
+            v = *p;
+            *p = one - v;
+            c = c + 1;
+        };
+        i = i + 1;
+    };
+    1
+}
+
+// Luminance into all three channels, alpha kept. In place.
+pub fn ig_grayscale(rgba: raw* f32, count: i64) -> i64 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let mut i: i64 = 0;
+    let mut o: i64 = 0;
+    let mut p: raw* f32 = rgba;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut y: f32 = 0.0;
+    while (i < count) {
+        o = i * 4;
+        p = rgba + o;
+        r = *p;
+        p = p + 1;
+        g = *p;
+        p = p + 1;
+        b = *p;
+        y = kr * r + kg * g + kb * b;
+        p = rgba + o;
+        *p = y;
+        p = p + 1;
+        *p = y;
+        p = p + 1;
+        *p = y;
+        i = i + 1;
+    };
+    1
+}
+
+// Levels, like GIMP: input range [in_black, in_white] -> 0..1, then gamma, then output range [out_black, out_white].
+// In place on rgb; alpha kept.
+pub fn ig_levels(rgba: raw* f32, count: i64, in_black: f32, in_white: f32, gamma: f32, out_black: f32, out_white: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let tiny: f32 = 0.0001;
+    let mut range: f32 = in_white - in_black;
+    if (range < tiny) { range = tiny; };
+    let mut g: f32 = gamma;
+    if (g < tiny) { g = tiny; };
+    let inverse: f32 = one / g;
+    let mut i: i64 = 0;
+    let mut c: i64 = 0;
+    let mut o: i64 = 0;
+    let mut p: raw* f32 = rgba;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        c = 0;
+        while (c < 3) {
+            o = i * 4 + c;
+            p = rgba + o;
+            v = *p;
+            v = clamp01((v - in_black) / range);
+            v = ig_host_pow(v, inverse);
+            *p = out_black + (out_white - out_black) * v;
+            c = c + 1;
+        };
+        i = i + 1;
+    };
+    1
+}

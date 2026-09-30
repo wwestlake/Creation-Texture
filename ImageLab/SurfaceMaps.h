@@ -50,6 +50,16 @@ struct Maps
     bool isValid() const noexcept { return width > 0 && height > 0 && heightMap.size() == static_cast<size_t>(width) * static_cast<size_t>(height); }
 };
 
+// Which maps to make. Height is made whenever normal or occlusion needs it; anything not wanted is skipped.
+struct Wanted
+{
+    bool height = true;
+    bool normal = true;
+    bool occlusion = true;
+    bool specular = true;   // specular and roughness
+    bool diffuse = true;
+};
+
 // Reports how far a long job has got (0..1) and the step it is on. Called on the working thread.
 using Progress = std::function<void(float fraction, const juce::String& step)>;
 
@@ -64,7 +74,7 @@ public:
 
     // source: rgba linear, width * height pixels. Safe to call from a background thread (one call at a time).
     bool compute(const std::vector<float>& source, int width, int height, const Settings& settings, Maps& out, juce::String& error,
-                 const Progress& progress = {});
+                 const Progress& progress = {}, const Wanted& wanted = {});
 
     // The raw routines, exposed for tests.
     bool boxBlur(const std::vector<float>& src, std::vector<float>& dst, int width, int height, int radius, juce::String& error);

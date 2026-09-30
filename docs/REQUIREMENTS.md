@@ -66,8 +66,8 @@ choice - so adjustments can be made later. A tool's output (an image, a texture 
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own
 complete window layout, like DaVinci Resolve's pages or Blender's workspaces:
 
-- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab**, **Surface Map**
-  (Automations later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
+- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab**, **Surface Map**,
+  **Image Graph** (Automations later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
   Choosing one swaps the whole layout; only that area's panels are shown. Panels of other areas never linger.
 - **Materials:** node palette on the left, Node Graph in the centre, 3D Preview on the right with Properties
   (the selected node) below it.
@@ -123,9 +123,12 @@ A node graph for making and processing images, in the spirit of Substance Design
 - **Generator** nodes draw onto an image (noise, cells, gradients, patterns, and the frust_image_demo generators:
   wood, marble, rust, cracks, clouds...). **Modifier** nodes change an image (blur, levels, blend, warp,
   transform, normal-from-height...).
-- **Surface Map** node: its Properties pick one of the project's saved surface maps (texture sets); it runs that
-  set's saved settings on the image wired into it and outputs normal, height, occlusion, roughness and diffuse.
-  With nothing wired in, it outputs the maps saved in the set.
+- **Surface Map** node: all the Surface Map settings are the node's properties, set and changed in Properties.
+  Picking one of the project's saved surface maps loads that set's settings into them as a starting point. It
+  runs on the image wired into it. **One output per map type** (normal, height, occlusion, roughness, specular,
+  diffuse, ORM): connect the ones you want - **an output that is not connected is not computed**.
+- Nothing is computed unless something downstream (or the preview) needs it.
+- **Its own layout: Layout > Image Graph** (node palette, graph, Properties, 2D preview).
 - **Preview anywhere**: every node shows a thumbnail, and any node can be shown in a large 2D preview.
 - **Image analysis** nodes (histogram and other statistics) and **adjustment** nodes that change how colour and
   contrast are distributed - Curves and Levels edited by drawing on a graph over the histogram, like GIMP.
