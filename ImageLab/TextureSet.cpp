@@ -238,9 +238,14 @@ bool encodeGray16Png(const std::vector<float>& gray, int width, int height, juce
     return encodePng(gray16Bytes(gray), width, height, 0, 16, out);
 }
 
+juce::String manifestPathFor(const juce::String& basePath, const juce::String& name)
+{
+    return basePath + slugFor(name) + ".texset.json";
+}
+
 bool build(const surface_maps::Maps& maps, const surface_maps::Settings& settings, const juce::String& name,
            const juce::String& basePath, const juce::String& sourceAsset, Pack& out, juce::String& error,
-           const surface_maps::Progress& progress)
+           const surface_maps::Progress& progress, const juce::var& previousManifest)
 {
     if (! maps.isValid())
     {
@@ -249,8 +254,12 @@ bool build(const surface_maps::Maps& maps, const surface_maps::Settings& setting
     }
 
     const auto slug = slugFor(name);
-    const auto folder = basePath + slug + ".texset/";
+    // A set saved before versions existed counts as revision 1.
+    const bool hasPrevious = previousManifest.isObject();
+    const int revision = hasPrevious ? juce::jmax(1, static_cast<int>(previousManifest.getProperty("revision", 1))) + 1 : 1;
+    const auto folder = basePath + slug + ".texset/v" + juce::String(revision) + "/";
     out = {};
+    out.revision = revision;
     out.manifest.logicalPath = basePath + slug + ".texset.json";
 
     // The six maps are independent, so they are encoded in parallel.
@@ -330,6 +339,24 @@ bool build(const surface_maps::Maps& maps, const surface_maps::Settings& setting
     manifest->setProperty("madeBy", "Djehuti Texture - Surface Map");
     manifest->setProperty("settings", settings.toVar());
     manifest->setProperty("maps", juce::var(mapsObject));
+    manifest->setProperty("revision", revision);
+    manifest->setProperty("savedAt", juce::Time::getCurrentTime().toISO8601(true));
+
+    // Earlier versions stay listed, oldest first, each with what made it and where its maps are.
+    juce::Array<juce::var> history;
+    if (hasPrevious)
+    {
+        if (const auto* earlier = previousManifest["history"].getArray())
+            history.addArray(*earlier);
+        auto* previous = new juce::DynamicObject();
+        previous->setProperty("revision", previousManifest.getProperty("revision", 1));
+        previous->setProperty("savedAt", previousManifest.getProperty("savedAt", {}));
+        previous->setProperty("source", previousManifest["source"]);
+        previous->setProperty("settings", previousManifest["settings"]);
+        previous->setProperty("maps", previousManifest["maps"]);
+        history.add(juce::var(previous));
+    }
+    manifest->setProperty("history", history);
 
     const auto json = juce::JSON::toString(juce::var(manifest), false);
     out.manifest.bytes = juce::MemoryBlock(json.toRawUTF8(), json.getNumBytesAsUTF8());

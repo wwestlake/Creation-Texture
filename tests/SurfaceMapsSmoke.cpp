@@ -192,6 +192,22 @@ int main()
             if (manifestOk)
                 std::cout << "ok   pack manifest\n";
 
+            // Saving again over the same set: version 2, maps in their own v2 folder, version 1 kept in the history.
+            texture_set::Pack second;
+            const bool again = texture_set::build(maps, settings, "Old Brick", "Assets/Source/", "Assets/Source/brick.png", second, error,
+                                                  {}, manifest);
+            const auto secondManifest = juce::JSON::parse(second.manifest.bytes.toString());
+            const bool versioned = again && second.revision == 2
+                                && static_cast<int>(secondManifest["revision"]) == 2
+                                && second.maps.front().logicalPath.startsWith("Assets/Source/old-brick.texset/v2/")
+                                && pack.maps.front().logicalPath.startsWith("Assets/Source/old-brick.texset/v1/")
+                                && secondManifest["history"].size() == 1
+                                && static_cast<int>(secondManifest["history"][0]["revision"]) == 1
+                                && secondManifest["history"][0]["maps"]["height"]["path"].toString() == "Assets/Source/old-brick.texset/v1/height.png";
+            check("saving again makes version 2 and keeps version 1", versioned, second.manifest.bytes.toString());
+            if (versioned)
+                std::cout << "ok   saving again makes version 2 and keeps version 1\n";
+
             for (const auto& file : pack.maps)
             {
                 const auto image = juce::ImageFileFormat::loadFrom(file.bytes.getData(), file.bytes.getSize());

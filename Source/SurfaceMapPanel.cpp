@@ -5,6 +5,8 @@
 #include <creation/assets/ProjectAssetService.h>
 #include <creation/assets/ProjectManifest.h>
 
+#include <map>
+
 namespace
 {
 const juce::Colour panelBackground { 0xff1e2227 };
@@ -490,9 +492,16 @@ public:
         surface_maps::Maps maps;
         ok = engine.compute(layer.pixels, layer.width, layer.height, settings, maps, error,
                             [this](float f, const juce::String& s) { step(0.05f + 0.35f * f, s); });
+        // Saving over an existing set makes its next version; the earlier versions' files are kept.
+        juce::var previous;
+        juce::MemoryBlock existing;
+        const auto base = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot);
+        if (project.readEntry(texture_set::manifestPathFor(base, name), existing))
+            previous = juce::JSON::parse(existing.toString());
+
         if (ok && ! threadShouldExit())
-            ok = texture_set::build(maps, settings, name, creation::assets::ProjectContainerPaths::sourceAssetRoot, sourceAsset, pack, error,
-                                    [this](float f, const juce::String& s) { step(0.4f + 0.35f * f, s); });
+            ok = texture_set::build(maps, settings, name, base, sourceAsset, pack, error,
+                                    [this](float f, const juce::String& s) { step(0.4f + 0.35f * f, s); }, previous);
 
         // PNGs are already compressed, so the store is told not to compress them again.
         for (size_t i = 0; ok && i < pack.maps.size() && ! threadShouldExit(); ++i)
@@ -691,7 +700,7 @@ void SurfaceMapWorkspace::saveSurfaceMap()
                 return;
             }
             openSetName = name;
-            status("Saved texture set " + name + ".");
+            status("Saved texture set " + name + ", version " + juce::String(pack.revision) + ".");
         });
         job->launchThread();
     }), true);
@@ -715,8 +724,18 @@ void SurfaceMapWorkspace::openSurfaceMap()
                 entries.add({ asset.displayName, asset.logicalPath });
         return entries;
     };
-    auto baseColourOf = [](const juce::String& manifestPath) {
-        return manifestPath.upToLastOccurrenceOf(".texset.json", false, false) + ".texset/basecolor.png";
+    // Each set's current base colour map, as its manifest names it (maps live in a per-version folder).
+    auto paths = std::make_shared<std::map<juce::String, juce::String>>();
+    auto baseColourOf = [this, paths](const juce::String& manifestPath) {
+        auto found = paths->find(manifestPath);
+        if (found != paths->end())
+            return found->second;
+        juce::MemoryBlock bytes;
+        juce::String path;
+        if (projectSession->readEntry(manifestPath, bytes))
+            path = juce::JSON::parse(bytes.toString())["maps"]["baseColor"]["path"].toString();
+        (*paths)[manifestPath] = path;
+        return path;
     };
     sets.thumbnail = [this, baseColourOf](const juce::String& path) { return images.thumbnail ? images.thumbnail(baseColourOf(path)) : juce::Image(); };
     sets.image = [this, baseColourOf](const juce::String& path) { return images.image ? images.image(baseColourOf(path)) : juce::Image(); };
