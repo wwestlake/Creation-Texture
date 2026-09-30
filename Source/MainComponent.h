@@ -7,6 +7,7 @@
 #include "MaterialDocument.h"
 #include "NodePropertiesPanel.h"
 #include "ImageLabPanel.h"
+#include "SurfaceMapPanel.h"
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
@@ -39,7 +40,7 @@ private:
     void refreshTitle();
 
     // Work areas: each has its own dock layout, panels and menus (docs/REQUIREMENTS.md section 4).
-    enum class WorkArea { materials, imageLab };
+    enum class WorkArea { materials, imageLab, surfaceMap };
     void showWorkArea(WorkArea area);
     CreationDock::DockManager& dockFor(WorkArea area);
     void loadLayouts();
@@ -71,11 +72,13 @@ private:
     ViewerPanel viewerPanel;
     NodePropertiesPanel propertiesPanel;
     ImageLabWorkspace imageLab;
+    SurfaceMapWorkspace surfaceMap;
 
     // Declared after the panels they host, so they are destroyed first.
     std::unique_ptr<juce::MenuBarComponent> menuBar;
     std::unique_ptr<CreationDock::DockManager> materialsDock;
     std::unique_ptr<CreationDock::DockManager> imageLabDock;
+    std::unique_ptr<CreationDock::DockManager> surfaceMapDock;
     WorkArea currentArea = WorkArea::materials;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)

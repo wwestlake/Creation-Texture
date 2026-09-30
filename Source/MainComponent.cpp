@@ -61,6 +61,12 @@ MainComponent::MainComponent()
     imageLabDock->activatePanel("Layers");
     addChildComponent(imageLabDock.get());
 
+    surfaceMapDock = std::make_unique<CreationDock::DockManager>(*this);
+    surfaceMapDock->registerPanel("SurfaceSettings", "Settings", std::make_unique<NonOwningPanelHost>(surfaceMap.getSettingsPanel()), Zone::Left);
+    surfaceMapDock->registerPanel("SurfaceMaps", "Maps", std::make_unique<NonOwningPanelHost>(surfaceMap.getMapsPanel()), Zone::CenterTab);
+    surfaceMapDock->registerPanel("SurfacePreview", "3D Preview", std::make_unique<NonOwningPanelHost>(surfaceMap.getPreview()), Zone::Right);
+    addChildComponent(surfaceMapDock.get());
+
     loadLayouts();
     showWorkArea(currentArea);
 
@@ -79,6 +85,10 @@ MainComponent::MainComponent()
     imageLab.setProjectSession(&projectSession);
     imageLab.setImageSource(nodeGraphPanel.projectImageSource());
     imageLab.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
+
+    surfaceMap.setProjectSession(&projectSession);
+    surfaceMap.setImageSource(nodeGraphPanel.projectImageSource());
+    surfaceMap.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
     nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
     nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
     nodeGraphPanel.onGraphEdited = [this]() {
@@ -98,6 +108,7 @@ MainComponent::~MainComponent()
     menuBar.reset();
     materialsDock.reset();
     imageLabDock.reset();
+    surfaceMapDock.reset();
 }
 
 void MainComponent::openProject(const juce::String& projectId)
@@ -127,12 +138,15 @@ void MainComponent::resized()
     menuBar->setBounds(bounds.removeFromTop(juce::LookAndFeel::getDefaultLookAndFeel().getDefaultMenuBarHeight()));
     materialsDock->setBounds(bounds);
     imageLabDock->setBounds(bounds);
+    surfaceMapDock->setBounds(bounds);
 }
 
 juce::StringArray MainComponent::getMenuBarNames()
 {
     if (currentArea == WorkArea::imageLab)
         return { "File", "Edit", "Layer", "View", "Layout", "Help" };
+    if (currentArea == WorkArea::surfaceMap)
+        return { "File", "View", "Layout", "Help" };
     return { "File", "View", "Layout", "Help" };
 }
 
@@ -141,9 +155,14 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
     juce::PopupMenu menu;
     const bool project = projectSession.isValid();
     const bool imageLabArea = currentArea == WorkArea::imageLab;
+    const bool surfaceArea = currentArea == WorkArea::surfaceMap;
     auto& layers = imageLab.getDocument();
 
-    if (menuName == "File" && ! imageLabArea)
+    if (menuName == "File" && surfaceArea)
+    {
+        menu.addItem(6, "Save Surface Map...", surfaceMap.canSave());
+    }
+    else if (menuName == "File" && ! imageLabArea)
     {
         menu.addItem(1, "New Material");
         menu.addItem(2, "Open Material...", project);
@@ -170,7 +189,13 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
     }
     else if (menuName == "View")
     {
-        if (imageLabArea)
+        if (surfaceArea)
+        {
+            menu.addItem(60, "Settings");
+            menu.addItem(61, "Maps");
+            menu.addItem(62, "3D Preview");
+        }
+        else if (imageLabArea)
         {
             menu.addItem(25, "Canvas");
             menu.addItem(26, "Layers");
@@ -186,8 +211,9 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
     }
     else if (menuName == "Layout")
     {
-        menu.addItem(50, "Materials", true, ! imageLabArea);
+        menu.addItem(50, "Materials", true, currentArea == WorkArea::materials);
         menu.addItem(51, "Image Lab", true, imageLabArea);
+        menu.addItem(52, "Surface Map", true, surfaceArea);
         menu.addSeparator();
         menu.addItem(29, "Reset Layout");
     }
@@ -208,6 +234,11 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 3: saveMaterial(); break;
         case 4: saveMaterialAs(); break;
         case 5: imageLab.saveImage(); break;
+        case 6: surfaceMap.saveSurfaceMap(); break;
+        case 52: showWorkArea(WorkArea::surfaceMap); break;
+        case 60: dock.activatePanel("SurfaceSettings"); break;
+        case 61: dock.activatePanel("SurfaceMaps"); break;
+        case 62: dock.activatePanel("SurfacePreview"); break;
         case 10: imageLab.undo(); break;
         case 11: imageLab.redo(); break;
         case 20: dock.activatePanel("Nodes"); break;
@@ -233,6 +264,8 @@ void MainComponent::menuItemSelected(int menuItemID, int)
 
 CreationDock::DockManager& MainComponent::dockFor(WorkArea area)
 {
+    if (area == WorkArea::surfaceMap)
+        return *surfaceMapDock;
     return area == WorkArea::imageLab ? *imageLabDock : *materialsDock;
 }
 
@@ -241,6 +274,7 @@ void MainComponent::showWorkArea(WorkArea area)
     currentArea = area;
     materialsDock->setVisible(area == WorkArea::materials);
     imageLabDock->setVisible(area == WorkArea::imageLab);
+    surfaceMapDock->setVisible(area == WorkArea::surfaceMap);
     menuItemsChanged();
     saveLayouts();
 }
@@ -262,18 +296,23 @@ void MainComponent::loadLayouts()
         materialsDock->applyLayout(stored["materials"]);
     if (stored["imageLab"].isObject())
         imageLabDock->applyLayout(stored["imageLab"]);
-    currentArea = stored["workArea"].toString() == "imageLab" ? WorkArea::imageLab : WorkArea::materials;
+    if (stored["surfaceMap"].isObject())
+        surfaceMapDock->applyLayout(stored["surfaceMap"]);
+    const auto area = stored["workArea"].toString();
+    currentArea = area == "imageLab" ? WorkArea::imageLab : (area == "surfaceMap" ? WorkArea::surfaceMap : WorkArea::materials);
 }
 
 void MainComponent::saveLayouts()
 {
-    if (materialsDock == nullptr || imageLabDock == nullptr)
+    if (materialsDock == nullptr || imageLabDock == nullptr || surfaceMapDock == nullptr)
         return;
 
     auto* state = new juce::DynamicObject();
-    state->setProperty("workArea", currentArea == WorkArea::imageLab ? "imageLab" : "materials");
+    state->setProperty("workArea", currentArea == WorkArea::imageLab ? "imageLab"
+                                     : currentArea == WorkArea::surfaceMap ? "surfaceMap" : "materials");
     state->setProperty("materials", materialsDock->captureLayout());
     state->setProperty("imageLab", imageLabDock->captureLayout());
+    state->setProperty("surfaceMap", surfaceMapDock->captureLayout());
     juce::String error;
     creation::services::SuiteVfsJsonStore::saveJson(layoutStorePath, juce::var(state), error);
 }

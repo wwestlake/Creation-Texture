@@ -55,8 +55,8 @@ automation results), with the originals never overwritten.
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own
 complete window layout, like DaVinci Resolve's pages or Blender's workspaces:
 
-- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab** (Automations
-  later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
+- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab**, **Surface Map**
+  (Automations later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
   Choosing one swaps the whole layout; only that area's panels are shown. Panels of other areas never linger.
 - **Materials:** node palette on the left, Node Graph in the centre, 3D Preview on the right with Properties
   (the selected node) below it.
@@ -79,6 +79,33 @@ test bed. Until it is ready:
   swapped in there.
 - Work that carries over regardless of graph engine continues: node asset panels, the preview, storage in the
   project, getting assets in and out, and the Image Lab below.
+
+## 4a. Surface Map: CrazyBump-style maps, saved as a texture set (decided 2026-09-30)
+
+A layout of its own (**Layout > Surface Map**), modelled on CrazyBump: maths derives a surface's maps from one
+photo.
+
+- **Select an image asset** (the source image slot in Settings - context rule, section 1).
+- **Set the things**, CrazyBump's controls: **Raised / Sunken** (its "which one looks right"), Intensity,
+  Sharpen, Noise Removal, and the **Fine / Medium / Large / Very Large / Huge** detail sliders, plus normal
+  convention (OpenGL / DirectX green), occlusion strength, specular level and contrast, de-light for the diffuse,
+  and metallic.
+- **See it on a 3D object**: a lit, rotatable sphere / cube / plane with the maps applied (right-drag rotates,
+  left-drag moves the light), and a large view of each map. Maps recompute in the background as sliders move.
+- **Save by menu**: **File > Save Surface Map...** makes the maps at full size and saves one **texture set**
+  asset.
+- Generators (procedural image generation) are a **separate part** of the tool, not Surface Map.
+
+### The texture set (the "Enhanced Texture" pack)
+
+One project asset that keeps all of a surface's maps together, so a game engine or other tool loads it as one
+thing: `<name>.texset.json` (format `djehuti-texture-set`) names each map's role, file, colour space and bit depth,
+the source image, and the exact settings that made it; the maps live beside it in `<name>.texset/`:
+base colour (de-lit, sRGB), normal (convention recorded), height (16-bit), occlusion, roughness, and `orm.png`
+(glTF packing: r = occlusion, g = roughness, b = metallic).
+
+Known follow-on: Engine reads glTF metallic-roughness today but cannot yet render tangent-space normal maps
+(no tangents in its material shaders), so loading texture sets into Engine with working normals is Engine work.
 
 ## 5. Image Lab: a procedural layer editor
 
