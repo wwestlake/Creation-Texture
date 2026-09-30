@@ -2,6 +2,7 @@
 #include "ImageLabCore.h"
 #include "ImageLabFrustSources.h"
 #include "TextureSet.h"
+#include "ImageDemoHost.h"
 
 #include <creation/frust/PluginRuntime.h>
 
@@ -32,6 +33,7 @@ extern "C" float ig_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed)
 }
 
 constexpr const char* key = "image_graph";
+constexpr const char* demoKey = "frust_image_demo";
 constexpr int maxDepth = 256;
 }
 
@@ -68,7 +70,28 @@ public:
         grayscale = reinterpret_cast<decltype(grayscale)>(get("ig_grayscale"));
         levels = reinterpret_cast<decltype(levels)>(get("ig_levels"));
         if (! (fill && noise && cells && checker && gradient && invert && grayscale && levels))
+        {
             error = "Image Graph FRust routines are incomplete.";
+            return;
+        }
+
+        // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
+        // manifest, so one is put in front of the pod's own source, which is left exactly as published.
+        image_demo_host::registerAll(runtime);
+        ::frust::CompileRequest demo;
+        const std::string manifest = "manifest \"{\\\"name\\\":\\\"frust_image_demo\\\",\\\"version\\\":\\\"0.1.0\\\","
+                                     "\\\"description\\\":\\\"Procedural image generators (Frate pod, bundled).\\\","
+                                     "\\\"entryPoints\\\":[],\\\"requiredHostFunctions\\\":[],"
+                                     "\\\"intendedApplications\\\":[\\\"creation-texture\\\"]}\";\n";
+        demo.sources.push_back({ "frust_image_demo/lib.fr", manifest + std::string(ImageLabFrust::lib_fr, ImageLabFrust::lib_frSize) });
+        if (! runtime.loadSource(demoKey, demo, loadError))
+            error = "The frust_image_demo generators did not compile: " + juce::String(loadError);
+    }
+
+    using DemoGenerator = void (*)(float*, std::int64_t, std::int64_t);
+    DemoGenerator demoGenerator(const std::string& name)
+    {
+        return reinterpret_cast<DemoGenerator>(runtime.getFunction(demoKey, ("generate_" + name).c_str()));
     }
 
     creation::frust::PluginRuntime runtime;
@@ -151,6 +174,11 @@ Definition define(std::string type, std::string name, std::string category, std:
     d.descriptor.description = std::move(description);
     d.evaluate = std::move(evaluate);
     return d;
+}
+
+float srgbToLinear(float c)
+{
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
 std::int64_t pixelCount(const Image& image) { return static_cast<std::int64_t>(image.width) * image.height; }
@@ -326,6 +354,60 @@ Library::Library()
             out["image"] = image;
             return true;
         }));
+
+
+    // --- Generate (FRust pod: frust_image_demo) --- one node per generator. Their output is display colour (sRGB),
+    // converted to linear light here; Hills (height) is data.
+    struct DemoInfo { const char* name; const char* display; bool data; };
+    const DemoInfo demos[] = {
+        { "hills", "Hills", false },
+        { "hills_raw", "Hills (height)", true },
+        { "clouds", "Clouds", false },
+        { "planet", "Planet", false },
+        { "caves", "Caves", false },
+        { "ocean_floor", "Ocean Floor", false },
+        { "wood", "Wood", false },
+        { "marble", "Marble", false },
+        { "cracks", "Cracks", false },
+        { "stained_glass", "Stained Glass", false },
+        { "rust", "Rust", false },
+        { "plasma", "Plasma", false },
+        { "tunnel", "Tunnel", false },
+        { "mandelbrot", "Mandelbrot", false },
+        { "julia", "Julia", false },
+        { "stars", "Stars", false },
+        { "heatmap", "Heatmap", false },
+        { "truchet", "Truchet", false },
+        { "tile", "Tile", false },
+        { "album", "Album", false },
+        { "reaction_diffusion", "Reaction-Diffusion", false },
+        { "flow_field", "Flow Field", false },
+        { "attractor", "Attractor", false }
+    };
+    for (const auto& demo : demos)
+    {
+        const std::string name = demo.name;
+        const bool data = demo.data;
+        const bool simulation = name == "reaction_diffusion" || name == "flow_field" || name == "attractor";
+        definitions.push_back(define("image.gen." + name, demo.display, "Generate (FRust)",
+            std::string("From the frust_image_demo pod. Size comes from the image wired in, or width / height.")
+                + (simulation ? " A simulation: it is slow at large sizes." : ""),
+            sizeInputs({}), { imageOut("image") },
+            [name, data](Context& c, auto& out, juce::String& error) {
+                auto generate = c.routines.demoGenerator(name);
+                if (generate == nullptr) { error = "The generator is missing from the pod."; return false; }
+                auto image = generatorTarget(c);
+                image->data = data;
+                generate(image->rgba.data(), image->width, image->height);
+                image_demo_host::freeArena();
+                if (! data)
+                    for (size_t i = 0; i < image->rgba.size(); i += 4)
+                        for (size_t k = 0; k < 3; ++k)
+                            image->rgba[i + k] = srgbToLinear(juce::jlimit(0.0f, 1.0f, image->rgba[i + k]));
+                out["image"] = image;
+                return true;
+            }));
+    }
 
     // --- Adjust ---
     auto needInput = [](Context& c, const char* pin, juce::String& error) -> ImagePtr {

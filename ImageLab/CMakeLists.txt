@@ -8,6 +8,7 @@ juce_add_binary_data(creation_texture_image_lab_frust
         Frust/image_lab_core.frust
         Frust/surface_maps.frust
         Frust/image_graph.frust
+        Frust/pods/frust_image_demo/lib.fr
 )
 
 add_library(creation_texture_image_lab STATIC
@@ -19,6 +20,8 @@ add_library(creation_texture_image_lab STATIC
     TextureSet.h
     ImageGraph.cpp
     ImageGraph.h
+    ImageDemoHost.cpp
+    ImageDemoHost.h
 )
 
 target_include_directories(creation_texture_image_lab PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

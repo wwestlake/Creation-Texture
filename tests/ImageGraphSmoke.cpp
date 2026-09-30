@@ -162,6 +162,28 @@ int main()
         expectPixel("Surface Map occlusion of a flat image", evaluator.evaluate(graph, surface->Id(), "occlusion", error), 5, 5, { 1.0f });
     }
 
+    // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
+    // full, varied image inside 0..1, and that Hills (height) is marked as data.
+    for (const char* type : { "image.gen.wood", "image.gen.marble", "image.gen.hills_raw" })
+    {
+        auto* generator = add(type);
+        if (generator == nullptr) { std::cerr << "FAIL no node type " << type << "\n"; ++failures; continue; }
+        set(generator, "width", std::int64_t { 64 });
+        set(generator, "height", std::int64_t { 64 });
+        const auto image = evaluator.evaluate(graph, generator->Id(), "image", error);
+        bool good = image != nullptr && image->width == 64 && image->height == 64;
+        float lo = 1.0f, hi = 0.0f;
+        for (size_t i = 0; good && i < image->rgba.size(); i += 4)
+        {
+            good = image->rgba[i] >= 0.0f && image->rgba[i] <= 1.0f && image->rgba[i + 3] > 0.0f;
+            lo = std::min(lo, image->rgba[i]);
+            hi = std::max(hi, image->rgba[i]);
+        }
+        good = good && hi - lo > 0.05f && (image->data == (std::string(type) == "image.gen.hills_raw"));
+        if (! good) { std::cerr << "FAIL " << type << ": " << error << "\n"; ++failures; }
+        else std::cout << "ok   " << type << " makes a varied 64 x 64 image\n";
+    }
+
     if (error.isNotEmpty() && failures == 0)
         std::cout << "(last message: " << error << ")\n";
     if (failures > 0)
