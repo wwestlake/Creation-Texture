@@ -708,3 +708,159 @@ void ImageGraphWorkspace::saveOutputAsImage()
         status("Saved " + name + " to the project.");
     }), true);
 }
+
+//==============================================================================
+// Render Outputs: evaluates every Output node on its own thread (with a progress window), encodes them, then
+// saves each on the message thread.
+class ImageGraphWorkspace::RenderJob final : public juce::ThreadWithProgressWindow
+{
+public:
+    struct Rendered
+    {
+        juce::String name;
+        juce::MemoryBlock png;
+    };
+
+    RenderJob(const image_graph::Library& lib, std::string text, std::vector<std::pair<ns::NodeId, juce::String>> targets,
+              creation::assets::ProjectSession& session, std::function<void(std::vector<Rendered>, juce::String)> done)
+        : juce::ThreadWithProgressWindow("Rendering the graph's outputs...", true, true),
+          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), onDone(std::move(done)) {}
+
+    void run() override
+    {
+        setStatusMessage("Preparing the node routines");
+        image_graph::Host host;
+        host.loadImage = [this](const juce::String& path) -> image_graph::ImagePtr {
+            juce::MemoryBlock bytes;
+            if (! project.readEntry(path, bytes))
+                return nullptr;
+            return image_graph::fromDisplayImage(juce::ImageFileFormat::loadFrom(bytes.getData(), bytes.getSize()));
+        };
+        image_graph::Evaluator evaluator(library, host);
+        std::string parseError;
+        auto graph = ns::DeserializeGraph(graphText, parseError);
+        if (graph == nullptr)
+        {
+            error = "Could not read the graph: " + juce::String(parseError);
+            return;
+        }
+        for (size_t i = 0; i < outputs.size() && ! threadShouldExit(); ++i)
+        {
+            const auto id = outputs[i].first;
+            const auto name = outputs[i].second;
+            const double done = static_cast<double>(i) / static_cast<double>(outputs.size());
+            setProgress(done);
+            setStatusMessage(juce::String(juce::roundToInt(100.0 * done)) + "%  -  computing " + name);
+            juce::String nodeError;
+            auto image = evaluator.evaluate(*graph, id, "image", nodeError);
+            if (image == nullptr)
+            {
+                error = name + ": " + nodeError;
+                return;
+            }
+            Rendered r;
+            r.name = name;
+            bool encoded = false;
+            if (image->data)
+            {
+                std::vector<float> grey(static_cast<size_t>(image->width) * static_cast<size_t>(image->height));
+                for (size_t k = 0; k < grey.size(); ++k)
+                    grey[k] = image->rgba[k * 4];
+                encoded = texture_set::encodeGray16Png(grey, image->width, image->height, r.png);
+            }
+            else
+            {
+                juce::MemoryOutputStream stream(r.png, false);
+                juce::PNGImageFormat format;
+                encoded = format.writeImageToStream(image_graph::toDisplayImage(*image), stream);
+            }
+            if (! encoded)
+            {
+                error = "Could not encode " + name + ".";
+                return;
+            }
+            rendered.push_back(std::move(r));
+        }
+        setProgress(1.0);
+    }
+
+    void threadComplete(bool cancelled) override
+    {
+        if (onDone)
+            onDone(cancelled ? std::vector<Rendered> {} : std::move(rendered), cancelled ? juce::String("Cancelled.") : error);
+        delete this;
+    }
+
+private:
+    const image_graph::Library& library;
+    std::string graphText;
+    std::vector<std::pair<ns::NodeId, juce::String>> outputs;
+    creation::assets::ProjectSession& project;
+    std::function<void(std::vector<Rendered>, juce::String)> onDone;
+    std::vector<Rendered> rendered;
+    juce::String error;
+};
+
+void ImageGraphWorkspace::renderOutputs()
+{
+    if (! hasProject())
+    {
+        status("Open a project first.");
+        return;
+    }
+
+    std::vector<std::pair<ns::NodeId, juce::String>> outputs;
+    for (const auto& [id, node] : graph.Nodes())
+    {
+        if (node->TypeName() != "image.output")
+            continue;
+        juce::String name;
+        for (const auto& pin : node->Inputs())
+            if (pin.name == "name" && std::holds_alternative<std::string>(pin.defaultValue))
+                name = juce::String(std::get<std::string>(pin.defaultValue)).trim();
+        if (name.isEmpty())
+            name = (graphName.isNotEmpty() ? graphName : juce::String("image graph")) + " output " + juce::String(static_cast<int>(id));
+        outputs.push_back({ id, name });
+    }
+    if (outputs.empty())
+    {
+        status("Add an Output node (Nodes > Output), wire an image into it and give it a name.");
+        return;
+    }
+
+    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession,
+                              [this](std::vector<RenderJob::Rendered> rendered, juce::String error) {
+        if (error.isNotEmpty())
+        {
+            status("Render Outputs: " + error);
+            return;
+        }
+        for (const auto& r : rendered)
+        {
+            creation::assets::ProjectAssetService::ImportOptions options;
+            options.kind = creation::assets::AssetKind::texture;
+            options.displayName = r.name;
+            options.logicalPath = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(r.name) + ".png";
+            options.mediaType = "image/png";
+            options.sourceApp = "Djehuti Texture";
+            options.sourceTool = "Image Graph";
+            options.description = "Rendered from image graph " + (graphName.isNotEmpty() ? graphName : juce::String("(unsaved)")) + ".";
+            options.tags = { "image-graph" };
+            creation::assets::AssetDescriptor saved;
+            juce::String saveError;
+            if (! creation::assets::ProjectAssetService::saveGeneratedAsset(*projectSession, r.png, options, saved, saveError))
+            {
+                status("Could not save " + r.name + ": " + saveError);
+                return;
+            }
+        }
+        juce::String commitError;
+        if (! projectSession->commit(commitError))
+        {
+            status("Could not save the outputs: " + commitError);
+            return;
+        }
+        status("Rendered " + juce::String(static_cast<int>(rendered.size())) + " output(s) into the project.");
+    });
+    job->launchThread();
+}

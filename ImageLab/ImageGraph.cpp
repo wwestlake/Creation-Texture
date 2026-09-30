@@ -779,6 +779,18 @@ Library::Library()
                 juce::roundToInt(c.number("y", 0.5f) * static_cast<float>(in.height)));
         }));
 
+    // --- Output --- File > Render Outputs saves each Output node's image as a project image named by `name`.
+    definitions.push_back(define("image.output", "Output", "Output",
+        "A result of this graph. File > Render Outputs saves it as a project image called `name` (colour as 8-bit PNG, data such as "
+        "height as 16-bit grey). Rendering again under the same name makes a new version.",
+        { imageIn("image"), textIn("name") }, { imageOut("image") },
+        [needInput](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            out["image"] = input;
+            return true;
+        }));
+
     // --- Combine ---
     definitions.push_back(define("image.blend", "Blend", "Combine",
         "Foreground over background. Mode: 0 Normal, 1 Multiply, 2 Screen, 3 Overlay, 4 Add, 5 Subtract, 6 Darken, 7 Lighten, 8 Difference.",

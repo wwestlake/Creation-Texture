@@ -33,6 +33,8 @@ public:
     void saveGraph();
     void saveGraphAs();
     void saveOutputAsImage();
+    // Computes every Output node at full size and saves each as a project image named by the node.
+    void renderOutputs();
     bool hasProject() const noexcept { return projectSession != nullptr && projectSession->isValid(); }
     bool canSaveOutput() const noexcept;
     juce::String getTitle() const;
@@ -40,6 +42,7 @@ public:
 private:
     class Worker;
     class PreviewPanel;
+    class RenderJob;
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void graphEdited();

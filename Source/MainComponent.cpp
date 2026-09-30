@@ -184,6 +184,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
         menu.addItem(72, "Save Image Graph", imageGraph.hasProject());
         menu.addItem(73, "Save Image Graph As...", imageGraph.hasProject());
         menu.addSeparator();
+        menu.addItem(79, "Render Outputs", imageGraph.hasProject());
         menu.addItem(74, "Save Previewed Output as Image...", imageGraph.canSaveOutput());
     }
     else if (menuName == "File" && surfaceArea)
@@ -283,6 +284,7 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 72: imageGraph.saveGraph(); break;
         case 73: imageGraph.saveGraphAs(); break;
         case 74: imageGraph.saveOutputAsImage(); break;
+        case 79: imageGraph.renderOutputs(); break;
         case 75: dock.activatePanel("GraphNodes"); break;
         case 76: dock.activatePanel("ImageGraph"); break;
         case 77: dock.activatePanel("GraphPreview"); break;
