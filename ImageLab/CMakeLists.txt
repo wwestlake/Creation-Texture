@@ -8,6 +8,7 @@ juce_add_binary_data(creation_texture_image_lab_frust
         Frust/image_lab_core.frust
         Frust/surface_maps.frust
         Frust/image_graph.frust
+        Frust/image_fx.frust
         Frust/pods/frust_image_demo/lib.fr
 )
 

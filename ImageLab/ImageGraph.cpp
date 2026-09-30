@@ -32,8 +32,18 @@ extern "C" float ig_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed)
     return static_cast<float>(h >> 40) / static_cast<float>(1ull << 24);
 }
 
+extern "C" float fx_host_floor(float v) { return std::floor(v); }
+extern "C" float fx_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
+extern "C" float fx_host_sin(float v) { return std::sin(v); }
+extern "C" float fx_host_cos(float v) { return std::cos(v); }
+extern "C" float fx_host_atan2(float y, float x) { return std::atan2(y, x); }
+extern "C" float fx_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
+extern "C" std::int64_t fx_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+extern "C" float fx_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
+
 constexpr const char* key = "image_graph";
 constexpr const char* demoKey = "frust_image_demo";
+constexpr const char* fxKey = "image_fx";
 constexpr int maxDepth = 256;
 }
 
@@ -75,6 +85,24 @@ public:
             return;
         }
 
+
+        // Image effects (image_fx.frust - to become the frust_image_fx pod).
+        runtime.registerHostFunction("fx_host_floor", reinterpret_cast<void*>(&fx_host_floor));
+        runtime.registerHostFunction("fx_host_sqrt", reinterpret_cast<void*>(&fx_host_sqrt));
+        runtime.registerHostFunction("fx_host_sin", reinterpret_cast<void*>(&fx_host_sin));
+        runtime.registerHostFunction("fx_host_cos", reinterpret_cast<void*>(&fx_host_cos));
+        runtime.registerHostFunction("fx_host_atan2", reinterpret_cast<void*>(&fx_host_atan2));
+        runtime.registerHostFunction("fx_host_i64_to_f32", reinterpret_cast<void*>(&fx_host_i64_to_f32));
+        runtime.registerHostFunction("fx_host_f32_to_i64", reinterpret_cast<void*>(&fx_host_f32_to_i64));
+        runtime.registerHostFunction("fx_host_hash", reinterpret_cast<void*>(&fx_host_hash));
+        ::frust::CompileRequest fx;
+        fx.sources.push_back({ "image_fx.frust", std::string(ImageLabFrust::image_fx_frust, ImageLabFrust::image_fx_frustSize) });
+        if (! runtime.loadSource(fxKey, fx, loadError))
+        {
+            error = "Image effect FRust routines did not compile: " + juce::String(loadError);
+            return;
+        }
+
         // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
         // manifest, so one is put in front of the pod's own source, which is left exactly as published.
         image_demo_host::registerAll(runtime);
@@ -86,6 +114,14 @@ public:
         demo.sources.push_back({ "frust_image_demo/lib.fr", manifest + std::string(ImageLabFrust::lib_fr, ImageLabFrust::lib_frSize) });
         if (! runtime.loadSource(demoKey, demo, loadError))
             error = "The frust_image_demo generators did not compile: " + juce::String(loadError);
+    }
+
+
+    // An image-effect routine by name (image_fx.frust).
+    template <typename Fn>
+    Fn fx(const char* name)
+    {
+        return reinterpret_cast<Fn>(runtime.getFunction(fxKey, name));
     }
 
     using DemoGenerator = void (*)(float*, std::int64_t, std::int64_t);
@@ -478,6 +514,269 @@ Library::Library()
                 }
             out["image"] = image;
             return true;
+        }));
+
+
+    // ---------------------------------------------------------------- effects (image_fx.frust)
+    using InPlace = std::int64_t (*)(float*, std::int64_t);
+    using Neighbour = std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t);
+
+    // A node whose routine changes a copy of its input in place.
+    auto inPlace = [needInput](std::string type, std::string name, std::string category, std::string description,
+                               std::vector<ns::PinSignature> settings,
+                               std::function<std::int64_t(Context&, Image&)> run) {
+        std::vector<ns::PinSignature> pins { imageIn("image") };
+        pins.insert(pins.end(), settings.begin(), settings.end());
+        return define(std::move(type), std::move(name), std::move(category), std::move(description), pins, { imageOut("image") },
+            [needInput, run, name](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                auto image = copyOf(input);
+                if (! ok(run(c, *image), name.c_str(), error)) return false;
+                out["image"] = image;
+                return true;
+            });
+    };
+
+    // A node whose routine reads its input (with neighbours) into a new image of the same size.
+    auto sourceToDest = [needInput](std::string type, std::string name, std::string category, std::string description,
+                                    std::vector<ns::PinSignature> settings,
+                                    std::function<std::int64_t(Context&, const Image&, Image&)> run) {
+        std::vector<ns::PinSignature> pins { imageIn("image") };
+        pins.insert(pins.end(), settings.begin(), settings.end());
+        return define(std::move(type), std::move(name), std::move(category), std::move(description), pins, { imageOut("image") },
+            [needInput, run, name](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                auto image = blank(input->width, input->height, input->data);
+                if (! ok(run(c, *input, *image), name.c_str(), error)) return false;
+                out["image"] = image;
+                return true;
+            });
+    };
+
+    // --- Color ---
+    definitions.push_back(inPlace("image.posterize", "Posterize", "Color", "Each channel to a few evenly spaced values.",
+        { intIn("levels", 4) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, std::int64_t)>("fx_posterize")(img.rgba.data(), pixelCount(img), c.integer("levels", 4));
+        }));
+    definitions.push_back(inPlace("image.threshold", "Threshold", "Color", "Black below the level, white at or above it.",
+        { floatIn("level", 0.5f) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float)>("fx_threshold")(img.rgba.data(), pixelCount(img), c.number("level", 0.5f));
+        }));
+    definitions.push_back(inPlace("image.brightnesscontrast", "Brightness / Contrast", "Color", "Brightness and contrast, each -1 to 1.",
+        { floatIn("brightness", 0.0f), floatIn("contrast", 0.0f) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float, float)>("fx_brightness_contrast")(
+                img.rgba.data(), pixelCount(img), c.number("brightness", 0.0f), c.number("contrast", 0.0f));
+        }));
+    definitions.push_back(inPlace("image.huesaturation", "Hue / Saturation", "Color", "Hue shift in degrees; saturation and lightness -1 to 1.",
+        { floatIn("hue", 0.0f), floatIn("saturation", 0.0f), floatIn("lightness", 0.0f) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float, float, float)>("fx_hue_saturation")(
+                img.rgba.data(), pixelCount(img), c.number("hue", 0.0f) / 360.0f, c.number("saturation", 0.0f), c.number("lightness", 0.0f));
+        }));
+    definitions.push_back(inPlace("image.colorize", "Colorize", "Color", "Brightness tinted with a colour.",
+        { colourIn("color", 1.0f, 0.8f, 0.6f) }, [](Context& c, Image& img) {
+            const auto col = c.colour("color", { 1.0f, 0.8f, 0.6f });
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float, float, float)>("fx_colorize")(img.rgba.data(), pixelCount(img), col.x, col.y, col.z);
+        }));
+    definitions.push_back(inPlace("image.sepia", "Sepia", "Color", "Old-photo brown tone; amount 0 to 1.",
+        { floatIn("amount", 1.0f) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float)>("fx_sepia")(img.rgba.data(), pixelCount(img), c.number("amount", 1.0f));
+        }));
+    definitions.push_back(inPlace("image.gradientmap", "Gradient Map", "Color", "Brightness mapped from the dark colour to the light colour.",
+        { colourIn("dark", 0.05f, 0.05f, 0.2f), colourIn("light", 1.0f, 0.9f, 0.6f) }, [](Context& c, Image& img) {
+            const auto a = c.colour("dark", { 0.0f, 0.0f, 0.0f });
+            const auto b = c.colour("light", { 1.0f, 1.0f, 1.0f });
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, float, float, float, float, float, float)>("fx_gradient_map")(
+                img.rgba.data(), pixelCount(img), a.x, a.y, a.z, b.x, b.y, b.z);
+        }));
+
+    // --- Artistic ---
+    definitions.push_back(sourceToDest("image.pixelate", "Pixelate", "Artistic", "Blocks of the given size, each its average colour.",
+        { intIn("size", 8) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_pixelate")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, juce::jmax(1, c.integer("size", 8)));
+        }));
+    definitions.push_back(sourceToDest("image.emboss", "Emboss", "Artistic", "Raised-relief grey from brightness changes.",
+        { floatIn("strength", 4.0f) }, [](Context& c, const Image& in, Image& out) {
+            out.data = true;
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float)>("fx_emboss")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("strength", 4.0f));
+        }));
+    definitions.push_back(sourceToDest("image.oilpaint", "Oil Paint", "Artistic",
+        "Kuwahara filter: flat, edge-keeping patches like brush strokes. Radius 2 to 8.",
+        { intIn("radius", 4) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_kuwahara")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, juce::jlimit(1, 16, c.integer("radius", 4)));
+        }));
+    definitions.push_back(sourceToDest("image.halftone", "Halftone", "Artistic", "Black dots on white, sized by darkness, one per cell.",
+        { intIn("cell", 8) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_halftone")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, juce::jmax(2, c.integer("cell", 8)));
+        }));
+    definitions.push_back(inPlace("image.dither", "Dither", "Artistic", "Ordered (Bayer) dither to a few levels per channel.",
+        { intIn("levels", 2) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, std::int64_t, std::int64_t)>("fx_dither")(
+                img.rgba.data(), img.width, img.height, juce::jmax(2, c.integer("levels", 2)));
+        }));
+
+    // Watercolour: Kuwahara smoothing, Sobel edge darkening, and fine + coarse noise for pigment granulation.
+    definitions.push_back(define("image.watercolor", "Watercolor", "Artistic",
+        "Smoothed colour with darkened edges and pigment granulation.",
+        { imageIn("image"), intIn("smoothing", 3), floatIn("edges", 0.6f), floatIn("granulation", 0.25f), intIn("seed", 1) },
+        { imageOut("image") },
+        [needInput](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto count = pixelCount(*input);
+            auto smooth = blank(input->width, input->height, false);
+            auto edges = blank(input->width, input->height, true);
+            auto fine = blank(input->width, input->height, true);
+            auto coarse = blank(input->width, input->height, true);
+            const int seed = c.integer("seed", 1);
+            auto& r = c.routines;
+            if (! ok(r.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_kuwahara")(
+                         input->rgba.data(), smooth->rgba.data(), input->width, input->height, juce::jlimit(1, 16, c.integer("smoothing", 3))), "Watercolor", error)
+                || ! ok(r.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float)>("fx_edges")(
+                            smooth->rgba.data(), edges->rgba.data(), input->width, input->height, 2.0f), "Watercolor", error)
+                || ! ok(r.fx<std::int64_t (*)(float*, const float*, std::int64_t, float)>("fx_darken_edges")(
+                            smooth->rgba.data(), edges->rgba.data(), count, c.number("edges", 0.6f)), "Watercolor", error)
+                || ! ok(r.noise(fine->rgba.data(), input->width, input->height, 64, 3, seed), "Watercolor", error)
+                || ! ok(r.noise(coarse->rgba.data(), input->width, input->height, 8, 3, seed + 17), "Watercolor", error))
+                return false;
+            for (size_t i = 0; i < fine->rgba.size(); ++i)
+                fine->rgba[i] = 0.5f * (fine->rgba[i] + coarse->rgba[i]);
+            if (! ok(r.fx<std::int64_t (*)(float*, const float*, std::int64_t, float)>("fx_granulate")(
+                         smooth->rgba.data(), fine->rgba.data(), count, c.number("granulation", 0.25f)), "Watercolor", error))
+                return false;
+            out["image"] = smooth;
+            return true;
+        }));
+
+    // Cartoon: posterized colour with dark outlines where edges are strong.
+    definitions.push_back(define("image.cartoon", "Cartoon", "Artistic", "Flat colour bands with ink outlines.",
+        { imageIn("image"), intIn("levels", 5), floatIn("ink", 1.5f) }, { imageOut("image") },
+        [needInput](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            auto image = copyOf(input);
+            auto edges = blank(input->width, input->height, true);
+            auto& r = c.routines;
+            if (! ok(r.fx<std::int64_t (*)(float*, std::int64_t, std::int64_t)>("fx_posterize")(image->rgba.data(), pixelCount(*image), juce::jmax(2, c.integer("levels", 5))), "Cartoon", error)
+                || ! ok(r.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float)>("fx_edges")(
+                            input->rgba.data(), edges->rgba.data(), input->width, input->height, 1.0f), "Cartoon", error)
+                || ! ok(r.fx<std::int64_t (*)(float*, const float*, std::int64_t, float)>("fx_darken_edges")(
+                            image->rgba.data(), edges->rgba.data(), pixelCount(*image), c.number("ink", 1.5f)), "Cartoon", error))
+                return false;
+            out["image"] = image;
+            return true;
+        }));
+
+    // Sketch: pencil lines - the edges, inverted to dark lines on white.
+    definitions.push_back(sourceToDest("image.sketch", "Sketch", "Artistic", "Dark pencil lines where the image has edges.",
+        { floatIn("strength", 2.0f) }, [](Context& c, const Image& in, Image& out) {
+            out.data = false;
+            if (c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float)>("fx_edges")(
+                    in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("strength", 2.0f)) != 1)
+                return std::int64_t { 0 };
+            return c.routines.invert(out.rgba.data(), pixelCount(out));
+        }));
+
+    // --- Edges, noise, light ---
+    definitions.push_back(sourceToDest("image.edges", "Edge Detect", "Edges",
+        "Edge strength (Sobel) as grey.", { floatIn("strength", 1.0f) }, [](Context& c, const Image& in, Image& out) {
+            out.data = true;
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float)>("fx_edges")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("strength", 1.0f));
+        }));
+
+    auto blurCopy = [](Context& c, const Image& source, int radius, juce::String& error) -> std::shared_ptr<Image> {
+        auto image = std::make_shared<Image>(source);
+        radius = juce::jlimit(0, juce::jmax(0, (juce::jmin(image->width, image->height) - 1) / 2), radius);
+        if (radius > 0)
+            for (int ch = 0; ch < 4; ++ch)
+            {
+                auto plane = channel(*image, ch);
+                std::vector<float> a, b;
+                if (! c.surfaceMaps.boxBlur(plane, a, image->width, image->height, radius, error)
+                    || ! c.surfaceMaps.boxBlur(a, b, image->width, image->height, radius, error)
+                    || ! c.surfaceMaps.boxBlur(b, plane, image->width, image->height, radius, error))
+                    return nullptr;
+                setChannel(*image, ch, plane);
+            }
+        return image;
+    };
+
+    definitions.push_back(define("image.sharpen", "Sharpen", "Edges", "Unsharp mask: radius and amount.",
+        { imageIn("image"), floatIn("radius", 2.0f), floatIn("amount", 1.0f) }, { imageOut("image") },
+        [needInput, blurCopy](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            auto blurred = blurCopy(c, *input, juce::roundToInt(c.number("radius", 2.0f)), error);
+            if (blurred == nullptr) return false;
+            auto image = copyOf(input);
+            if (! ok(c.routines.fx<std::int64_t (*)(float*, const float*, std::int64_t, float)>("fx_unsharp")(
+                         image->rgba.data(), blurred->rgba.data(), pixelCount(*image), c.number("amount", 1.0f)), "Sharpen", error))
+                return false;
+            out["image"] = image;
+            return true;
+        }));
+
+    definitions.push_back(inPlace("image.addnoise", "Add Noise", "Noise", "Adds noise of +/- amount; mono = the same in every channel.",
+        { floatIn("amount", 0.1f), intIn("seed", 1), boolIn("mono", true) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, std::int64_t, float, std::int64_t, std::int64_t)>("fx_add_noise")(
+                img.rgba.data(), img.width, img.height, c.number("amount", 0.1f), c.integer("seed", 1), c.flag("mono", true) ? 1 : 0);
+        }));
+
+    definitions.push_back(inPlace("image.vignette", "Vignette", "Light", "Darkens towards the corners; radius is where it starts (0 to 1).",
+        { floatIn("strength", 0.6f), floatIn("radius", 0.4f) }, [](Context& c, Image& img) {
+            return c.routines.fx<std::int64_t (*)(float*, std::int64_t, std::int64_t, float, float)>("fx_vignette")(
+                img.rgba.data(), img.width, img.height, c.number("strength", 0.6f), juce::jlimit(0.0f, 0.99f, c.number("radius", 0.4f)));
+        }));
+
+    definitions.push_back(define("image.glow", "Glow", "Light", "A soft glow: a blurred copy screen-blended on top.",
+        { imageIn("image"), floatIn("radius", 8.0f), floatIn("amount", 0.6f) }, { imageOut("image") },
+        [needInput, blurCopy](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            auto blurred = blurCopy(c, *input, juce::roundToInt(c.number("radius", 8.0f)), error);
+            if (blurred == nullptr) return false;
+            auto image = copyOf(input);
+            if (! ok(c.routines.fx<std::int64_t (*)(float*, const float*, std::int64_t, float)>("fx_glow")(
+                         image->rgba.data(), blurred->rgba.data(), pixelCount(*image), c.number("amount", 0.6f)), "Glow", error))
+                return false;
+            out["image"] = image;
+            return true;
+        }));
+
+    // --- Distort ---
+    definitions.push_back(sourceToDest("image.swirl", "Swirl", "Distort", "Twists around the centre: angle in degrees, radius 0 to 1.",
+        { floatIn("angle", 180.0f), floatIn("radius", 1.0f) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float, float)>("fx_swirl")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("angle", 180.0f) * 0.0174532925f, c.number("radius", 1.0f));
+        }));
+    definitions.push_back(sourceToDest("image.ripple", "Ripple", "Distort", "Sine-wave shift. Direction: 0 horizontal, 1 vertical.",
+        { floatIn("amplitude", 8.0f), floatIn("wavelength", 64.0f), intIn("direction", 0) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float, float, std::int64_t)>("fx_ripple")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("amplitude", 8.0f), c.number("wavelength", 64.0f),
+                juce::jlimit(0, 1, c.integer("direction", 0)));
+        }));
+    definitions.push_back(sourceToDest("image.kaleidoscope", "Kaleidoscope", "Distort", "Mirrored wedges around the centre.",
+        { intIn("segments", 6) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_kaleidoscope")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, juce::jmax(1, c.integer("segments", 6)));
+        }));
+    definitions.push_back(sourceToDest("image.polar", "Polar Coordinates", "Distort", "Wraps the image around the centre, or unwraps it.",
+        { boolIn("toPolar", true) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("fx_polar")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, c.flag("toPolar", true) ? 1 : 0);
+        }));
+    definitions.push_back(sourceToDest("image.offset", "Offset", "Distort",
+        "Shifts the image, wrapping round - x and y are fractions of the size (0.5 = half). Shows tiling seams.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f) }, [](Context& c, const Image& in, Image& out) {
+            return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t)>("fx_offset")(
+                in.rgba.data(), out.rgba.data(), in.width, in.height, juce::roundToInt(c.number("x", 0.5f) * static_cast<float>(in.width)),
+                juce::roundToInt(c.number("y", 0.5f) * static_cast<float>(in.height)));
         }));
 
     // --- Combine ---

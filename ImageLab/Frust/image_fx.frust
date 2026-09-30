@@ -1,0 +1,905 @@
+manifest "{\"name\":\"image_fx\",\"version\":\"0.1.0\",\"description\":\"Image effects: colour (posterize, threshold, brightness/contrast, hue/saturation/lightness, colorize, sepia, gradient map), artistic (pixelate, emboss, oil paint / Kuwahara, halftone, dither, ink), edges, noise, light (vignette, glow) and distorts (swirl, ripple, kaleidoscope, polar, offset). 32-bit float linear RGBA.\",\"entryPoints\":[],\"requiredHostFunctions\":[{\"name\":\"fx_host_floor\"},{\"name\":\"fx_host_sqrt\"},{\"name\":\"fx_host_sin\"},{\"name\":\"fx_host_cos\"},{\"name\":\"fx_host_atan2\"},{\"name\":\"fx_host_i64_to_f32\"},{\"name\":\"fx_host_f32_to_i64\"},{\"name\":\"fx_host_hash\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Image effects for Djehuti Texture's Image Graph - to become the frust_image_fx Frate pod.
+// Buffers are rgba, 32-bit float, linear light. Effects that read neighbours take src and write dst (different
+// buffers); per-pixel ones work in place. Sampling wraps at the edges so tiling images stay tiling.
+// FRust today: a dereference must start an expression, pointer arithmetic is base + one offset, no `||`, and
+// `out` is reserved - so offsets are computed first and values are read into locals.
+
+extern fn fx_host_floor(v: f32) -> f32;
+extern fn fx_host_sqrt(v: f32) -> f32;
+extern fn fx_host_sin(v: f32) -> f32;
+extern fn fx_host_cos(v: f32) -> f32;
+extern fn fx_host_atan2(y: f32, x: f32) -> f32;
+extern fn fx_host_i64_to_f32(v: i64) -> f32;
+extern fn fx_host_f32_to_i64(v: f32) -> i64;
+extern fn fx_host_hash(x: i64, y: i64, seed: i64) -> f32;
+
+// ---------------------------------------------------------------- helpers
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+fn luma(r: f32, g: f32, b: f32) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    kr * r + kg * g + kb * b
+}
+
+fn wrap(i: i64, n: i64) -> i64 = {
+    let mut v: i64 = i - (i / n) * n;
+    if (v < 0) { v = v + n; };
+    v
+}
+
+fn get(buf: raw* f32, index: i64, channel: i64) -> f32 = {
+    let mut o: i64 = index * 4 + channel;
+    let mut p: raw* f32 = buf;
+    p = buf + o;
+    let v: f32 = *p;
+    v
+}
+
+fn put(buf: raw* f32, index: i64, channel: i64, v: f32) -> i64 = {
+    let mut o: i64 = index * 4 + channel;
+    let mut p: raw* f32 = buf;
+    p = buf + o;
+    *p = v;
+    1
+}
+
+fn put_rgba(buf: raw* f32, index: i64, r: f32, g: f32, b: f32, a: f32) -> i64 = {
+    put(buf, index, 0, r);
+    put(buf, index, 1, g);
+    put(buf, index, 2, b);
+    put(buf, index, 3, a);
+    1
+}
+
+// Bilinear sample of one channel at a real pixel position, wrapping.
+fn sample(src: raw* f32, w: i64, h: i64, x: f32, y: f32, channel: i64) -> f32 = {
+    let fx: f32 = fx_host_floor(x);
+    let fy: f32 = fx_host_floor(y);
+    let tx: f32 = x - fx;
+    let ty: f32 = y - fy;
+    let ix: i64 = fx_host_f32_to_i64(fx);
+    let iy: i64 = fx_host_f32_to_i64(fy);
+    let x0: i64 = wrap(ix, w);
+    let x1: i64 = wrap(ix + 1, w);
+    let y0: i64 = wrap(iy, h);
+    let y1: i64 = wrap(iy + 1, h);
+    let a: f32 = get(src, y0 * w + x0, channel);
+    let b: f32 = get(src, y0 * w + x1, channel);
+    let c: f32 = get(src, y1 * w + x0, channel);
+    let d: f32 = get(src, y1 * w + x1, channel);
+    let top: f32 = a + (b - a) * tx;
+    let bottom: f32 = c + (d - c) * tx;
+    top + (bottom - top) * ty
+}
+
+fn copy_sampled(src: raw* f32, dst: raw* f32, w: i64, h: i64, index: i64, sx: f32, sy: f32) -> i64 = {
+    put(dst, index, 0, sample(src, w, h, sx, sy, 0));
+    put(dst, index, 1, sample(src, w, h, sx, sy, 1));
+    put(dst, index, 2, sample(src, w, h, sx, sy, 2));
+    put(dst, index, 3, sample(src, w, h, sx, sy, 3));
+    1
+}
+
+fn hue_to_rgb(p: f32, q: f32, t0: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let sixth: f32 = 0.16666667;
+    let two_thirds: f32 = 0.6666667;
+    let six: f32 = 6.0;
+    let mut t: f32 = t0;
+    if (t < zero) { t = t + one; };
+    if (t > one) { t = t - one; };
+    if (t < sixth) {
+        p + (q - p) * six * t
+    } else if (t < half) {
+        q
+    } else if (t < two_thirds) {
+        p + (q - p) * (two_thirds - t) * six
+    } else {
+        p
+    }
+}
+
+// ---------------------------------------------------------------- colour (in place)
+
+// GIMP-style posterize: each channel to `levels` evenly spaced values.
+pub fn fx_posterize(rgba: raw* f32, count: i64, levels: i64) -> i64 = {
+    if (levels < 2) {
+        0
+    } else {
+        let half: f32 = 0.5;
+        let steps: f32 = fx_host_i64_to_f32(levels - 1);
+        let mut i: i64 = 0;
+        let mut c: i64 = 0;
+        let mut v: f32 = 0.0;
+        while (i < count) {
+            c = 0;
+            while (c < 3) {
+                v = clamp01(get(rgba, i, c));
+                put(rgba, i, c, fx_host_floor(v * steps + half) / steps);
+                c = c + 1;
+            };
+            i = i + 1;
+        };
+        1
+    }
+}
+
+// Luminance at or above `level` -> white, below -> black.
+pub fn fx_threshold(rgba: raw* f32, count: i64, level: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        v = luma(get(rgba, i, 0), get(rgba, i, 1), get(rgba, i, 2));
+        if (v >= level) { v = one; } else { v = zero; };
+        put(rgba, i, 0, v);
+        put(rgba, i, 1, v);
+        put(rgba, i, 2, v);
+        i = i + 1;
+    };
+    1
+}
+
+// v = (v - 0.5) * (1 + contrast) + 0.5 + brightness, clamped. contrast -1..1, brightness -1..1.
+pub fn fx_brightness_contrast(rgba: raw* f32, count: i64, brightness: f32, contrast: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let factor: f32 = one + contrast;
+    let mut i: i64 = 0;
+    let mut c: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        c = 0;
+        while (c < 3) {
+            v = get(rgba, i, c);
+            put(rgba, i, c, clamp01((v - half) * factor + half + brightness));
+            c = c + 1;
+        };
+        i = i + 1;
+    };
+    1
+}
+
+// Hue shift (fraction of a turn), saturation and lightness offsets (-1..1), through HSL.
+pub fn fx_hue_saturation(rgba: raw* f32, count: i64, hue_shift: f32, saturation: f32, lightness: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let two: f32 = 2.0;
+    let half: f32 = 0.5;
+    let six: f32 = 6.0;
+    let four: f32 = 4.0;
+    let third: f32 = 0.33333334;
+    let tiny: f32 = 0.00001;
+    let mut i: i64 = 0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut mx: f32 = 0.0;
+    let mut mn: f32 = 0.0;
+    let mut hh: f32 = 0.0;
+    let mut s: f32 = 0.0;
+    let mut l: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut q: f32 = 0.0;
+    let mut p: f32 = 0.0;
+    while (i < count) {
+        r = clamp01(get(rgba, i, 0));
+        g = clamp01(get(rgba, i, 1));
+        b = clamp01(get(rgba, i, 2));
+        mx = r;
+        if (g > mx) { mx = g; };
+        if (b > mx) { mx = b; };
+        mn = r;
+        if (g < mn) { mn = g; };
+        if (b < mn) { mn = b; };
+        l = (mx + mn) * half;
+        d = mx - mn;
+        hh = zero;
+        s = zero;
+        if (d > tiny) {
+            if (l > half) { s = d / (two - mx - mn); } else { s = d / (mx + mn); };
+            if (mx == r) {
+                hh = (g - b) / d;
+                if (g < b) { hh = hh + six; };
+            } else if (mx == g) {
+                hh = (b - r) / d + two;
+            } else {
+                hh = (r - g) / d + four;
+            };
+            hh = hh / six;
+        };
+        hh = hh + hue_shift;
+        hh = hh - fx_host_floor(hh);
+        s = clamp01(s * (one + saturation));
+        l = clamp01(l + lightness);
+        if (s < tiny) {
+            r = l;
+            g = l;
+            b = l;
+        } else {
+            if (l < half) { q = l * (one + s); } else { q = l + s - l * s; };
+            p = two * l - q;
+            r = hue_to_rgb(p, q, hh + third);
+            g = hue_to_rgb(p, q, hh);
+            b = hue_to_rgb(p, q, hh - third);
+        };
+        put(rgba, i, 0, r);
+        put(rgba, i, 1, g);
+        put(rgba, i, 2, b);
+        i = i + 1;
+    };
+    1
+}
+
+// Luminance times a colour.
+pub fn fx_colorize(rgba: raw* f32, count: i64, r: f32, g: f32, b: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        v = luma(get(rgba, i, 0), get(rgba, i, 1), get(rgba, i, 2));
+        put(rgba, i, 0, v * r);
+        put(rgba, i, 1, v * g);
+        put(rgba, i, 2, v * b);
+        i = i + 1;
+    };
+    1
+}
+
+// Classic sepia matrix, mixed with the original by `amount`.
+pub fn fx_sepia(rgba: raw* f32, count: i64, amount: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let rr: f32 = 0.393;
+    let rg: f32 = 0.769;
+    let rb: f32 = 0.189;
+    let gr: f32 = 0.349;
+    let gg: f32 = 0.686;
+    let gb: f32 = 0.168;
+    let br: f32 = 0.272;
+    let bg: f32 = 0.534;
+    let bb: f32 = 0.131;
+    let keep: f32 = one - amount;
+    let mut i: i64 = 0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    while (i < count) {
+        r = get(rgba, i, 0);
+        g = get(rgba, i, 1);
+        b = get(rgba, i, 2);
+        put(rgba, i, 0, clamp01(keep * r + amount * (rr * r + rg * g + rb * b)));
+        put(rgba, i, 1, clamp01(keep * g + amount * (gr * r + gg * g + gb * b)));
+        put(rgba, i, 2, clamp01(keep * b + amount * (br * r + bg * g + bb * b)));
+        i = i + 1;
+    };
+    1
+}
+
+// Luminance mapped from colour a (dark) to colour b (light).
+pub fn fx_gradient_map(rgba: raw* f32, count: i64, ar: f32, ag: f32, ab: f32, br: f32, bg: f32, bb: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut t: f32 = 0.0;
+    while (i < count) {
+        t = clamp01(luma(get(rgba, i, 0), get(rgba, i, 1), get(rgba, i, 2)));
+        put(rgba, i, 0, ar + (br - ar) * t);
+        put(rgba, i, 1, ag + (bg - ag) * t);
+        put(rgba, i, 2, ab + (bb - ab) * t);
+        i = i + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- artistic (src -> dst)
+
+// Blocks of `size` pixels, each the average of its block.
+pub fn fx_pixelate(src: raw* f32, dst: raw* f32, w: i64, h: i64, size: i64) -> i64 = {
+    if (size < 1) {
+        0
+    } else {
+        let zero: f32 = 0.0;
+        let mut by: i64 = 0;
+        let mut bx: i64 = 0;
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut c: i64 = 0;
+        let mut n: f32 = 0.0;
+        let mut sum: f32 = 0.0;
+        let mut avg: f32 = 0.0;
+        while (by < h) {
+            bx = 0;
+            while (bx < w) {
+                c = 0;
+                while (c < 4) {
+                    sum = zero;
+                    n = zero;
+                    y = by;
+                    while (y < by + size) {
+                        x = bx;
+                        while (x < bx + size) {
+                            if (x < w) { if (y < h) { sum = sum + get(src, y * w + x, c); n = n + fx_host_i64_to_f32(1); }; };
+                            x = x + 1;
+                        };
+                        y = y + 1;
+                    };
+                    avg = sum / n;
+                    y = by;
+                    while (y < by + size) {
+                        x = bx;
+                        while (x < bx + size) {
+                            if (x < w) { if (y < h) { put(dst, y * w + x, c, avg); }; };
+                            x = x + 1;
+                        };
+                        y = y + 1;
+                    };
+                    c = c + 1;
+                };
+                bx = bx + size;
+            };
+            by = by + size;
+        };
+        1
+    }
+}
+
+// Emboss: grey 0.5 plus the diagonal brightness difference.
+pub fn fx_emboss(src: raw* f32, dst: raw* f32, w: i64, h: i64, strength: f32) -> i64 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut ia: i64 = 0;
+    let mut ib: i64 = 0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            ia = wrap(y - 1, h) * w + wrap(x - 1, w);
+            ib = wrap(y + 1, h) * w + wrap(x + 1, w);
+            a = luma(get(src, ia, 0), get(src, ia, 1), get(src, ia, 2));
+            b = luma(get(src, ib, 0), get(src, ib, 1), get(src, ib, 2));
+            v = clamp01(half + (b - a) * strength);
+            put_rgba(dst, y * w + x, v, v, v, one);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Edge strength (Sobel magnitude of luminance), grey.
+pub fn fx_edges(src: raw* f32, dst: raw* f32, w: i64, h: i64, strength: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let two: f32 = 2.0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut ym: i64 = 0;
+    let mut yp: i64 = 0;
+    let mut xm: i64 = 0;
+    let mut xp: i64 = 0;
+    let mut tl: f32 = 0.0;
+    let mut tc: f32 = 0.0;
+    let mut tr: f32 = 0.0;
+    let mut ml: f32 = 0.0;
+    let mut mr: f32 = 0.0;
+    let mut bl: f32 = 0.0;
+    let mut bc: f32 = 0.0;
+    let mut br: f32 = 0.0;
+    let mut gx: f32 = 0.0;
+    let mut gy: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut k: i64 = 0;
+    while (y < h) {
+        ym = wrap(y - 1, h);
+        yp = wrap(y + 1, h);
+        x = 0;
+        while (x < w) {
+            xm = wrap(x - 1, w);
+            xp = wrap(x + 1, w);
+            k = ym * w + xm; tl = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = ym * w + x;  tc = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = ym * w + xp; tr = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = y * w + xm;  ml = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = y * w + xp;  mr = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = yp * w + xm; bl = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = yp * w + x;  bc = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            k = yp * w + xp; br = luma(get(src, k, 0), get(src, k, 1), get(src, k, 2));
+            gx = (tr + two * mr + br) - (tl + two * ml + bl);
+            gy = (bl + two * bc + br) - (tl + two * tc + tr);
+            v = clamp01(fx_host_sqrt(gx * gx + gy * gy) * strength);
+            put_rgba(dst, y * w + x, v, v, v, one);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Oil paint (Kuwahara): of the four (r+1) x (r+1) squares meeting at the pixel, take the mean colour of the one
+// whose luminance varies least. Smooths while keeping edges, like brush strokes.
+pub fn fx_kuwahara(src: raw* f32, dst: raw* f32, w: i64, h: i64, radius: i64) -> i64 = {
+    if (radius < 1) {
+        0
+    } else {
+        let zero: f32 = 0.0;
+        let big: f32 = 1000000.0;
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut q: i64 = 0;
+        let mut x0: i64 = 0;
+        let mut y0: i64 = 0;
+        let mut dx: i64 = 0;
+        let mut dy: i64 = 0;
+        let mut k: i64 = 0;
+        let mut n: f32 = 0.0;
+        let mut sr: f32 = 0.0;
+        let mut sg: f32 = 0.0;
+        let mut sb: f32 = 0.0;
+        let mut sl: f32 = 0.0;
+        let mut sl2: f32 = 0.0;
+        let mut r: f32 = 0.0;
+        let mut g: f32 = 0.0;
+        let mut b: f32 = 0.0;
+        let mut l: f32 = 0.0;
+        let mut mean: f32 = 0.0;
+        let mut variance: f32 = 0.0;
+        let mut best: f32 = 0.0;
+        let mut br: f32 = 0.0;
+        let mut bg: f32 = 0.0;
+        let mut bb: f32 = 0.0;
+        let area: f32 = fx_host_i64_to_f32((radius + 1) * (radius + 1));
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                best = big;
+                q = 0;
+                while (q < 4) {
+                    if (q == 0) { x0 = x - radius; y0 = y - radius; };
+                    if (q == 1) { x0 = x; y0 = y - radius; };
+                    if (q == 2) { x0 = x - radius; y0 = y; };
+                    if (q == 3) { x0 = x; y0 = y; };
+                    sr = zero;
+                    sg = zero;
+                    sb = zero;
+                    sl = zero;
+                    sl2 = zero;
+                    dy = 0;
+                    while (dy <= radius) {
+                        dx = 0;
+                        while (dx <= radius) {
+                            k = wrap(y0 + dy, h) * w + wrap(x0 + dx, w);
+                            r = get(src, k, 0);
+                            g = get(src, k, 1);
+                            b = get(src, k, 2);
+                            l = luma(r, g, b);
+                            sr = sr + r;
+                            sg = sg + g;
+                            sb = sb + b;
+                            sl = sl + l;
+                            sl2 = sl2 + l * l;
+                            dx = dx + 1;
+                        };
+                        dy = dy + 1;
+                    };
+                    mean = sl / area;
+                    variance = sl2 / area - mean * mean;
+                    if (variance < best) {
+                        best = variance;
+                        br = sr / area;
+                        bg = sg / area;
+                        bb = sb / area;
+                    };
+                    q = q + 1;
+                };
+                put_rgba(dst, y * w + x, br, bg, bb, get(src, y * w + x, 3));
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Halftone: a round dot per `cell` pixels, its size set by the cell's darkness; ink colour black on white.
+pub fn fx_halftone(src: raw* f32, dst: raw* f32, w: i64, h: i64, cell: i64) -> i64 = {
+    if (cell < 2) {
+        0
+    } else {
+        let zero: f32 = 0.0;
+        let one: f32 = 1.0;
+        let half: f32 = 0.5;
+        let fcell: f32 = fx_host_i64_to_f32(cell);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut cx: i64 = 0;
+        let mut cy: i64 = 0;
+        let mut k: i64 = 0;
+        let mut dark: f32 = 0.0;
+        let mut radius: f32 = 0.0;
+        let mut ex: f32 = 0.0;
+        let mut ey: f32 = 0.0;
+        let mut v: f32 = 0.0;
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                cx = (x / cell) * cell + cell / 2;
+                cy = (y / cell) * cell + cell / 2;
+                if (cx >= w) { cx = w - 1; };
+                if (cy >= h) { cy = h - 1; };
+                k = cy * w + cx;
+                dark = one - clamp01(luma(get(src, k, 0), get(src, k, 1), get(src, k, 2)));
+                radius = fx_host_sqrt(dark) * fcell * half * 1.4142;
+                ex = fx_host_i64_to_f32(x - cx);
+                ey = fx_host_i64_to_f32(y - cy);
+                if (ex * ex + ey * ey <= radius * radius) { v = zero; } else { v = one; };
+                put_rgba(dst, y * w + x, v, v, v, one);
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Ordered (Bayer 4 x 4) dither to `levels` values per channel. In place.
+pub fn fx_dither(rgba: raw* f32, w: i64, h: i64, levels: i64) -> i64 = {
+    if (levels < 2) {
+        0
+    } else {
+        let half: f32 = 0.5;
+        let sixteenth: f32 = 0.0625;
+        let steps: f32 = fx_host_i64_to_f32(levels - 1);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut c: i64 = 0;
+        let mut m: i64 = 0;
+        let mut bx: i64 = 0;
+        let mut by: i64 = 0;
+        let mut threshold: f32 = 0.0;
+        let mut v: f32 = 0.0;
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                bx = x - (x / 4) * 4;
+                by = y - (y / 4) * 4;
+                // Bayer 4 x 4: 0 8 2 10 / 12 4 14 6 / 3 11 1 9 / 15 7 13 5
+                m = 0;
+                if (by == 0) { if (bx == 0) { m = 0; } else if (bx == 1) { m = 8; } else if (bx == 2) { m = 2; } else { m = 10; }; };
+                if (by == 1) { if (bx == 0) { m = 12; } else if (bx == 1) { m = 4; } else if (bx == 2) { m = 14; } else { m = 6; }; };
+                if (by == 2) { if (bx == 0) { m = 3; } else if (bx == 1) { m = 11; } else if (bx == 2) { m = 1; } else { m = 9; }; };
+                if (by == 3) { if (bx == 0) { m = 15; } else if (bx == 1) { m = 7; } else if (bx == 2) { m = 13; } else { m = 5; }; };
+                threshold = (fx_host_i64_to_f32(m) + half) * sixteenth - half;
+                c = 0;
+                while (c < 3) {
+                    v = clamp01(get(rgba, y * w + x, c));
+                    put(rgba, y * w + x, c, clamp01(fx_host_floor(v * steps + half + threshold) / steps));
+                    c = c + 1;
+                };
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Darkens rgba where `edges` (a grey edge map) is strong: rgb *= 1 - strength * edge. Used for ink outlines
+// (cartoon) and watercolour edge darkening. In place.
+pub fn fx_darken_edges(rgba: raw* f32, edges: raw* f32, count: i64, strength: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut e: f32 = 0.0;
+    let mut f: f32 = 0.0;
+    while (i < count) {
+        e = get(edges, i, 0);
+        f = clamp01(one - strength * e);
+        put(rgba, i, 0, get(rgba, i, 0) * f);
+        put(rgba, i, 1, get(rgba, i, 1) * f);
+        put(rgba, i, 2, get(rgba, i, 2) * f);
+        i = i + 1;
+    };
+    1
+}
+
+// Pigment granulation: rgb *= 1 - amount * (1 - grain), with grain a grey noise image. In place.
+pub fn fx_granulate(rgba: raw* f32, grain: raw* f32, count: i64, amount: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut f: f32 = 0.0;
+    while (i < count) {
+        f = one - amount * (one - get(grain, i, 0));
+        put(rgba, i, 0, get(rgba, i, 0) * f);
+        put(rgba, i, 1, get(rgba, i, 1) * f);
+        put(rgba, i, 2, get(rgba, i, 2) * f);
+        i = i + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- edges, noise, light
+
+// Sharpen (unsharp mask): v + amount * (v - blurred). In place.
+pub fn fx_unsharp(rgba: raw* f32, blurred: raw* f32, count: i64, amount: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut c: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        c = 0;
+        while (c < 3) {
+            v = get(rgba, i, c);
+            put(rgba, i, c, clamp01(v + amount * (v - get(blurred, i, c))));
+            c = c + 1;
+        };
+        i = i + 1;
+    };
+    1
+}
+
+// Adds noise of +/- amount (grey if mono = 1, per channel otherwise). In place.
+pub fn fx_add_noise(rgba: raw* f32, w: i64, h: i64, amount: f32, seed: i64, mono: i64) -> i64 = {
+    let two: f32 = 2.0;
+    let one: f32 = 1.0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut c: i64 = 0;
+    let mut n: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            c = 0;
+            while (c < 3) {
+                if (mono == 1) { n = fx_host_hash(x, y, seed); } else { n = fx_host_hash(x, y, seed + c * 7919); };
+                put(rgba, y * w + x, c, clamp01(get(rgba, y * w + x, c) + amount * (n * two - one)));
+                c = c + 1;
+            };
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Vignette: darkens towards the corners. strength 0..1; radius is where darkening starts (0..1 of the half-diagonal).
+pub fn fx_vignette(rgba: raw* f32, w: i64, h: i64, strength: f32, radius: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let zero: f32 = 0.0;
+    let cx: f32 = fx_host_i64_to_f32(w - 1) * half;
+    let cy: f32 = fx_host_i64_to_f32(h - 1) * half;
+    let reach: f32 = fx_host_sqrt(cx * cx + cy * cy);
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut d: f32 = 0.0;
+    let mut t: f32 = 0.0;
+    let mut f: f32 = 0.0;
+    let mut ex: f32 = 0.0;
+    let mut ey: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            ex = fx_host_i64_to_f32(x) - cx;
+            ey = fx_host_i64_to_f32(y) - cy;
+            d = zero;
+            if (reach > zero) { d = fx_host_sqrt(ex * ex + ey * ey) / reach; };
+            t = zero;
+            if (d > radius) { t = (d - radius) / (one - radius); };
+            f = one - strength * clamp01(t) * clamp01(t);
+            put(rgba, y * w + x, 0, get(rgba, y * w + x, 0) * f);
+            put(rgba, y * w + x, 1, get(rgba, y * w + x, 1) * f);
+            put(rgba, y * w + x, 2, get(rgba, y * w + x, 2) * f);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Glow: screen-blends a blurred copy on top: v = 1 - (1 - v) * (1 - amount * blurred). In place.
+pub fn fx_glow(rgba: raw* f32, blurred: raw* f32, count: i64, amount: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut c: i64 = 0;
+    let mut v: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    while (i < count) {
+        c = 0;
+        while (c < 3) {
+            v = get(rgba, i, c);
+            g = clamp01(amount * get(blurred, i, c));
+            put(rgba, i, c, one - (one - v) * (one - g));
+            c = c + 1;
+        };
+        i = i + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- distorts (src -> dst)
+
+// Swirl: rotates by `angle` radians at the centre, fading to none at `radius` (fraction of the smaller half-side).
+pub fn fx_swirl(src: raw* f32, dst: raw* f32, w: i64, h: i64, angle: f32, radius: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let zero: f32 = 0.0;
+    let cx: f32 = fx_host_i64_to_f32(w) * half;
+    let cy: f32 = fx_host_i64_to_f32(h) * half;
+    let mut rmax: f32 = cx;
+    if (cy < rmax) { rmax = cy; };
+    rmax = rmax * radius;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut dx: f32 = 0.0;
+    let mut dy: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut a: f32 = 0.0;
+    let mut t: f32 = 0.0;
+    let mut sx: f32 = 0.0;
+    let mut sy: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            dx = fx_host_i64_to_f32(x) + half - cx;
+            dy = fx_host_i64_to_f32(y) + half - cy;
+            d = fx_host_sqrt(dx * dx + dy * dy);
+            sx = fx_host_i64_to_f32(x);
+            sy = fx_host_i64_to_f32(y);
+            if (rmax > zero) {
+                if (d < rmax) {
+                    t = one - d / rmax;
+                    a = angle * t * t;
+                    sx = cx + dx * fx_host_cos(a) - dy * fx_host_sin(a) - half;
+                    sy = cy + dx * fx_host_sin(a) + dy * fx_host_cos(a) - half;
+                };
+            };
+            copy_sampled(src, dst, w, h, y * w + x, sx, sy);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Ripple: shifts pixels by a sine wave. direction 0 = horizontal waves (shift in x), 1 = vertical.
+pub fn fx_ripple(src: raw* f32, dst: raw* f32, w: i64, h: i64, amplitude: f32, wavelength: f32, direction: i64) -> i64 = {
+    let tau: f32 = 6.2831855;
+    let tiny: f32 = 0.001;
+    let mut wl: f32 = wavelength;
+    if (wl < tiny) { wl = tiny; };
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut sx: f32 = 0.0;
+    let mut sy: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            sx = fx_host_i64_to_f32(x);
+            sy = fx_host_i64_to_f32(y);
+            if (direction == 1) {
+                sy = sy + amplitude * fx_host_sin(tau * sx / wl);
+            } else {
+                sx = sx + amplitude * fx_host_sin(tau * sy / wl);
+            };
+            copy_sampled(src, dst, w, h, y * w + x, sx, sy);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Kaleidoscope: `segments` mirrored wedges around the centre.
+pub fn fx_kaleidoscope(src: raw* f32, dst: raw* f32, w: i64, h: i64, segments: i64) -> i64 = {
+    if (segments < 1) {
+        0
+    } else {
+        let half: f32 = 0.5;
+        let tau: f32 = 6.2831855;
+        let zero: f32 = 0.0;
+        let cx: f32 = fx_host_i64_to_f32(w) * half;
+        let cy: f32 = fx_host_i64_to_f32(h) * half;
+        let wedge: f32 = tau / fx_host_i64_to_f32(segments);
+        let mut x: i64 = 0;
+        let mut y: i64 = 0;
+        let mut dx: f32 = 0.0;
+        let mut dy: f32 = 0.0;
+        let mut d: f32 = 0.0;
+        let mut a: f32 = 0.0;
+        let mut k: f32 = 0.0;
+        while (y < h) {
+            x = 0;
+            while (x < w) {
+                dx = fx_host_i64_to_f32(x) + half - cx;
+                dy = fx_host_i64_to_f32(y) + half - cy;
+                d = fx_host_sqrt(dx * dx + dy * dy);
+                a = fx_host_atan2(dy, dx);
+                if (a < zero) { a = a + tau; };
+                k = fx_host_floor(a / wedge);
+                a = a - k * wedge;
+                if (a > wedge * half) { a = wedge - a; };
+                copy_sampled(src, dst, w, h, y * w + x, cx + d * fx_host_cos(a) - half, cy + d * fx_host_sin(a) - half);
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Polar coordinates: to_polar = 1 wraps the image around the centre (x -> angle, y -> distance); 0 unwraps.
+pub fn fx_polar(src: raw* f32, dst: raw* f32, w: i64, h: i64, to_polar: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let tau: f32 = 6.2831855;
+    let pi: f32 = 3.1415927;
+    let zero: f32 = 0.0;
+    let fw: f32 = fx_host_i64_to_f32(w);
+    let fh: f32 = fx_host_i64_to_f32(h);
+    let cx: f32 = fw * half;
+    let cy: f32 = fh * half;
+    let mut rmax: f32 = cx;
+    if (cy < rmax) { rmax = cy; };
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut dx: f32 = 0.0;
+    let mut dy: f32 = 0.0;
+    let mut a: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut sx: f32 = 0.0;
+    let mut sy: f32 = 0.0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            if (to_polar == 1) {
+                dx = fx_host_i64_to_f32(x) + half - cx;
+                dy = fx_host_i64_to_f32(y) + half - cy;
+                a = fx_host_atan2(dy, dx);
+                if (a < zero) { a = a + tau; };
+                d = fx_host_sqrt(dx * dx + dy * dy) / rmax;
+                sx = a / tau * fw;
+                sy = d * fh;
+            } else {
+                a = (fx_host_i64_to_f32(x) + half) / fw * tau;
+                d = (fx_host_i64_to_f32(y) + half) / fh * rmax;
+                sx = cx + d * fx_host_cos(a) - half;
+                sy = cy + d * fx_host_sin(a) - half;
+            };
+            copy_sampled(src, dst, w, h, y * w + x, sx, sy);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Offset: shifts by (dx, dy) pixels, wrapping - for checking and fixing tiling seams.
+pub fn fx_offset(src: raw* f32, dst: raw* f32, w: i64, h: i64, dx: i64, dy: i64) -> i64 = {
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut c: i64 = 0;
+    let mut k: i64 = 0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            k = wrap(y - dy, h) * w + wrap(x - dx, w);
+            c = 0;
+            while (c < 4) {
+                put(dst, y * w + x, c, get(src, k, c));
+                c = c + 1;
+            };
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}

@@ -162,6 +162,87 @@ int main()
         expectPixel("Surface Map occlusion of a flat image", evaluator.evaluate(graph, surface->Id(), "occlusion", error), 5, 5, { 1.0f });
     }
 
+    // Effects (image_fx.frust), each against hand-worked values. A helper builds Create Image -> effect.
+    {
+        auto source = [&](int w, int h, float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { w });
+            set(n, "height", std::int64_t { h });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto effect = [&](const char* type, ns::Node* from) {
+            auto* n = add(type);
+            if (n == nullptr) { std::cerr << "FAIL no node type " << type << "\n"; ++failures; return n; }
+            connect(graph, from, "image", n, "image");
+            return n;
+        };
+        auto run = [&](ns::Node* n) { return n != nullptr ? evaluator.evaluate(graph, n->Id(), "image", error) : nullptr; };
+
+        auto* p = effect("image.posterize", source(2, 2, 0.3f, 0.6f, 0.3f));
+        set(p, "levels", std::int64_t { 2 });
+        expectPixel("Posterize 2 levels: 0.3 -> 0, 0.6 -> 1", run(p), 0, 0, { 0.0f, 1.0f, 0.0f });
+
+        auto* t = effect("image.threshold", source(2, 2, 0.4f, 0.4f, 0.4f));
+        expectPixel("Threshold 0.5: grey 0.4 -> black", run(t), 1, 1, { 0.0f, 0.0f, 0.0f });
+
+        auto* bc = effect("image.brightnesscontrast", source(2, 2, 0.6f, 0.6f, 0.6f));
+        set(bc, "brightness", 0.1f);
+        set(bc, "contrast", 1.0f);
+        expectPixel("Brightness +0.1, contrast 1: 0.6 -> 0.8", run(bc), 0, 0, { 0.8f, 0.8f, 0.8f });
+
+        auto* sp = effect("image.sepia", source(2, 2, 0.5f, 0.5f, 0.5f));
+        expectPixel("Sepia of grey 0.5", run(sp), 0, 0, { 0.6755f, 0.6015f, 0.4685f });
+
+        auto* gm = effect("image.gradientmap", source(2, 2, 0.5f, 0.5f, 0.5f));
+        set(gm, "dark", ns::Vec3Default { 0.0f, 0.0f, 0.0f });
+        set(gm, "light", ns::Vec3Default { 1.0f, 0.0f, 0.0f });
+        expectPixel("Gradient Map black -> red at 0.5", run(gm), 0, 0, { 0.5f, 0.0f, 0.0f });
+
+        auto* hs = effect("image.huesaturation", source(2, 2, 1.0f, 0.0f, 0.0f));
+        set(hs, "hue", 120.0f);
+        expectPixel("Hue +120 degrees: red -> green", run(hs), 0, 0, { 0.0f, 1.0f, 0.0f }, 1.0e-3f);
+
+        // Pixelate: a 2 x 2 image with red 0 on the left, 1 on the right -> one 2 x 2 block of 0.5.
+        {
+            auto* left = source(2, 2, 0.0f, 0.0f, 0.0f);
+            auto* half = add("image.gradient");
+            connect(graph, left, "image", half, "image");  // 2 x 2 left-to-right gradient: 0 then 1
+            auto* px = effect("image.pixelate", half);
+            set(px, "size", std::int64_t { 2 });
+            expectPixel("Pixelate averages the block", run(px), 1, 0, { 0.5f, 0.5f, 0.5f });
+        }
+
+        expectPixel("Emboss of a flat image is mid grey", run(effect("image.emboss", source(4, 4, 0.7f, 0.2f, 0.4f))), 2, 2, { 0.5f });
+        expectPixel("Edge Detect of a flat image is black", run(effect("image.edges", source(4, 4, 0.7f, 0.2f, 0.4f))), 2, 2, { 0.0f });
+        expectPixel("Oil Paint of a flat image is unchanged", run(effect("image.oilpaint", source(8, 8, 0.7f, 0.2f, 0.4f))), 3, 3,
+                    { 0.7f, 0.2f, 0.4f, 1.0f });
+
+        // Dither to 2 levels on grey 0.5: Bayer threshold at (0,0) is -0.46875 -> 0, at (1,0) +0.03125 -> 1.
+        auto dither = run(effect("image.dither", source(4, 4, 0.5f, 0.5f, 0.5f)));
+        expectPixel("Dither (0,0)", dither, 0, 0, { 0.0f });
+        expectPixel("Dither (1,0)", dither, 1, 0, { 1.0f });
+
+        // Offset by a third on a 3 x 1 gradient 0, 0.5, 1 -> 1, 0, 0.5.
+        {
+            auto* strip3 = source(3, 1, 0.0f, 0.0f, 0.0f);
+            auto* ramp = add("image.gradient");
+            connect(graph, strip3, "image", ramp, "image");
+            auto* off = effect("image.offset", ramp);
+            set(off, "x", 1.0f / 3.0f);
+            set(off, "y", 0.0f);
+            auto shifted = run(off);
+            expectPixel("Offset wraps: pixel 0 <- pixel 2", shifted, 0, 0, { 1.0f });
+            expectPixel("Offset wraps: pixel 1 <- pixel 0", shifted, 1, 0, { 0.0f });
+        }
+
+        auto* sw = effect("image.swirl", source(4, 4, 0.3f, 0.6f, 0.9f));
+        set(sw, "angle", 0.0f);
+        expectPixel("Swirl of 0 degrees changes nothing", run(sw), 1, 2, { 0.3f, 0.6f, 0.9f, 1.0f });
+
+        expectPixel("Vignette leaves the centre alone", run(effect("image.vignette", source(3, 3, 0.8f, 0.8f, 0.8f))), 1, 1, { 0.8f, 0.8f, 0.8f });
+    }
+
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
     // full, varied image inside 0..1, and that Hills (height) is marked as data.
     for (const char* type : { "image.gen.wood", "image.gen.marble", "image.gen.hills_raw" })
