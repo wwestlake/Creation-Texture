@@ -163,6 +163,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
 
     if (menuName == "File" && surfaceArea)
     {
+        menu.addItem(8, "New Surface Map");
         menu.addItem(7, "Open Surface Map...", surfaceMap.canOpen());
         menu.addSeparator();
         menu.addItem(6, "Save Surface Map...", surfaceMap.canSave());
@@ -241,6 +242,7 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 5: imageLab.saveImage(); break;
         case 6: surfaceMap.saveSurfaceMap(); break;
         case 7: surfaceMap.openSurfaceMap(); break;
+        case 8: surfaceMap.newSurfaceMap(); break;
         case 52: showWorkArea(WorkArea::surfaceMap); break;
         case 60: dock.activatePanel("SurfaceSettings"); break;
         case 61: dock.activatePanel("SurfaceMaps"); break;

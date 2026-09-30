@@ -753,3 +753,12 @@ void SurfaceMapWorkspace::openSurfaceMap()
     options.resizable = true;
     options.launchAsync();
 }
+
+void SurfaceMapWorkspace::newSurfaceMap()
+{
+    settings = {};
+    setSource({});
+    openSetName.clear();
+    settingsPanel->rebuild();
+    status("New surface map - choose a source image in Settings.");
+}

@@ -28,6 +28,8 @@ public:
     // Reopens a saved texture set exactly as it was saved: its source image and every setting.
     bool canOpen() const noexcept { return projectSession != nullptr && projectSession->isValid(); }
     void openSurfaceMap();
+    // Starts over: no source image, every setting at its default.
+    void newSurfaceMap();
 
     // Used by the panels.
     const surface_maps::Settings& getSettings() const noexcept { return settings; }
