@@ -14,6 +14,8 @@ add_library(creation_texture_image_lab STATIC
     ImageLabCore.h
     SurfaceMaps.cpp
     SurfaceMaps.h
+    TextureSet.cpp
+    TextureSet.h
 )
 
 target_include_directories(creation_texture_image_lab PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

@@ -4,6 +4,7 @@
 #include "NoCrashDialogs.h"
 
 #include <SurfaceMaps.h>
+#include <TextureSet.h>
 
 #include <cmath>
 #include <iostream>
@@ -145,6 +146,71 @@ int main()
             expect("flat photo -> normal straight up", { maps.normal.begin() + 400, maps.normal.begin() + 404 }, { 0.5f, 0.5f, 1.0f, 1.0f });
             expect("flat photo -> no occlusion", { maps.occlusion[77] }, { 1.0f });
             expect("flat photo -> diffuse unchanged", { maps.diffuse.begin() + 40, maps.diffuse.begin() + 44 }, { 0.4f, 0.4f, 0.4f, 1.0f });
+        }
+    }
+
+    // 16-bit greyscale PNG: [0, 1] must read back (through JUCE's own PNG reader) as black then white.
+    {
+        juce::MemoryBlock png;
+        check("png16 encode", texture_set::encodeGray16Png({ 0.0f, 1.0f }, 2, 1, png), "encode failed");
+        const auto image = juce::ImageFileFormat::loadFrom(png.getData(), png.getSize());
+        if (! image.isValid() || image.getWidth() != 2 || image.getHeight() != 1)
+        {
+            std::cerr << "FAIL 16-bit PNG does not load back\n";
+            ++failures;
+        }
+        else
+        {
+            expect("16-bit PNG reads back", { image.getPixelAt(0, 0).getBrightness(), image.getPixelAt(1, 0).getBrightness() },
+                   { 0.0f, 1.0f });
+        }
+    }
+
+    // A pack from the flat grey photo: manifest lists six maps; ORM = (occlusion 1 -> 255, roughness 1 - 0.5 -> 128,
+    // metallic 0); base colour = linear 0.4 in sRGB = 0.6652 -> 170.
+    {
+        std::vector<float> source(16 * 16 * 4, 0.4f);
+        for (size_t i = 3; i < source.size(); i += 4)
+            source[i] = 1.0f;
+        surface_maps::Maps maps;
+        surface_maps::Settings settings;
+        texture_set::Pack pack;
+        const bool built = engine.compute(source, 16, 16, settings, maps, error)
+                        && texture_set::build(maps, settings, "Old Brick", "Assets/Source/", "Assets/Source/brick.png", pack, error);
+        check("pack build", built, error);
+        if (built)
+        {
+            const auto manifest = juce::JSON::parse(pack.manifest.bytes.toString());
+            const bool manifestOk = pack.manifest.logicalPath == "Assets/Source/old-brick.texset.json"
+                                 && manifest["format"].toString() == "djehuti-texture-set"
+                                 && manifest["maps"].getDynamicObject() != nullptr
+                                 && manifest["maps"].getDynamicObject()->getProperties().size() == 6
+                                 && manifest["maps"]["height"]["bits"].toString() == "16"
+                                 && manifest["source"].toString() == "Assets/Source/brick.png"
+                                 && pack.maps.size() == 6;
+            check("pack manifest lists six maps, 16-bit height, source", manifestOk, pack.manifest.bytes.toString());
+            if (manifestOk)
+                std::cout << "ok   pack manifest\n";
+
+            for (const auto& file : pack.maps)
+            {
+                const auto image = juce::ImageFileFormat::loadFrom(file.bytes.getData(), file.bytes.getSize());
+                if (! image.isValid())
+                {
+                    std::cerr << "FAIL pack map does not load: " << file.logicalPath << "\n";
+                    ++failures;
+                }
+                else if (file.logicalPath.endsWith("orm.png"))
+                {
+                    const auto c = image.getPixelAt(3, 3);
+                    expect("ORM packs occlusion / roughness / metallic",
+                           { float(c.getRed()), float(c.getGreen()), float(c.getBlue()) }, { 255.0f, 128.0f, 0.0f }, 0.5f);
+                }
+                else if (file.logicalPath.endsWith("basecolor.png"))
+                {
+                    expect("base colour is sRGB", { float(image.getPixelAt(3, 3).getRed()) }, { 170.0f }, 0.5f);
+                }
+            }
         }
     }
 
