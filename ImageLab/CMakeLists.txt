@@ -6,11 +6,14 @@ juce_add_binary_data(creation_texture_image_lab_frust
     NAMESPACE ImageLabFrust
     SOURCES
         Frust/image_lab_core.frust
+        Frust/surface_maps.frust
 )
 
 add_library(creation_texture_image_lab STATIC
     ImageLabCore.cpp
     ImageLabCore.h
+    SurfaceMaps.cpp
+    SurfaceMaps.h
 )
 
 target_include_directories(creation_texture_image_lab PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -32,6 +35,10 @@ target_link_libraries(CreationTextureImageLabSmoke PRIVATE creation_texture_imag
 
 set_target_properties(creation_texture_image_lab PROPERTIES OUTPUT_NAME "djehuti_texture_image_lab")
 set_target_properties(CreationTextureImageLabSmoke PROPERTIES OUTPUT_NAME "DjehutiTextureImageLabSmoke")
+
+add_executable(CreationTextureSurfaceMapsSmoke "${CMAKE_CURRENT_SOURCE_DIR}/../tests/SurfaceMapsSmoke.cpp")
+target_link_libraries(CreationTextureSurfaceMapsSmoke PRIVATE creation_texture_image_lab)
+set_target_properties(CreationTextureSurfaceMapsSmoke PROPERTIES OUTPUT_NAME "DjehutiTextureSurfaceMapsSmoke")
 
 # Developer tool: compile one FRust file in-process, with crash dialogs off.
 add_executable(CreationTextureFrustProbe "${CMAKE_CURRENT_SOURCE_DIR}/../tests/FrustProbe.cpp")
