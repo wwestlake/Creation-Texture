@@ -30,7 +30,8 @@ struct Pack
 // Builds the manifest and encodes every map. basePath is the folder for the pack, e.g. "Assets/Source/"; the pack
 // is named after `name`. Returns false with an error if an image cannot be encoded.
 bool build(const surface_maps::Maps& maps, const surface_maps::Settings& settings, const juce::String& name,
-           const juce::String& basePath, const juce::String& sourceAsset, Pack& out, juce::String& error);
+           const juce::String& basePath, const juce::String& sourceAsset, Pack& out, juce::String& error,
+           const surface_maps::Progress& progress = {});
 
 // Images for display and 8-bit files. "Raw" keeps the stored values (data maps: normal, height, occlusion ...);
 // "srgb" converts linear light to sRGB (colour maps).

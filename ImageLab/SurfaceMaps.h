@@ -2,6 +2,7 @@
 
 #include <juce_core/juce_core.h>
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -49,6 +50,9 @@ struct Maps
     bool isValid() const noexcept { return width > 0 && height > 0 && heightMap.size() == static_cast<size_t>(width) * static_cast<size_t>(height); }
 };
 
+// Reports how far a long job has got (0..1) and the step it is on. Called on the working thread.
+using Progress = std::function<void(float fraction, const juce::String& step)>;
+
 class Engine final
 {
 public:
@@ -59,7 +63,8 @@ public:
     juce::String getError() const;
 
     // source: rgba linear, width * height pixels. Safe to call from a background thread (one call at a time).
-    bool compute(const std::vector<float>& source, int width, int height, const Settings& settings, Maps& out, juce::String& error);
+    bool compute(const std::vector<float>& source, int width, int height, const Settings& settings, Maps& out, juce::String& error,
+                 const Progress& progress = {});
 
     // The raw routines, exposed for tests.
     bool boxBlur(const std::vector<float>& src, std::vector<float>& dst, int width, int height, int radius, juce::String& error);

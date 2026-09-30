@@ -46,3 +46,8 @@ set_target_properties(CreationTextureSurfaceMapsSmoke PROPERTIES OUTPUT_NAME "Dj
 add_executable(CreationTextureFrustProbe "${CMAKE_CURRENT_SOURCE_DIR}/../tests/FrustProbe.cpp")
 target_link_libraries(CreationTextureFrustProbe PRIVATE creation_suite_frust_plugin_runtime)
 set_target_properties(CreationTextureFrustProbe PROPERTIES OUTPUT_NAME "DjehutiTextureFrustProbe")
+
+# Developer tool: times the Surface Map save pipeline stage by stage.
+add_executable(CreationTextureSurfaceMapsBench "${CMAKE_CURRENT_SOURCE_DIR}/../tests/SurfaceMapsBench.cpp")
+target_link_libraries(CreationTextureSurfaceMapsBench PRIVATE creation_texture_image_lab)
+set_target_properties(CreationTextureSurfaceMapsBench PROPERTIES OUTPUT_NAME "DjehutiTextureSurfaceMapsBench")

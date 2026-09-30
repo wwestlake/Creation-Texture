@@ -4,6 +4,7 @@
 #include <creation/frust/PluginRuntime.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace image_lab
@@ -43,6 +44,14 @@ Layer layerFromImage(const juce::Image& image, const juce::String& name)
     layer.height = argb.getHeight();
     layer.pixels.resize(static_cast<size_t>(layer.width) * static_cast<size_t>(layer.height) * 4);
 
+    // 8-bit sRGB -> linear by table: 256 values, not a pow per channel.
+    static const auto toLinear = [] {
+        std::array<float, 256> t {};
+        for (int i = 0; i < 256; ++i)
+            t[static_cast<size_t>(i)] = srgbToLinear(static_cast<float>(i) / 255.0f);
+        return t;
+    }();
+
     const juce::Image::BitmapData data(argb, juce::Image::BitmapData::readOnly);
     size_t o = 0;
     for (int y = 0; y < layer.height; ++y)
@@ -50,9 +59,9 @@ Layer layerFromImage(const juce::Image& image, const juce::String& name)
         for (int x = 0; x < layer.width; ++x)
         {
             const auto colour = data.getPixelColour(x, y); // un-premultiplied
-            layer.pixels[o++] = srgbToLinear(colour.getFloatRed());
-            layer.pixels[o++] = srgbToLinear(colour.getFloatGreen());
-            layer.pixels[o++] = srgbToLinear(colour.getFloatBlue());
+            layer.pixels[o++] = toLinear[colour.getRed()];
+            layer.pixels[o++] = toLinear[colour.getGreen()];
+            layer.pixels[o++] = toLinear[colour.getBlue()];
             layer.pixels[o++] = colour.getFloatAlpha();
         }
     }

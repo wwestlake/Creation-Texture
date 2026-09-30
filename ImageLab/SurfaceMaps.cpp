@@ -207,8 +207,10 @@ bool Engine::specular(const std::vector<float>& gray, const std::vector<float>& 
     return implementation->specular(gray.data(), blurred.data(), out.data(), static_cast<std::int64_t>(gray.size()), level, contrast) == 1;
 }
 
-bool Engine::compute(const std::vector<float>& source, int width, int height, const Settings& s, Maps& out, juce::String& error)
+bool Engine::compute(const std::vector<float>& source, int width, int height, const Settings& s, Maps& out, juce::String& error,
+                     const Progress& progress)
 {
+    auto report = [&progress](float fraction, const char* step) { if (progress) progress(fraction, step); };
     if (! isReady()) { error = getError(); return false; }
     const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
     if (width < 3 || height < 3 || source.size() < count * 4)
@@ -221,12 +223,14 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
     const float scale = static_cast<float>(juce::jmax(width, height)) / 512.0f;
     auto radius = [scale](float at512) { return juce::jmax(1, juce::roundToInt(at512 * scale)); };
 
+    report(0.0f, "Reading brightness");
     std::vector<float> gray;
     if (! luminance(source, gray, error))
         return false;
 
     if (s.noiseRemoval > 0.0f)
     {
+        report(0.03f, "Removing noise");
         std::vector<float> smoothed;
         if (! gaussianish(gray, smoothed, width, height, radius(s.noiseRemoval), error))
             return false;
@@ -246,10 +250,15 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
     const float weights[5] = { s.fine, s.medium, s.large, s.veryLarge, s.huge };
     std::vector<std::vector<float>> levels(6);
     levels[0] = gray;
+    const char* levelNames[5] = { "Fine detail", "Medium detail", "Large detail", "Very large detail", "Huge detail" };
     for (int i = 0; i < 5; ++i)
+    {
+        report(0.06f + 0.08f * static_cast<float>(i), levelNames[i]);
         if (! gaussianish(gray, levels[static_cast<size_t>(i + 1)], width, height, radius(radii[i]), error))
             return false;
+    }
 
+    report(0.46f, "Height map");
     out.width = width;
     out.height = height;
     out.heightMap.assign(count, 0.0f);
@@ -261,24 +270,30 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
     if (s.sunken)
         implementation->invert(out.heightMap.data(), static_cast<std::int64_t>(count));
 
+    report(0.5f, "Normal map");
     if (! normalFromHeight(out.heightMap, out.normal, width, height, s.intensity * 8.0f * scale, s.directX, error))
         return false;
 
     out.occlusion.assign(count, 1.0f);
+    float occlusionStage = 0.56f;
     for (float at512 : { 3.0f, 8.0f, 20.0f })
     {
+        report(occlusionStage, "Occlusion");
+        occlusionStage += 0.08f;
         std::vector<float> blurredHeight;
         if (! gaussianish(out.heightMap, blurredHeight, width, height, radius(at512), error)
             || ! occlusionStep(out.occlusion, out.heightMap, blurredHeight, s.occlusion * 4.0f, error))
             return false;
     }
 
+    report(0.8f, "Specular and roughness");
     if (! specular(gray, levels[2], out.specular, s.specularLevel, s.specularContrast, error))
         return false;
     out.roughness.resize(count);
     for (size_t i = 0; i < count; ++i)
         out.roughness[i] = 1.0f - out.specular[i];
 
+    report(0.84f, "Removing lighting from the colour");
     double sum = 0.0;
     for (float v : levels[0])
         sum += v;
@@ -289,6 +304,7 @@ bool Engine::compute(const std::vector<float>& source, int width, int height, co
         return false;
 
     out.metallic = s.metallic;
+    report(1.0f, "Maps done");
     return true;
 }
 }

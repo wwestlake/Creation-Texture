@@ -380,19 +380,47 @@ private:
 class SurfaceMapWorkspace::SaveJob final : public juce::ThreadWithProgressWindow
 {
 public:
-    SaveJob(juce::Image source, surface_maps::Settings s, juce::String n, juce::String src,
+    SaveJob(juce::Image source, surface_maps::Settings s, juce::String n, juce::String src, creation::assets::ProjectSession& session,
             std::function<void(bool, const texture_set::Pack&, const juce::String&)> done)
-        : juce::ThreadWithProgressWindow("Making the surface map at full size...", true, false),
-          image(std::move(source)), settings(s), name(std::move(n)), sourceAsset(std::move(src)), onDone(std::move(done)) {}
+        : juce::ThreadWithProgressWindow("Making the surface map at full size...", true, true),
+          image(std::move(source)), settings(s), name(std::move(n)), sourceAsset(std::move(src)), project(session),
+          onDone(std::move(done)) {}
 
+    // Progress: reading the image 0-5%, the maps 5-40%, encoding the six map files 40-75%, writing them into the
+    // project 75-100%. The manifest (the asset itself) is saved afterwards on the message thread.
     void run() override
     {
-        setProgress(-1.0);
+        step(0.0f, "Reading the image");
         const auto layer = image_lab::layerFromImage(image, name);
+        step(0.03f, "Preparing the surface map routines");
         surface_maps::Engine engine;
         surface_maps::Maps maps;
-        ok = engine.compute(layer.pixels, layer.width, layer.height, settings, maps, error)
-          && texture_set::build(maps, settings, name, creation::assets::ProjectContainerPaths::sourceAssetRoot, sourceAsset, pack, error);
+        ok = engine.compute(layer.pixels, layer.width, layer.height, settings, maps, error,
+                            [this](float f, const juce::String& s) { step(0.05f + 0.35f * f, s); });
+        if (ok && ! threadShouldExit())
+            ok = texture_set::build(maps, settings, name, creation::assets::ProjectContainerPaths::sourceAssetRoot, sourceAsset, pack, error,
+                                    [this](float f, const juce::String& s) { step(0.4f + 0.35f * f, s); });
+
+        // PNGs are already compressed, so the store is told not to compress them again.
+        for (size_t i = 0; ok && i < pack.maps.size() && ! threadShouldExit(); ++i)
+        {
+            const auto& file = pack.maps[i];
+            step(0.75f + 0.25f * static_cast<float>(i) / static_cast<float>(pack.maps.size()),
+                 "Writing " + file.logicalPath.fromLastOccurrenceOf("/", false, false) + " into the project");
+            if (! project.writeEntry(file.logicalPath, file.bytes, juce::Time::getCurrentTime(), 0))
+            {
+                ok = false;
+                error = "Could not write " + file.logicalPath + ": " + project.getLastWriteError();
+            }
+        }
+        if (ok)
+            step(1.0f, "Saving the texture set");
+    }
+
+    void step(float fraction, const juce::String& text)
+    {
+        setProgress(fraction);
+        setStatusMessage(juce::String(juce::roundToInt(fraction * 100.0f)) + "%  -  " + text);
     }
 
     void threadComplete(bool userPressedCancel) override
@@ -406,6 +434,7 @@ private:
     juce::Image image;
     surface_maps::Settings settings;
     juce::String name, sourceAsset, error;
+    creation::assets::ProjectSession& project;
     texture_set::Pack pack;
     bool ok = false;
     std::function<void(bool, const texture_set::Pack&, const juce::String&)> onDone;
@@ -538,7 +567,7 @@ void SurfaceMapWorkspace::saveSurfaceMap()
         if (result != 1 || name.isEmpty())
             return;
 
-        auto* job = new SaveJob(sourceImage, settings, name, sourcePath,
+        auto* job = new SaveJob(sourceImage, settings, name, sourcePath, *projectSession,
                                 [this, name](bool ok, const texture_set::Pack& pack, const juce::String& error) {
             if (! ok)
             {
@@ -546,16 +575,7 @@ void SurfaceMapWorkspace::saveSurfaceMap()
                 return;
             }
 
-            // The maps first, then the manifest - the manifest is the asset, and it should never point at missing files.
-            for (const auto& file : pack.maps)
-            {
-                if (! projectSession->writeEntry(file.logicalPath, file.bytes))
-                {
-                    status("Could not write " + file.logicalPath + ": " + projectSession->getLastWriteError());
-                    return;
-                }
-            }
-
+            // The maps were written by the job; now the manifest - the asset itself - so it never points at missing files.
             creation::assets::ProjectAssetService::ImportOptions options;
             options.kind = creation::assets::AssetKind::texture;
             options.displayName = name;
