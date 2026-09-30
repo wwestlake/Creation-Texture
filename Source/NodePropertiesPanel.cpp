@@ -240,6 +240,16 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
         return;
     }
 
+    if (host.customEditor)
+    {
+        int height = 26;
+        if (auto editor = host.customEditor(node, pin, height))
+        {
+            addRow(labelText, std::move(editor), height);
+            return;
+        }
+    }
+
     auto* graph = host.graph;
     const auto id = node.Id();
     const auto pinId = pin.id;

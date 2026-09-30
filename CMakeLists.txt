@@ -138,6 +138,8 @@ target_sources(CreationTextureApp PRIVATE
     Source/ImageLabDocument.h
     Source/ImageLabPanel.cpp
     Source/SurfaceMapPanel.cpp
+    Source/ImageGraphPanel.cpp
+    Source/ImageGraphPanel.h
     Source/SurfaceMapPanel.h
     Source/SurfacePreview.cpp
     Source/SurfacePreview.h
