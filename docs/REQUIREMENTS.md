@@ -104,9 +104,6 @@ the source image, and the exact settings that made it; the maps live beside it i
 base colour (de-lit, sRGB), normal (convention recorded), height (16-bit), occlusion, roughness, and `orm.png`
 (glTF packing: r = occlusion, g = roughness, b = metallic).
 
-Known follow-on: Engine reads glTF metallic-roughness today but cannot yet render tangent-space normal maps
-(no tangents in its material shaders), so loading texture sets into Engine with working normals is Engine work.
-
 ## 5. Image Lab: a procedural layer editor
 
 Think GIMP, simpler, with **no hand/mouse drawing tools**. Everything is procedural.
