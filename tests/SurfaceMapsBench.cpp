@@ -57,7 +57,7 @@ int main(int argc, char** argv)
 
     texture_set::Pack pack;
     step = "start encoding";
-    if (! texture_set::build(maps, {}, "bench", "Assets/Source/", "", pack, error, [&](float, const juce::String& next) {
+    if (! texture_set::build(maps, {}, "bench", "Assets/Source/", {}, pack, error, [&](float, const juce::String& next) {
             lap(step);
             step = next;
         }))

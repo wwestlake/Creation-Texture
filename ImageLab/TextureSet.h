@@ -15,6 +15,18 @@ namespace texture_set
 constexpr const char* formatName = "djehuti-texture-set";
 constexpr int formatVersion = 1;
 
+// Exactly which source image made a version: its path, and its asset identity and version at that moment.
+struct SourceRef
+{
+    juce::String path;
+    juce::String assetId;
+    juce::String versionId;
+    juce::String version;
+
+    juce::var toVar() const;
+    static SourceRef fromVar(const juce::var& v);
+};
+
 struct File
 {
     juce::String logicalPath;
@@ -35,7 +47,7 @@ struct Pack
 // the next revision; its maps go in <name>.texset/v<revision>/ so earlier versions' files are never overwritten,
 // and the previous version (its settings, source and map files) moves into the manifest's "history".
 bool build(const surface_maps::Maps& maps, const surface_maps::Settings& settings, const juce::String& name,
-           const juce::String& basePath, const juce::String& sourceAsset, Pack& out, juce::String& error,
+           const juce::String& basePath, const SourceRef& source, Pack& out, juce::String& error,
            const surface_maps::Progress& progress = {}, const juce::var& previousManifest = {});
 
 // The logical path of a texture set's manifest, from its name.

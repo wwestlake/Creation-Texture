@@ -175,8 +175,9 @@ int main()
         surface_maps::Maps maps;
         surface_maps::Settings settings;
         texture_set::Pack pack;
+        const texture_set::SourceRef brick { "Assets/Source/brick.png", "asset-17", "version-3b", "3" };
         const bool built = engine.compute(source, 16, 16, settings, maps, error)
-                        && texture_set::build(maps, settings, "Old Brick", "Assets/Source/", "Assets/Source/brick.png", pack, error);
+                        && texture_set::build(maps, settings, "Old Brick", "Assets/Source/", brick, pack, error);
         check("pack build", built, error);
         if (built)
         {
@@ -186,7 +187,9 @@ int main()
                                  && manifest["maps"].getDynamicObject() != nullptr
                                  && manifest["maps"].getDynamicObject()->getProperties().size() == 6
                                  && manifest["maps"]["height"]["bits"].toString() == "16"
-                                 && manifest["source"].toString() == "Assets/Source/brick.png"
+                                 && manifest["source"]["path"].toString() == "Assets/Source/brick.png"
+                                 && manifest["source"]["versionId"].toString() == "version-3b"
+                                 && manifest["source"]["version"].toString() == "3"
                                  && pack.maps.size() == 6;
             check("pack manifest lists six maps, 16-bit height, source", manifestOk, pack.manifest.bytes.toString());
             if (manifestOk)
@@ -194,7 +197,7 @@ int main()
 
             // Saving again over the same set: version 2, maps in their own v2 folder, version 1 kept in the history.
             texture_set::Pack second;
-            const bool again = texture_set::build(maps, settings, "Old Brick", "Assets/Source/", "Assets/Source/brick.png", second, error,
+            const bool again = texture_set::build(maps, settings, "Old Brick", "Assets/Source/", brick, second, error,
                                                   {}, manifest);
             const auto secondManifest = juce::JSON::parse(second.manifest.bytes.toString());
             const bool versioned = again && second.revision == 2
@@ -203,7 +206,8 @@ int main()
                                 && pack.maps.front().logicalPath.startsWith("Assets/Source/old-brick.texset/v1/")
                                 && secondManifest["history"].size() == 1
                                 && static_cast<int>(secondManifest["history"][0]["revision"]) == 1
-                                && secondManifest["history"][0]["maps"]["height"]["path"].toString() == "Assets/Source/old-brick.texset/v1/height.png";
+                                && secondManifest["history"][0]["maps"]["height"]["path"].toString() == "Assets/Source/old-brick.texset/v1/height.png"
+                                && secondManifest["history"][0]["source"]["assetId"].toString() == "asset-17";
             check("saving again makes version 2 and keeps version 1", versioned, second.manifest.bytes.toString());
             if (versioned)
                 std::cout << "ok   saving again makes version 2 and keeps version 1\n";

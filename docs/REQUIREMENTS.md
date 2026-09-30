@@ -84,8 +84,8 @@ Research is building one general node language: a node-based UI that produces a 
 compiled to a target - FRust, GLSL, a sequence of process steps, or something else. Texture will be its first
 test bed. Until it is ready:
 
-- Texture does **not** build its own general node/graph engine or node contract (hold issue #24 and related
-  Phase 1 node items).
+- Texture does not build its own general node/graph *engine*: the Image Graph (section 4b) uses the suite's
+  existing node system, with node definitions kept portable (owner decision 2026-09-30).
 - Texture keeps a clean seam between "the graph" and "compile it for a target", so research's system can be
   swapped in there.
 - Work that carries over regardless of graph engine continues: node asset panels, the preview, storage in the
@@ -114,6 +114,25 @@ thing: `<name>.texset.json` (format `djehuti-texture-set`) names each map's role
 the source image, and the exact settings that made it; the maps live beside it in `<name>.texset/`:
 base colour (de-lit, sRGB), normal (convention recorded), height (16-bit), occlusion, roughness, and `orm.png`
 (glTF packing: r = occlusion, g = roughness, b = metallic).
+
+## 4b. Image Graph: procedural images with nodes (decided 2026-09-30)
+
+A node graph for making and processing images, in the spirit of Substance Designer:
+
+- **Create Image** node: sets the size (and bit depth) in Properties and outputs a blank image.
+- **Generator** nodes draw onto an image (noise, cells, gradients, patterns, and the frust_image_demo generators:
+  wood, marble, rust, cracks, clouds...). **Modifier** nodes change an image (blur, levels, blend, warp,
+  transform, normal-from-height...).
+- **Surface Map** node: its Properties pick one of the project's saved surface maps (texture sets); it runs that
+  set's saved settings on the image wired into it and outputs normal, height, occlusion, roughness and diffuse.
+  With nothing wired in, it outputs the maps saved in the set.
+- **Preview anywhere**: every node shows a thumbnail, and any node can be shown in a large 2D preview.
+- **Image analysis** nodes (histogram and other statistics) and **adjustment** nodes that change how colour and
+  contrast are distributed - Curves and Levels edited by drawing on a graph over the histogram, like GIMP.
+- Every node's pixel work is FRust. The graph saves as a JSON document that reopens exactly (section 4 rule).
+- Built now on the suite's existing node system (as the Materials graph is), with each node's definition (its
+  FRust routine and settings) kept separate from the graph engine so it can move to research's general node
+  system when that is ready. Owner decision, 2026-09-30.
 
 ## 5. Image Lab: a procedural layer editor
 

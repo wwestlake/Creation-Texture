@@ -5,6 +5,7 @@
 #include <SurfaceMaps.h>
 #include "ProjectImagePicker.h"
 #include "SurfacePreview.h"
+#include <TextureSet.h>
 
 // Surface Map mode (Layout > Surface Map): CrazyBump-style maps from one image asset. Pick the source image, set the
 // sliders, watch the maps and the lit 3D preview update, then File > Save Surface Map writes a texture set asset.
@@ -46,6 +47,7 @@ private:
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void requestMaps();
+    texture_set::SourceRef currentSourceRef(const juce::String& logicalPath) const;
     void status(const juce::String& text);
 
     creation::assets::ProjectSession* projectSession = nullptr;
@@ -53,6 +55,7 @@ private:
     surface_maps::Settings settings;
 
     juce::String sourcePath, sourceName;
+    texture_set::SourceRef sourceRef;     // the source image's identity and version, recorded with each save
     juce::String openSetName;             // the texture set being edited, if one was opened or saved
     juce::Image sourceImage;              // full size, for saving
     std::vector<float> previewPixels;     // linear rgba, at most 1024 px on a side

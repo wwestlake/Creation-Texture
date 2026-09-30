@@ -475,7 +475,7 @@ private:
 class SurfaceMapWorkspace::SaveJob final : public juce::ThreadWithProgressWindow
 {
 public:
-    SaveJob(juce::Image source, surface_maps::Settings s, juce::String n, juce::String src, creation::assets::ProjectSession& session,
+    SaveJob(juce::Image source, surface_maps::Settings s, juce::String n, texture_set::SourceRef src, creation::assets::ProjectSession& session,
             std::function<void(bool, const texture_set::Pack&, const juce::String&)> done)
         : juce::ThreadWithProgressWindow("Making the surface map at full size...", true, true),
           image(std::move(source)), settings(s), name(std::move(n)), sourceAsset(std::move(src)), project(session),
@@ -535,7 +535,8 @@ public:
 private:
     juce::Image image;
     surface_maps::Settings settings;
-    juce::String name, sourceAsset, error;
+    juce::String name, error;
+    texture_set::SourceRef sourceAsset;
     creation::assets::ProjectSession& project;
     texture_set::Pack pack;
     bool ok = false;
@@ -583,6 +584,7 @@ void SurfaceMapWorkspace::setSource(const juce::String& logicalPath)
     if (logicalPath != sourcePath)
         openSetName.clear();
     sourcePath = logicalPath;
+    sourceRef = {};
     sourceName.clear();
     sourceImage = {};
     previewPixels.clear();
@@ -604,6 +606,7 @@ void SurfaceMapWorkspace::setSource(const juce::String& logicalPath)
         for (const auto& entry : images.list())
             if (entry.logicalPath == logicalPath)
                 sourceName = entry.displayName;
+    sourceRef = currentSourceRef(logicalPath);
     if (sourceName.isEmpty())
         sourceName = logicalPath.fromLastOccurrenceOf("/", false, false).upToLastOccurrenceOf(".", false, false);
 
@@ -671,7 +674,7 @@ void SurfaceMapWorkspace::saveSurfaceMap()
         if (result != 1 || name.isEmpty())
             return;
 
-        auto* job = new SaveJob(sourceImage, settings, name, sourcePath, *projectSession,
+        auto* job = new SaveJob(sourceImage, settings, name, sourceRef, *projectSession,
                                 [this, name](bool ok, const texture_set::Pack& pack, const juce::String& error) {
             if (! ok)
             {
@@ -760,10 +763,19 @@ void SurfaceMapWorkspace::openSurfaceMap()
         }
 
         settings = surface_maps::Settings::fromVar(manifest["settings"]);
-        setSource(manifest["source"].toString());          // recomputes the maps with the saved settings
+        const auto recorded = texture_set::SourceRef::fromVar(manifest["source"]);
+        setSource(recorded.path);                            // recomputes the maps with the saved settings
         openSetName = manifest["name"].toString();          // after setSource, which starts a new set on a new image
         settingsPanel->rebuild();
-        status("Opened " + openSetName + ".");
+
+        const auto version = " (version " + manifest["revision"].toString() + ")";
+        if (! sourceImage.isValid())
+            status("Opened " + openSetName + version + ", but its source image " + recorded.path + " is no longer in the project.");
+        else if (recorded.versionId.isNotEmpty() && recorded.versionId != sourceRef.versionId)
+            status("Opened " + openSetName + version + ". Note: the source image has changed since this version was made (it was version "
+                   + recorded.version + ", it is now " + sourceRef.version + ").");
+        else
+            status("Opened " + openSetName + version + ".");
     }));
     options.componentToCentreAround = mapsPanel->getTopLevelComponent();
     options.dialogBackgroundColour = juce::Colour(0xff161a1f);
@@ -780,4 +792,19 @@ void SurfaceMapWorkspace::newSurfaceMap()
     openSetName.clear();
     settingsPanel->rebuild();
     status("New surface map - choose a source image in Settings.");
+}
+
+texture_set::SourceRef SurfaceMapWorkspace::currentSourceRef(const juce::String& logicalPath) const
+{
+    texture_set::SourceRef ref;
+    ref.path = logicalPath;
+    if (projectSession != nullptr && projectSession->isValid())
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath == logicalPath)
+            {
+                ref.assetId = asset.id;
+                ref.versionId = asset.versionId;
+                ref.version = asset.version;
+            }
+    return ref;
 }

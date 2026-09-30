@@ -238,13 +238,28 @@ bool encodeGray16Png(const std::vector<float>& gray, int width, int height, juce
     return encodePng(gray16Bytes(gray), width, height, 0, 16, out);
 }
 
+juce::var SourceRef::toVar() const
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty("path", path);
+    o->setProperty("assetId", assetId);
+    o->setProperty("versionId", versionId);
+    o->setProperty("version", version);
+    return juce::var(o);
+}
+
+SourceRef SourceRef::fromVar(const juce::var& v)
+{
+    return { v["path"].toString(), v["assetId"].toString(), v["versionId"].toString(), v["version"].toString() };
+}
+
 juce::String manifestPathFor(const juce::String& basePath, const juce::String& name)
 {
     return basePath + slugFor(name) + ".texset.json";
 }
 
 bool build(const surface_maps::Maps& maps, const surface_maps::Settings& settings, const juce::String& name,
-           const juce::String& basePath, const juce::String& sourceAsset, Pack& out, juce::String& error,
+           const juce::String& basePath, const SourceRef& source, Pack& out, juce::String& error,
            const surface_maps::Progress& progress, const juce::var& previousManifest)
 {
     if (! maps.isValid())
@@ -335,7 +350,7 @@ bool build(const surface_maps::Maps& maps, const surface_maps::Settings& setting
     manifest->setProperty("height", maps.height);
     manifest->setProperty("tiling", "wrap");
     manifest->setProperty("metallic", maps.metallic);
-    manifest->setProperty("source", sourceAsset);
+    manifest->setProperty("source", source.toVar());
     manifest->setProperty("madeBy", "Djehuti Texture - Surface Map");
     manifest->setProperty("settings", settings.toVar());
     manifest->setProperty("maps", juce::var(mapsObject));
