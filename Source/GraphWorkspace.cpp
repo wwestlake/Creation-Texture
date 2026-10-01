@@ -189,6 +189,16 @@ public:
                     }
                     if (node->Outputs().front().type.dataType != ns::DataType::Texture)
                         continue; // value and brush nodes have no picture
+                    if (ns::FlowKindOf(*node) == ns::FlowKind::route)
+                    {
+                        // A Route shows what flows out of its chosen output.
+                        const auto chosen = evaluator->flowChosenCase(*copy, id, error);
+                        if (auto image = chosen.empty() ? nullptr : evaluator->evaluate(*copy, id, chosen, error))
+                            out.thumbnails[id] = thumbnailOf(*image, 96);
+                        else
+                            out.errors[id] = error;
+                        continue;
+                    }
                     if (auto image = evaluator->evaluate(*copy, id, node->Outputs().front().name, error))
                         out.thumbnails[id] = thumbnailOf(*image, 96);
                     else
@@ -360,6 +370,9 @@ ns::NodeTypeRegistry makeRegistry(const image_graph::Library& library)
     ns::NodeTypeRegistry registry;
     library.registerTypes(registry);
     ce::material::RegisterMaterialNodes(registry);
+    // Number and colour decisions belong in materials too (a shader select); the rest only in image graphs.
+    ns::RegisterFlowNodes(registry, { ns::StandardFlowType(ns::DataType::Float), ns::StandardFlowType(ns::DataType::Color) },
+                          { image_graph::kImageDiagram, ce::material::kMaterialDiagram });
     return registry;
 }
 }
@@ -395,7 +408,8 @@ GraphWorkspace::GraphWorkspace()
         auto error = errors.find(id);
         if (error != errors.end())
         {
-            g.setColour(juce::Colour(0xffff8a80));
+            // A path the decision did not take is not an error: grey, not red.
+            g.setColour(error->second.contains("Not chosen") ? juce::Colour(0xff8a94a3) : juce::Colour(0xffff8a80));
             g.setFont(juce::FontOptions(11.0f));
             g.drawFittedText(error->second, area.toNearestInt(), juce::Justification::centred, 4);
             return;
@@ -488,6 +502,13 @@ juce::String GraphWorkspace::getTitle() const
 void GraphWorkspace::graphEdited()
 {
     edited = true;
+    // Decisions name their cases after what drives the selector (FLOW.md): keep them in line with the wiring.
+    bool casesChanged = false;
+    for (const auto& [id, node] : graph.Nodes())
+        if (ns::FlowKindOf(*node) != ns::FlowKind::none)
+            casesChanged = ns::SyncFlowNodeCases(graph, registry, id) || casesChanged;
+    if (casesChanged)
+        properties.refresh();
     graphView.repaint();
     symbols.graphChanged(); // a Get node may have been added, removed or rebound
     // The Draw view follows: a deleted node leaves it; a script edited in Properties shows in the Script panel.
@@ -736,6 +757,27 @@ std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, co
     }
 
     // Surface Map: load settings from a saved surface map.
+    // A Switch or Route's selector, not wired: choose the case by name.
+    if (ns::FlowKindOf(node) != ns::FlowKind::none && pin.name == ns::kFlowSelectorPin)
+    {
+        auto box = std::make_unique<juce::ComboBox>();
+        const auto cases = ns::FlowCasePins(node);
+        for (size_t i = 0; i < cases.size(); ++i)
+            box->addItem(juce::String(cases[i]->name).replaceCharacter('_', ' '), static_cast<int>(i) + 1);
+        box->setSelectedId(ns::FlowCaseIndex(pin.defaultValue, static_cast<int>(cases.size())) + 1, juce::dontSendNotification);
+        box->setTooltip("Which case flows. Wire a Choice param, a toggle or a number in to decide it from outside.");
+        box->onChange = [this, nodeId = node.Id(), pinId = pin.id, b = box.get()]() {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = static_cast<std::int64_t>(b->getSelectedId() - 1);
+                    graphEdited();
+                }
+        };
+        height = 26;
+        return box;
+    }
+
     // A Graph node: which saved image graph it uses.
     if (ns::IsGraphNode(node) && pin.name == ns::kGraphPathPin)
     {

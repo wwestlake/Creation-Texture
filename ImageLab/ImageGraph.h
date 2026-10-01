@@ -5,6 +5,7 @@
 #include <node_system/type_registry.h>
 #include <node_system/symbol_nodes.h>
 #include <node_system/graph_nodes.h>
+#include <node_system/flow_nodes.h>
 
 #include "SurfaceMaps.h"
 #include "Drawing.h"
@@ -148,6 +149,8 @@ public:
     drawing::DrawingPtr evaluateDrawing(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::string& output,
                                         juce::String& error);
     Host& getHost() noexcept { return host; }
+    // The case a Switch or Route picks now (shared/NodeSystem/FLOW.md), or "" if its selector cannot be read.
+    std::string flowChosenCase(const ce::node_system::Graph& graph, ce::node_system::NodeId node, juce::String& error);
 
     // Forget cached results (for example after the project's images change).
     void clearCache();
@@ -164,6 +167,11 @@ private:
 
     bool evaluateNode(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::vector<std::string>& wanted,
                       std::string& signatureOut, juce::String& error, int depth);
+    // A Switch or Route (FLOW.md): the selector first, then only the chosen case.
+    bool evaluateFlowNode(const ce::node_system::Graph& graph, const ce::node_system::Node& node, ce::node_system::FlowKind kind,
+                          const std::vector<std::string>& wanted, std::string& signatureOut, juce::String& error, int depth);
+    bool readSelector(const ce::node_system::Graph& graph, const ce::node_system::Node& node, ce::node_system::PinDefaultValue& selector,
+                      std::string& signature, juce::String& error, int depth);
     // A Graph node: runs the graph it uses, with its params and Graph Inputs set from the node's inputs.
     bool evaluateGraphNode(const ce::node_system::Node& node, const Host::LoadedGraph& used, Context& context,
                            std::map<std::string, ImagePtr>& outputs, juce::String& error);

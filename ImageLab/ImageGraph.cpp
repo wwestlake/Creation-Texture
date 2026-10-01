@@ -245,6 +245,8 @@ ns::PinSignature enumIn(const std::string& name, const std::string& enumName, st
     pin.type.enumType = enumName;
     return pin;
 }
+ns::PinSignature boolOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Bool }, {} }; }
+ns::PinSignature floatOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Float }, {} }; }
 ns::PinSignature drawingIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
 ns::PinSignature drawingOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
 ns::PinSignature brushIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
@@ -436,6 +438,11 @@ Library::Library()
                       "small bristles that streak; Image uses the image wired into tipImage." });
     enums.push_back({ "BrushRotation", "Brush Rotation", { "Fixed", "Follow Stroke", "Random" },
                       "How a brush's tip is turned: by its angle only, along the stroke's direction, or at random." });
+    enums.push_back({ "CompareOp", "Comparison", { "Less Than", "Less or Equal", "Equal", "Greater or Equal", "Greater Than", "Not Equal" },
+                      "How Compare relates a to b." });
+    enums.push_back({ "LogicOp", "Logic", { "And", "Or", "Xor" }, "How Logic combines a and b." });
+    enums.push_back({ "MathOp", "Math", { "Add", "Subtract", "Multiply", "Divide", "Minimum", "Maximum", "Power", "Modulo" },
+                      "What Math does with a and b." });
     enums.push_back({ "PaintMode", "Paint Mode", { "Stroke", "Fill", "Fill and Stroke" },
                       "Run the brush along the drawing's lines, fill its shapes, or both." });
 
@@ -454,6 +461,64 @@ Library::Library()
     definitions.push_back(valueNode("image.value.integer", "Integer", intIn("value", 1), "A whole number, wired into any integer setting."));
     definitions.push_back(valueNode("image.value.toggle", "Toggle", boolIn("value", false), "On or off, wired into any toggle setting."));
     definitions.push_back(valueNode("image.value.color", "Color", colourIn("value", 1.0f, 1.0f, 1.0f), "A colour, wired into any colour setting."));
+
+    // Conditions for decisions (shared/NodeSystem/FLOW.md): wire a result into a Switch or Route's selector.
+    definitions.push_back(define("image.value.compare", "Compare", "Values", "a compared with b, on or off - for example to drive a Switch.",
+        { floatIn("a", 0.0f), floatIn("b", 0.5f), enumIn("op", "CompareOp", 0) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            const float a = c.number("a", 0.0f), b = c.number("b", 0.5f);
+            bool r = false;
+            switch (c.integer("op", 0))
+            {
+                case 0: r = a < b; break;
+                case 1: r = a <= b; break;
+                case 2: r = std::abs(a - b) < 1.0e-6f; break;
+                case 3: r = a >= b; break;
+                case 4: r = a > b; break;
+                default: r = std::abs(a - b) >= 1.0e-6f; break;
+            }
+            c.valueOutputs["result"] = r;
+            return true;
+        }));
+    definitions.push_back(define("image.value.logic", "Logic", "Values", "a and / or / xor b.",
+        { boolIn("a", false), boolIn("b", false), enumIn("op", "LogicOp", 0) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            const bool a = c.flag("a", false), b = c.flag("b", false);
+            const int op = c.integer("op", 0);
+            c.valueOutputs["result"] = op == 0 ? (a && b) : op == 1 ? (a || b) : (a != b);
+            return true;
+        }));
+    definitions.push_back(define("image.value.not", "Not", "Values", "On becomes off, off becomes on.",
+        { boolIn("a", false) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            c.valueOutputs["result"] = ! c.flag("a", false);
+            return true;
+        }));
+    definitions.push_back(define("image.value.math", "Math", "Values", "a and b combined into one number.",
+        { floatIn("a", 0.0f), floatIn("b", 1.0f), enumIn("op", "MathOp", 0) }, { floatOut("result") },
+        [](Context& c, auto&, juce::String& error) {
+            const float a = c.number("a", 0.0f), b = c.number("b", 1.0f);
+            float r = 0.0f;
+            switch (c.integer("op", 0))
+            {
+                case 0: r = a + b; break;
+                case 1: r = a - b; break;
+                case 2: r = a * b; break;
+                case 3:
+                    if (b == 0.0f) { error = "Division by zero."; return false; }
+                    r = a / b;
+                    break;
+                case 4: r = std::min(a, b); break;
+                case 5: r = std::max(a, b); break;
+                case 6: r = std::pow(a, b); break;
+                default:
+                    if (b == 0.0f) { error = "Modulo by zero."; return false; }
+                    r = std::fmod(a, b);
+                    break;
+            }
+            c.valueOutputs["result"] = r;
+            return true;
+        }));
 
     // --- Generate ---
     auto sizeInputs = [](std::vector<ns::PinSignature> extra) {
@@ -1377,6 +1442,12 @@ void Library::registerTypes(ns::NodeTypeRegistry& registry) const
         registry.Register(d.descriptor);
     ns::RegisterSymbolGetNodes(registry); // params / constants / variables (shared/NodeSystem/SYMBOLS.md)
     ns::RegisterGraphNode(registry, { kImageDiagram }); // another image graph used as a node (GRAPH_TYPES.md)
+    // Decisions (FLOW.md): Switch and Route for every kind of value an image graph carries.
+    std::vector<ns::FlowType> flowTypes;
+    for (auto type : { ns::DataType::Texture, ns::DataType::Float, ns::DataType::Int, ns::DataType::Bool, ns::DataType::Color,
+                       ns::DataType::String, ns::DataType::Drawing, ns::DataType::Brush })
+        flowTypes.push_back(ns::StandardFlowType(type));
+    ns::RegisterFlowNodes(registry, flowTypes, { kImageDiagram });
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -1457,6 +1528,133 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
         return nullptr;
     }
     return found->second;
+}
+
+bool Evaluator::readSelector(const ns::Graph& graph, const ns::Node& node, ns::PinDefaultValue& selector, std::string& signature,
+                             juce::String& error, int depth)
+{
+    for (const auto& pin : node.Inputs())
+    {
+        if (pin.name != ns::kFlowSelectorPin)
+            continue;
+        selector = pin.defaultValue;
+        for (const auto& wire : graph.Connections())
+            if (wire.toNode == node.Id() && wire.toPin == pin.id)
+            {
+                const auto* from = graph.FindNode(wire.fromNode);
+                const auto* fromPin = from != nullptr ? from->FindPin(wire.fromPin) : nullptr;
+                if (fromPin == nullptr)
+                    break;
+                std::string upstream;
+                if (! evaluateNode(graph, wire.fromNode, { fromPin->name }, upstream, error, depth + 1))
+                    return false;
+                auto value = cache[wire.fromNode].values.find(fromPin->name);
+                if (value == cache[wire.fromNode].values.end())
+                {
+                    error = "The selector needs a value (a number, integer, toggle or choice).";
+                    return false;
+                }
+                selector = value->second;
+                signature += "|selector<" + upstream;
+                return true;
+            }
+        signature += "|selector=" + valueText(selector);
+        return true;
+    }
+    return true;
+}
+
+std::string Evaluator::flowChosenCase(const ns::Graph& graph, ns::NodeId id, juce::String& error)
+{
+    const auto* node = graph.FindNode(id);
+    if (node == nullptr)
+        return {};
+    ns::PinDefaultValue selector;
+    std::string signature;
+    if (! readSelector(graph, *node, selector, signature, error, 0))
+        return {};
+    const auto cases = ns::FlowCasePins(*node);
+    return cases.empty() ? std::string() : cases[static_cast<size_t>(ns::FlowCaseIndex(selector, static_cast<int>(cases.size())))]->name;
+}
+
+bool Evaluator::evaluateFlowNode(const ns::Graph& graph, const ns::Node& node, ns::FlowKind kind, const std::vector<std::string>& wanted,
+                                 std::string& signatureOut, juce::String& error, int depth)
+{
+    const auto title = juce::String(kind == ns::FlowKind::route ? "Route" : "Switch");
+    std::string signature = node.TypeName();
+    ns::PinDefaultValue selector;
+    if (! readSelector(graph, node, selector, signature, error, depth))
+        return false;
+    const auto cases = ns::FlowCasePins(node);
+    if (cases.empty())
+    {
+        error = title + ": it has no cases.";
+        return false;
+    }
+    const auto* chosen = cases[static_cast<size_t>(ns::FlowCaseIndex(selector, static_cast<int>(cases.size())))];
+
+    // A Route's other outputs carry nothing: whatever asks for one is not on the chosen path.
+    std::string outputName = ns::kFlowValuePin;
+    if (kind == ns::FlowKind::route)
+    {
+        for (const auto& w : wanted)
+            if (w != chosen->name)
+            {
+                error = "Not chosen - the Route sends to " + juce::String(chosen->name) + ".";
+                return false;
+            }
+        outputName = chosen->name;
+    }
+
+    // The one input that flows: the chosen case (Switch) or the Route's input. Nothing else is computed.
+    const ns::Pin* source = chosen;
+    if (kind == ns::FlowKind::route)
+        for (const auto& pin : node.Inputs())
+            if (pin.name == ns::kFlowValuePin)
+                source = &pin;
+
+    Cached result;
+    const ns::Connection* wire = nullptr;
+    for (const auto& connection : graph.Connections())
+        if (connection.toNode == node.Id() && connection.toPin == source->id)
+            wire = &connection;
+    if (wire != nullptr)
+    {
+        const auto* from = graph.FindNode(wire->fromNode);
+        const auto* fromPin = from != nullptr ? from->FindPin(wire->fromPin) : nullptr;
+        if (fromPin == nullptr)
+        {
+            error = title + ": a wire leads nowhere.";
+            return false;
+        }
+        std::string upstream;
+        if (! evaluateNode(graph, wire->fromNode, { fromPin->name }, upstream, error, depth + 1))
+            return false;
+        signature += "|" + source->name + "<" + upstream;
+        auto& up = cache[wire->fromNode];
+        switch (fromPin->type.dataType)
+        {
+            case ns::DataType::Texture: result.outputs[outputName] = up.outputs[fromPin->name]; break;
+            case ns::DataType::Drawing: result.drawings[outputName] = up.drawings[fromPin->name]; break;
+            case ns::DataType::Brush: result.brushes[outputName] = up.brushes[fromPin->name]; break;
+            default: result.values[outputName] = up.values[fromPin->name]; break;
+        }
+    }
+    else
+    {
+        const auto type = source->type.dataType;
+        if (type == ns::DataType::Texture || type == ns::DataType::Drawing || type == ns::DataType::Brush)
+        {
+            error = title + ": nothing is wired into " + juce::String(source->name) + ".";
+            return false;
+        }
+        signature += "|" + source->name + "=" + valueText(source->defaultValue);
+        result.values[outputName] = source->defaultValue;
+    }
+    signatureOut = std::to_string(std::hash<std::string> {}(signature));
+    result.signature = signatureOut;
+    cache[node.Id()] = std::move(result);
+    return true;
 }
 
 bool Evaluator::evaluateGraphNode(const ns::Node& node, const Host::LoadedGraph& usedGraph, Context& context,
@@ -1609,6 +1807,9 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         cachedGet.values = { { ns::kSymbolValuePin, value } };
         return true;
     }
+
+    if (const auto kind = ns::FlowKindOf(*node); kind != ns::FlowKind::none)
+        return evaluateFlowNode(graph, *node, kind, wanted, signatureOut, error, depth);
 
     const bool graphNode = ns::IsGraphNode(*node);
     const auto* definition = graphNode ? nullptr : library.find(node->TypeName());

@@ -903,6 +903,92 @@ int main()
               evaluator.evaluate(graph, outer->Id(), "out", loopError) == nullptr && loopError.contains("too deeply"));
     }
 
+    // Decisions (shared/NodeSystem/FLOW.md): Switch picks one case and computes only that; Route sends one way.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinNamed = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+
+        // A Choice param (Weather: Dry, Wet, Deep Snow) drives a Switch (Image): the cases take its names.
+        registry.RegisterEnum({ "Weather", "Weather", { "Dry", "Wet", "Deep Snow" }, "" });
+        ns::Symbol weather { "weather", "Weather", ns::SymbolKind::Param, ns::DataType::Int, std::int64_t { 0 }, "agent", false, "", "Weather" };
+        graph.AddSymbol(weather);
+        auto* sw = add("core.switch.image");
+        auto* choice = ns::AddSymbolGetNode(graph, registry, weather);
+        graph.Connect(choice->Id(), choice->Outputs().front().id, sw->Id(), pinNamed(sw, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, sw->Id());
+        check("Switch cases named after the Choice: Dry, Wet, Deep_Snow",
+              ns::FlowCasePins(*sw).size() == 3 && ns::FlowCasePins(*sw)[2]->name == "Deep_Snow");
+
+        // Dry: red. Wet: a Blur with nothing wired in - it would fail if it were computed. Deep Snow: blue.
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", sw, "Dry");
+        connect(graph, add("image.blur"), "image", sw, "Wet");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", sw, "Deep_Snow");
+        expectPixel("Switch on Dry gives red - the broken Wet branch is never computed", evaluator.evaluate(graph, sw->Id(), "value", error), 0, 0,
+                    { 1.0f, 0.0f, 0.0f });
+        evaluator.getHost().paramOverrides["weather"] = std::int64_t { 2 };
+        expectPixel("Switch on Deep Snow gives blue", evaluator.evaluate(graph, sw->Id(), "value", error), 0, 0, { 0.0f, 0.0f, 1.0f });
+        evaluator.getHost().paramOverrides["weather"] = std::int64_t { 1 };
+        juce::String wetError;
+        check("Switch on Wet computes the broken branch, and says so",
+              evaluator.evaluate(graph, sw->Id(), "value", wetError) == nullptr && wetError.contains("Blur"));
+        evaluator.getHost().paramOverrides.clear();
+
+        // Route (Image): green in, selector 1 -> case_1 carries green; case_0 is not chosen.
+        auto* route = add("core.route.image");
+        ns::SyncFlowNodeCases(graph, registry, route->Id());
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", route, "value");
+        set(route, "selector", std::int64_t { 1 });
+        expectPixel("Route sends its input to the chosen output", evaluator.evaluate(graph, route->Id(), "case_1", error), 0, 0, { 0.0f, 1.0f, 0.0f });
+        juce::String routeError;
+        check("Route's other output carries nothing", evaluator.evaluate(graph, route->Id(), "case_0", routeError) == nullptr
+                                                         && routeError.contains("Not chosen"));
+        // What is downstream of an unchosen output is not computed: an Invert on case_0 is not chosen either.
+        auto* after = add("image.invert");
+        connect(graph, route, "case_0", after, "image");
+        juce::String afterError;
+        check("A node after an unchosen output is not chosen", evaluator.evaluate(graph, after->Id(), "image", afterError) == nullptr
+                                                                  && afterError.contains("Not chosen"));
+
+        // Conditions: Compare 0.3 < 0.5 -> on; a toggle selector makes the cases Off / On and picks On (white).
+        auto* cmp = add("image.value.compare");
+        set(cmp, "a", 0.3f);
+        auto* onOff = add("core.switch.image");
+        graph.Connect(cmp->Id(), cmp->Outputs().front().id, onOff->Id(), pinNamed(onOff, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, onOff->Id());
+        connect(graph, solid(0.0f, 0.0f, 0.0f), "image", onOff, "Off");
+        connect(graph, solid(1.0f, 1.0f, 1.0f), "image", onOff, "On");
+        expectPixel("Compare 0.3 < 0.5 switches to On", evaluator.evaluate(graph, onOff->Id(), "value", error), 0, 0, { 1.0f, 1.0f, 1.0f });
+
+        // Math 2 x 3 = 6; Logic on and off = off.
+        auto* times = add("image.value.math");
+        set(times, "a", 2.0f); set(times, "b", 3.0f); set(times, "op", std::int64_t { 2 });
+        ns::PinDefaultValue product, both;
+        juce::String valueError;
+        auto* logic = add("image.value.logic");
+        set(logic, "a", true);
+        check("Math 2 x 3 = 6, Logic on and off = off",
+              evaluator.evaluateValue(graph, times->Id(), "result", product, valueError) && std::get<float>(product) == 6.0f
+                  && evaluator.evaluateValue(graph, logic->Id(), "result", both, valueError) && ! std::get<bool>(both));
+    }
+
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
     // full, varied image inside 0..1, and that Hills (height) is marked as data.
     for (const char* type : { "image.gen.wood", "image.gen.marble", "image.gen.hills_raw" })
