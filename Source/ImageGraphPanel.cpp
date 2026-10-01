@@ -98,6 +98,8 @@ public:
         image_graph::ImagePtr previewImage;
         juce::Image previewDisplay;
         juce::String previewError;
+        ns::NodeId overlayNode = 0;
+        drawing::DrawingPtr overlay;
     };
 
     Worker(const image_graph::Library& lib, std::function<creation::assets::ProjectSession*()> session)
@@ -108,11 +110,11 @@ public:
 
     ~Worker() override { stopThread(4000); }
 
-    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput)
+    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode)
     {
         {
             const juce::ScopedLock lock(requestLock);
-            pending = { std::move(graphText), previewNode, std::move(previewOutput), true };
+            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, true };
         }
         notify();
     }
@@ -192,6 +194,15 @@ public:
                     if (out.previewImage != nullptr)
                         out.previewDisplay = image_graph::toDisplayImage(*out.previewImage);
                 }
+                if (const auto* overlayNode = copy->FindNode(job.overlayNode))
+                    for (const auto& pin : overlayNode->Outputs())
+                        if (pin.type.dataType == ns::DataType::Drawing)
+                        {
+                            juce::String overlayError;
+                            out.overlayNode = job.overlayNode;
+                            out.overlay = evaluator->evaluateDrawing(*copy, job.overlayNode, pin.name, overlayError);
+                            break;
+                        }
             }
 
             {
@@ -210,6 +221,7 @@ private:
         std::string graphText;
         ns::NodeId previewNode = 0;
         std::string previewOutput;
+        ns::NodeId overlayNode = 0;
         bool valid = false;
     };
 
@@ -392,6 +404,17 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     preview->onTargetChanged = [this]() { requestEvaluation(); };
 
     // Params, constants and variables (shared/NodeSystem/SYMBOLS.md): drag one onto the graph for a Get node.
+    // The Draw view's script editor writes into the selected Draw Script node.
+    scriptPanel.onScriptChanged = [this](const juce::String& text) {
+        if (auto* node = graph.FindNode(scriptNode))
+            for (const auto& pin : node->Inputs())
+                if (pin.name == "script")
+                {
+                    node->FindPin(pin.id)->defaultValue = text.toStdString();
+                    graphEdited();
+                }
+    };
+
     symbols.setEnums(registry); // each enum is a Choice type in the Variables panel
     symbols.onSymbolsChanged = [this]() {
         graphView.repaint();
@@ -442,15 +465,82 @@ void ImageGraphWorkspace::graphEdited()
     edited = true;
     graphView.repaint();
     symbols.graphChanged(); // a Get node may have been added, removed or rebound
+    // The Draw view follows: a deleted node leaves it; a script edited in Properties shows in the Script panel.
+    if (graph.FindNode(overlayNode) == nullptr)
+    {
+        overlayNode = 0;
+        drawCanvas.setOverlay(nullptr, {});
+    }
+    if (graph.FindNode(scriptNode) == nullptr)
+    {
+        scriptNode = 0;
+        scriptPanel.showScript({}, {});
+    }
+    else
+        scriptPanel.scriptChangedElsewhere(juce::String(scriptText(scriptNode)));
     requestEvaluation();
+}
+
+std::string ImageGraphWorkspace::scriptText(ns::NodeId id) const
+{
+    if (const auto* node = graph.FindNode(id))
+        for (const auto& pin : node->Inputs())
+            if (pin.name == "script")
+                if (const auto* text = std::get_if<std::string>(&pin.defaultValue))
+                    return *text;
+    return {};
+}
+
+void ImageGraphWorkspace::forgetDrawTargets()
+{
+    overlayNode = 0;
+    scriptNode = 0;
+    drawCanvas.setOverlay(nullptr, {});
+    drawCanvas.setImage({}, {});
+    scriptPanel.showScript({}, {});
 }
 
 void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
 {
     selectedNode = id;
     properties.showNode(id);
+
+    // Draw view: a drawing node shows its lines over the canvas; a Paint node shows the drawing wired into it.
+    // A Draw Script node goes into the Script panel. Other nodes leave both as they were.
+    if (const auto* node = graph.FindNode(id))
+    {
+        const auto* descriptor = registry.Find(node->TypeName());
+        const auto name = descriptor != nullptr ? juce::String(descriptor->displayName) : juce::String(node->TypeName());
+        auto showOverlay = [this](ns::NodeId drawingNode, const juce::String& label) {
+            overlayNode = drawingNode;
+            overlayLabel = label;
+            drawCanvas.setOverlay(nullptr, label);
+        };
+        if (! node->Outputs().empty() && node->Outputs().front().type.dataType == ns::DataType::Drawing)
+            showOverlay(id, "Lines: " + name);
+        else if (node->TypeName() == "draw.paint")
+            for (const auto& wire : graph.Connections())
+                if (wire.toNode == id)
+                    if (const auto* to = node->FindPin(wire.toPin); to != nullptr && to->name == "drawing")
+                        if (const auto* from = graph.FindNode(wire.fromNode))
+                        {
+                            const auto* fromType = registry.Find(from->TypeName());
+                            showOverlay(wire.fromNode, "Lines: " + (fromType != nullptr ? juce::String(fromType->displayName) : juce::String(from->TypeName())));
+                        }
+        if (node->TypeName() == "draw.script")
+        {
+            scriptNode = id;
+            scriptPanel.showScript(name, juce::String(scriptText(id)));
+            const auto error = errors.find(id);
+            scriptPanel.setError(error != errors.end() ? error->second : juce::String());
+        }
+    }
+
     if (preview->isPinned() || id == 0)
+    {
+        requestEvaluation();
         return;
+    }
     const auto* node = graph.FindNode(id);
     if (node == nullptr)
         return;
@@ -459,7 +549,10 @@ void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
         if (pin.type.dataType == ns::DataType::Texture)
             outputs.push_back(pin.name);
     if (outputs.empty())
-        return; // a Get or value node has no picture: the preview stays on the last image
+    {
+        requestEvaluation(); // a Get, value or drawing node has no picture: the preview stays on the last image
+        return;
+    }
     const auto* descriptor = registry.Find(node->TypeName());
     preview->showNode(id, descriptor != nullptr ? juce::String(descriptor->displayName) : juce::String(node->TypeName()), outputs);
     requestEvaluation();
@@ -467,7 +560,7 @@ void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
 
 void ImageGraphWorkspace::requestEvaluation()
 {
-    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput());
+    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode);
 }
 
 void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
@@ -483,12 +576,25 @@ void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
     if (result.previewNode != 0 && result.previewNode == preview->getNode())
     {
         if (result.previewImage != nullptr)
-            preview->setImage(result.previewDisplay, juce::String(result.previewOutput) + "  " + juce::String(result.previewImage->width)
-                                                         + " x " + juce::String(result.previewImage->height)
-                                                         + (result.previewImage->data ? "  (data)" : ""));
+        {
+            const auto text = juce::String(result.previewOutput) + "  " + juce::String(result.previewImage->width) + " x "
+                            + juce::String(result.previewImage->height) + (result.previewImage->data ? "  (data)" : "");
+            preview->setImage(result.previewDisplay, text);
+            drawCanvas.setImage(result.previewDisplay, text);
+        }
         else
+        {
             preview->setImage({}, result.previewError);
+            drawCanvas.setImage({}, result.previewError);
+        }
         lastPreview = result.previewImage;
+    }
+    if (result.overlayNode != 0 && result.overlayNode == overlayNode)
+        drawCanvas.setOverlay(result.overlay, overlayLabel);
+    if (scriptNode != 0)
+    {
+        const auto error = errors.find(scriptNode);
+        scriptPanel.setError(error != errors.end() ? error->second : juce::String());
     }
 }
 
@@ -660,6 +766,7 @@ void ImageGraphWorkspace::newGraph()
     preview->showNode(0, {}, {});
     properties.showNode(0);
     symbols.refresh();
+    forgetDrawTargets();
     status("New image graph.");
 }
 
@@ -774,6 +881,7 @@ void ImageGraphWorkspace::openGraph()
         preview->showNode(0, {}, {});
         properties.showNode(0);
         symbols.refresh();
+        forgetDrawTargets();
         requestEvaluation();
         status("Opened image graph " + graphName + ".");
     }));

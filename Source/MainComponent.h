@@ -41,7 +41,7 @@ private:
     void refreshTitle();
 
     // Work areas: each has its own dock layout, panels and menus (docs/REQUIREMENTS.md section 4).
-    enum class WorkArea { materials, imageLab, surfaceMap, imageGraph };
+    enum class WorkArea { materials, imageLab, surfaceMap, imageGraph, draw };
     void showWorkArea(WorkArea area);
     CreationDock::DockManager& dockFor(WorkArea area);
     void loadLayouts();
@@ -53,6 +53,17 @@ private:
         explicit NonOwningPanelHost(juce::Component& contentToHost) : content(contentToHost)
         {
             addAndMakeVisible(content);
+        }
+
+        // A panel shared by two work areas (Graph and Draw) can only sit in one at a time: the area being shown takes
+        // it back.
+        void adopt()
+        {
+            if (content.getParentComponent() != this)
+            {
+                addAndMakeVisible(content);
+                resized();
+            }
         }
 
         void resized() override
@@ -82,6 +93,9 @@ private:
     std::unique_ptr<CreationDock::DockManager> imageLabDock;
     std::unique_ptr<CreationDock::DockManager> surfaceMapDock;
     std::unique_ptr<CreationDock::DockManager> imageGraphDock;
+    std::unique_ptr<CreationDock::DockManager> drawDock;
+    // Hosts of panels the Graph and Draw areas share, by area, so the area being shown can take its panels back.
+    std::vector<std::pair<WorkArea, NonOwningPanelHost*>> sharedHosts;
     WorkArea currentArea = WorkArea::materials;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
