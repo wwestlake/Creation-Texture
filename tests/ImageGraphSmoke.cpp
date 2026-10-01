@@ -954,6 +954,23 @@ int main()
               evaluator.evaluate(graph, sw->Id(), "value", wetError) == nullptr && wetError.contains("Blur"));
         evaluator.getHost().paramOverrides.clear();
 
+        // A type made in the node system (TYPES.md): the graph's own enum HSV Channel; a param of it drives a Switch
+        // whose cases become Hue, Saturation, Value; Saturation (1) picks the second, green.
+        graph.AddEnum({ "HsvChannel", "HSV Channel", { "Hue", "Saturation", "Value" }, "" });
+        ns::Symbol hsv { "hsv", "HSV", ns::SymbolKind::Param, ns::DataType::Int, std::int64_t { 1 }, "agent", false, "", "HsvChannel" };
+        graph.AddSymbol(hsv);
+        auto* byChannel = add("core.switch.image");
+        auto* hsvGet = ns::AddSymbolGetNode(graph, registry, hsv);
+        graph.Connect(hsvGet->Id(), hsvGet->Outputs().front().id, byChannel->Id(), pinNamed(byChannel, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, byChannel->Id());
+        check("A graph's own enum names the Switch cases Hue, Saturation, Value",
+              ns::FlowCasePins(*byChannel).size() == 3 && ns::FlowCasePins(*byChannel)[1]->name == "Saturation");
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", byChannel, "Hue");
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", byChannel, "Saturation");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", byChannel, "Value");
+        expectPixel("A param of the graph's own enum picks Saturation", evaluator.evaluate(graph, byChannel->Id(), "value", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+
         // Route (Image): green in, selector 1 -> case_1 carries green; case_0 is not chosen.
         auto* route = add("core.route.image");
         ns::SyncFlowNodeCases(graph, registry, route->Id());

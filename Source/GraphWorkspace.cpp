@@ -11,6 +11,8 @@ namespace ns = ce::node_system;
 namespace
 {
 constexpr const char* documentFormat = "djehuti-image-graph";
+// The project's own types (shared/NodeSystem/TYPES.md), for every graph in the project.
+constexpr const char* projectTypesFile = "project.frtypes";
 constexpr float thumbnailHeight = 100.0f;
 const juce::Colour panelBackground { 0xff1e2227 };
 
@@ -386,6 +388,8 @@ GraphWorkspace::GraphWorkspace()
     // An image graph: the palette lists the nodes that belong in one (shared/NodeSystem/GRAPH_TYPES.md).
     graph.SetDiagramType(image_graph::kImageDiagram);
     palette.SetDiagramType(image_graph::kImageDiagram);
+    // Enter in the palette's search, or a double-click on a node, adds it in the middle of the graph.
+    palette.onAddRequested = [this](const std::string& typeName) { graphView.AddNodeAtCentre(typeName); };
 
     graphView.onGraphChanged = [this]() {
         properties.refresh(); // wiring changed: which inputs are editable changed
@@ -455,6 +459,13 @@ GraphWorkspace::GraphWorkspace()
     };
 
     symbols.setEnums(registry); // each enum is a Choice type in the Variables panel
+
+    // Types (TYPES.md): made in the Types panel, not in the graph; once made they are types things can be.
+    types.onGraphTypesChanged = [this]() { typesChanged(); };
+    types.onProjectTypesChanged = [this](const std::vector<ns::EnumDef>& enums) {
+        registry.ReplaceEnums(ns::TypeScope::project, enums);
+        saveProjectTypes(enums);
+    };
     symbols.onSymbolsChanged = [this]() {
         graphView.repaint();
         properties.refresh();
@@ -474,6 +485,51 @@ juce::Component& GraphWorkspace::getPreview() noexcept { return *preview; }
 void GraphWorkspace::setProjectSession(creation::assets::ProjectSession* session)
 {
     projectSession = session;
+}
+
+void GraphWorkspace::projectOpened()
+{
+    loadProjectTypes();
+}
+
+void GraphWorkspace::loadProjectTypes()
+{
+    std::vector<ns::EnumDef> enums;
+    juce::MemoryBlock bytes;
+    const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
+    if (hasProject() && projectSession->readEntry(path, bytes))
+    {
+        std::string error;
+        if (! ns::DeserializeTypes(bytes.toString().toStdString(), ns::TypeScope::project, enums, error))
+            status("The project's types could not be read: " + juce::String(error));
+    }
+    registry.ReplaceEnums(ns::TypeScope::project, enums);
+    types.setProjectTypes(enums, hasProject());
+    typesChanged();
+    edited = false; // loading types is not an edit of the graph
+}
+
+void GraphWorkspace::saveProjectTypes(const std::vector<ns::EnumDef>& enums)
+{
+    if (! hasProject())
+        return;
+    const auto text = juce::String(ns::SerializeTypes(enums));
+    juce::String error;
+    const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
+    if (! projectSession->writeEntry(path, juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8())) || ! projectSession->commit(error))
+        status("Could not save the project's types: " + (error.isNotEmpty() ? error : projectSession->getLastWriteError()));
+}
+
+// Types changed (made, renamed, values changed, removed): everything that shows or uses them follows. Called from
+// the Types panel's own controls, so the panels it rebuilds are not the one being clicked.
+void GraphWorkspace::typesChanged()
+{
+    symbols.refresh();
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<NodePropertiesPanel>(&properties)]() {
+        if (safe != nullptr)
+            safe->refresh();
+    });
+    graphEdited();
 }
 
 void GraphWorkspace::setImageSource(project_images::Source source)
@@ -700,7 +756,7 @@ std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, co
                     if (const auto* toPin = to->FindPin(wire.toPin))
                     {
                         auto t = toPin->type;
-                        if (const auto* def = ns::PinEnum(registry, *to, *toPin))
+                        if (const auto* def = ns::PinEnum(graph, registry, *to, *toPin))
                             t.enumType = def->name;
                         wiredInto.push_back(t);
                     }
@@ -983,6 +1039,7 @@ void GraphWorkspace::adoptGraph(ns::Graph newGraph, const juce::String& name)
     preview->showNode(0, {}, {});
     properties.showNode(0);
     symbols.refresh();
+    types.refresh();
     forgetDrawTargets();
     if (onTypeChanged)
         onTypeChanged();

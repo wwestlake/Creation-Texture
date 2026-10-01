@@ -5,6 +5,7 @@
 #include <creation/node_editor_ui/NodeGraphComponent.h>
 #include <creation/node_editor_ui/NodePalette.h>
 #include <creation/node_editor_ui/SymbolsPanel.h>
+#include <creation/node_editor_ui/TypesPanel.h>
 #include <ImageGraph.h>
 #include <creation/material/material_nodes.h>
 #include "NodePropertiesPanel.h"
@@ -33,6 +34,10 @@ public:
     juce::Component& getGraphView() noexcept { return graphView; }
     juce::Component& getPropertiesPanel() noexcept { return properties; }
     juce::Component& getVariablesPanel() noexcept { return symbols; }
+    // The types in scope and their editors (shared/NodeSystem/TYPES.md).
+    juce::Component& getTypesPanel() noexcept { return types; }
+    // A project was opened (or the session became valid): load the project's types into scope.
+    void projectOpened();
     juce::Component& getPreview() noexcept;
     // A material graph's lit 3D preview.
     juce::Component& getMaterialPreview() noexcept { return materialPreview; }
@@ -82,6 +87,10 @@ private:
     // Starts editing a graph (new or opened): its type sets the node list, Variables types and preview.
     void adoptGraph(ce::node_system::Graph newGraph, const juce::String& name);
     void compileMaterial();
+    // The project's types: read from and written to the project (TYPES.md), and put in the registry's project scope.
+    void loadProjectTypes();
+    void saveProjectTypes(const std::vector<ce::node_system::EnumDef>& enums);
+    void typesChanged();
     void status(const juce::String& text);
 
     creation::assets::ProjectSession* projectSession = nullptr;
@@ -95,6 +104,7 @@ private:
     creation::node_editor_ui::NodePalette palette;
     NodePropertiesPanel properties;
     creation::node_editor_ui::SymbolsPanel symbols { graph };
+    creation::node_editor_ui::TypesPanel types { graph, registry };
     std::unique_ptr<PreviewPanel> preview;
     ViewerPanel materialPreview;
     DrawCanvas drawCanvas;

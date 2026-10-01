@@ -71,6 +71,7 @@ MainComponent::MainComponent()
     graphDock = std::make_unique<CreationDock::DockManager>(*this);
     graphDock->registerPanel("GraphNodes", "Nodes", shared(WorkArea::graph, graphEditor.getPalette()), Zone::Left);
     graphDock->registerPanel("GraphVariables", "Variables", shared(WorkArea::graph, graphEditor.getVariablesPanel()), Zone::Left);
+    graphDock->registerPanel("GraphTypes", "Types", shared(WorkArea::graph, graphEditor.getTypesPanel()), Zone::Left);
     graphDock->registerPanel("ImageGraph", "Image Graph", shared(WorkArea::graph, graphEditor.getGraphView()), Zone::CenterTab);
     graphDock->registerPanel("GraphPreview", "2D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getPreview()), Zone::Right);
     graphDock->registerPanel("GraphMaterialPreview", "3D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getMaterialPreview()), Zone::Right);
@@ -85,6 +86,7 @@ MainComponent::MainComponent()
     drawDock->registerPanel("DrawScript", "Script", std::make_unique<NonOwningPanelHost>(graphEditor.getScriptPanel()), Zone::Left);
     drawDock->registerPanel("DrawNodes", "Nodes", shared(WorkArea::draw, graphEditor.getPalette()), Zone::Left);
     drawDock->registerPanel("DrawVariables", "Variables", shared(WorkArea::draw, graphEditor.getVariablesPanel()), Zone::Left);
+    drawDock->registerPanel("DrawTypes", "Types", shared(WorkArea::draw, graphEditor.getTypesPanel()), Zone::Left);
     drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, graphEditor.getGraphView()), Zone::CenterTab);
     drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(graphEditor.getDrawCanvas()), Zone::Right);
     drawDock->registerPanel("DrawProperties", "Properties", shared(WorkArea::draw, graphEditor.getPropertiesPanel()), Zone::Right);
@@ -122,6 +124,7 @@ MainComponent::MainComponent()
 
     juce::String error;
     ensureProjectSessionActive(error);
+    graphEditor.projectOpened();
     refreshTitle();
 }
 
@@ -146,6 +149,7 @@ void MainComponent::openProject(const juce::String& projectId)
     }
     
     projectImages.clear();
+    graphEditor.projectOpened();
     graphEditor.newGraph(image_graph::kImageDiagram);
     refreshTitle();
 }
@@ -230,6 +234,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
             menu.addItem(91, "Script");
             menu.addItem(92, "Nodes");
             menu.addItem(93, "Variables");
+            menu.addItem(96, "Types");
             menu.addItem(94, "Image Graph");
             menu.addItem(95, "Properties");
         }
@@ -239,6 +244,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
             menu.addItem(76, "Graph");
             menu.addItem(77, "2D Preview");
             menu.addItem(81, "3D Preview");
+            menu.addItem(82, "Types");
             menu.addItem(78, "Properties");
             menu.addItem(80, "Variables");
         }
@@ -293,6 +299,8 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 70: confirmDiscardingEdits([this]() { graphEditor.newGraph(image_graph::kImageDiagram); }); break;
         case 71: confirmDiscardingEdits([this]() { graphEditor.openGraph(); }); break;
         case 81: dock.activatePanel("GraphMaterialPreview"); break;
+        case 82: dock.activatePanel("GraphTypes"); break;
+        case 96: dock.activatePanel("DrawTypes"); break;
         case 72: graphEditor.saveGraph(); break;
         case 73: graphEditor.saveGraphAs(); break;
         case 74: graphEditor.saveOutputAsImage(); break;
