@@ -86,15 +86,17 @@ MainComponent::MainComponent()
     imageGraphDock->activatePanel("GraphNodes");
     addChildComponent(imageGraphDock.get());
 
-    // Draw (requirements section 5): the canvas large, the script beside it, the graph below.
+    // Draw (requirements section 5): laid out like the other tools - the graph in the centre, the canvas as the
+    // preview on the right with Properties, the script with Nodes and Variables on the left.
     drawDock = std::make_unique<CreationDock::DockManager>(*this);
-    drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(imageGraph.getDrawCanvas()), Zone::CenterTab);
     drawDock->registerPanel("DrawScript", "Script", std::make_unique<NonOwningPanelHost>(imageGraph.getScriptPanel()), Zone::Left);
     drawDock->registerPanel("DrawNodes", "Nodes", shared(WorkArea::draw, imageGraph.getPalette()), Zone::Left);
     drawDock->registerPanel("DrawVariables", "Variables", shared(WorkArea::draw, imageGraph.getVariablesPanel()), Zone::Left);
-    drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, imageGraph.getGraphView()), Zone::Bottom);
+    drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, imageGraph.getGraphView()), Zone::CenterTab);
+    drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(imageGraph.getDrawCanvas()), Zone::Right);
     drawDock->registerPanel("DrawProperties", "Properties", shared(WorkArea::draw, imageGraph.getPropertiesPanel()), Zone::Right);
     drawDock->activatePanel("DrawScript");
+    drawDock->activatePanel("DrawCanvas");
     addChildComponent(drawDock.get());
 
     loadLayouts();
