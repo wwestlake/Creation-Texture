@@ -9,6 +9,7 @@ juce_add_binary_data(creation_texture_image_lab_frust
         Frust/surface_maps.frust
         Frust/image_graph.frust
         Frust/image_fx.frust
+        Frust/drawing.frust
         Frust/pods/frust_image_demo/lib.fr
 )
 
@@ -21,6 +22,8 @@ add_library(creation_texture_image_lab STATIC
     TextureSet.h
     ImageGraph.cpp
     ImageGraph.h
+    Drawing.cpp
+    Drawing.h
     ImageDemoHost.cpp
     ImageDemoHost.h
 )

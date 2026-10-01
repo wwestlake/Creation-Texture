@@ -255,6 +255,18 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
     const auto pinId = pin.id;
     const auto dataType = pin.type.dataType;
 
+    // A drawing or brush input is only ever wired (section 5: Drawing).
+    if (dataType == ns::DataType::Drawing || dataType == ns::DataType::Brush)
+    {
+        auto info = std::make_unique<juce::Label>();
+        info->setText(dataType == ns::DataType::Drawing ? "Not wired - wire a shape or drawing in"
+                                                         : "Not wired - a white round brush is used",
+                      juce::dontSendNotification);
+        info->setColour(juce::Label::textColourId, juce::Colours::grey);
+        addRow(labelText, std::move(info), 24);
+        return;
+    }
+
     // An image input: pick one of the project's images.
     if (dataType == ns::DataType::Texture)
     {

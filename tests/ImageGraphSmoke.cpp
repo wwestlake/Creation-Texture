@@ -350,6 +350,89 @@ int main()
             std::cout << "ok   a Blend Mode choice does not wire into an Axis setting\n";
     }
 
+    // Drawing (requirements section 5): shapes -> Paint with a Brush -> an image. All on a 10 x 10 opaque black canvas,
+    // so a drawing point x maps to pixel x * 10 and pixel (i, j) covers i..i+1, j..j+1.
+    {
+        auto blackCanvas = [&]() {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 10 });
+            set(n, "height", std::int64_t { 10 });
+            set(n, "color", ns::Vec3Default { 0.0f, 0.0f, 0.0f });
+            return n;
+        };
+        auto paint = [&](ns::Node* canvas, ns::Node* shape, ns::Node* brush, std::int64_t mode) {
+            auto* p = add("draw.paint");
+            if (canvas != nullptr) connect(graph, canvas, "image", p, "canvas");
+            connect(graph, shape, "drawing", p, "drawing");
+            if (brush != nullptr) connect(graph, brush, "brush", p, "brush");
+            set(p, "mode", mode);
+            return p;
+        };
+        auto image = [&](ns::Node* n) { return evaluator.evaluate(graph, n->Id(), "image", error); };
+
+        // Stroke: a horizontal line at y 0.45 -> pixel row 4.5. A white hard brush 2 px across (size 0.2 of 10 px),
+        // stamps every 0.2 px. Coverage runs from full within 0.5 px of the line to none at 1.5 px:
+        //   row 4 (centre 4.5, distance 0) -> 1;  row 3 (distance 1) -> 0.5;  row 2 (distance 2) -> 0.
+        auto* line = add("draw.line");
+        set(line, "x1", 0.05f); set(line, "y1", 0.45f); set(line, "x2", 0.95f); set(line, "y2", 0.45f);
+        auto* hard = add("draw.brush");
+        set(hard, "size", 0.2f); set(hard, "hardness", 1.0f); set(hard, "spacing", 0.1f);
+        auto* stroked = paint(blackCanvas(), line, hard, 0);
+        expectPixel("Stroke: on the line", image(stroked), 4, 4, { 1.0f, 1.0f, 1.0f, 1.0f }, 1.0e-3f);
+        expectPixel("Stroke: 1 px away, half covered", image(stroked), 4, 3, { 0.5f, 0.5f, 0.5f, 1.0f }, 1.0e-3f);
+        expectPixel("Stroke: 2 px away, untouched", image(stroked), 4, 2, { 0.0f, 0.0f, 0.0f, 1.0f }, 1.0e-3f);
+
+        // Fill: a rectangle x 0.25..0.65, y 0.2..0.6 -> pixels x 2.5..6.5, y 2..6, filled red.
+        //   pixel (4, 3) is inside -> 1; (2, 3) and (6, 3) are half inside -> 0.5; (4, 6) is below -> 0.
+        auto* rect = add("draw.rectangle");
+        set(rect, "x", 0.25f); set(rect, "y", 0.2f); set(rect, "width", 0.4f); set(rect, "height", 0.4f);
+        auto* filled = paint(blackCanvas(), rect, nullptr, 1);
+        set(filled, "fill", ns::Vec3Default { 1.0f, 0.0f, 0.0f });
+        expectPixel("Fill: inside", image(filled), 4, 3, { 1.0f, 0.0f, 0.0f, 1.0f }, 1.0e-3f);
+        expectPixel("Fill: left edge half covered", image(filled), 2, 3, { 0.5f, 0.0f, 0.0f }, 1.0e-3f);
+        expectPixel("Fill: right edge half covered", image(filled), 6, 3, { 0.5f, 0.0f, 0.0f }, 1.0e-3f);
+        expectPixel("Fill: below the shape", image(filled), 4, 6, { 0.0f, 0.0f, 0.0f }, 1.0e-3f);
+
+        // No canvas: Paint makes a transparent width x height image; a full-canvas fill gives exactly the fill colour.
+        auto* whole = add("draw.rectangle");
+        set(whole, "x", 0.0f); set(whole, "y", 0.0f); set(whole, "width", 1.0f); set(whole, "height", 1.0f);
+        auto* fresh = paint(nullptr, whole, nullptr, 1);
+        set(fresh, "width", std::int64_t { 4 });
+        set(fresh, "height", std::int64_t { 4 });
+        set(fresh, "fill", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        const auto freshImage = image(fresh);
+        expectPixel("Paint without a canvas: fill colour, opaque", freshImage, 3, 3, { 0.2f, 0.4f, 0.6f, 1.0f }, 1.0e-3f);
+        if (freshImage == nullptr || freshImage->width != 4 || freshImage->height != 4)
+        {
+            std::cerr << "FAIL Paint without a canvas did not make a 4 x 4 image\n";
+            ++failures;
+        }
+
+        // Polygon: 3 sides, rotation 0 -> a corner straight up from the centre: (0.5, 0.5 - 0.25).
+        auto* triangle = add("draw.polygon");
+        set(triangle, "sides", std::int64_t { 3 });
+        const auto shape = evaluator.evaluateDrawing(graph, triangle->Id(), "drawing", error);
+        if (shape == nullptr || shape->paths.size() != 1 || shape->paths[0].points.size() != 3 || ! shape->paths[0].closed
+            || std::abs(shape->paths[0].points[0].x - 0.5f) > 1.0e-5f || std::abs(shape->paths[0].points[0].y - 0.25f) > 1.0e-5f)
+        {
+            std::cerr << "FAIL a triangle does not start at its top corner\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   a triangle starts at its top corner\n";
+
+        // Paint with nothing wired to draw reports it.
+        auto* empty = add("draw.paint");
+        juce::String paintError;
+        if (evaluator.evaluate(graph, empty->Id(), "image", paintError) != nullptr || ! paintError.contains("drawing"))
+        {
+            std::cerr << "FAIL Paint without a drawing did not say so\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   Paint without a drawing says so\n";
+    }
+
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
     // full, varied image inside 0..1, and that Hills (height) is marked as data.
     for (const char* type : { "image.gen.wood", "image.gen.marble", "image.gen.hills_raw" })

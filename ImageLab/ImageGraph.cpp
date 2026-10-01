@@ -41,7 +41,13 @@ extern "C" float fx_host_i64_to_f32(std::int64_t v) { return static_cast<float>(
 extern "C" std::int64_t fx_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
 extern "C" float fx_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
 
+extern "C" float dr_host_floor(float v) { return std::floor(v); }
+extern "C" float dr_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
+extern "C" float dr_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
+extern "C" std::int64_t dr_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+
 constexpr const char* key = "image_graph";
+constexpr const char* drawKey = "drawing";
 constexpr const char* demoKey = "frust_image_demo";
 constexpr const char* fxKey = "image_fx";
 constexpr int maxDepth = 256;
@@ -103,6 +109,27 @@ public:
             return;
         }
 
+        // Painting a Drawing with a Brush (drawing.frust).
+        runtime.registerHostFunction("dr_host_floor", reinterpret_cast<void*>(&dr_host_floor));
+        runtime.registerHostFunction("dr_host_sqrt", reinterpret_cast<void*>(&dr_host_sqrt));
+        runtime.registerHostFunction("dr_host_i64_to_f32", reinterpret_cast<void*>(&dr_host_i64_to_f32));
+        runtime.registerHostFunction("dr_host_f32_to_i64", reinterpret_cast<void*>(&dr_host_f32_to_i64));
+        ::frust::CompileRequest draw;
+        draw.sources.push_back({ "drawing.frust", std::string(ImageLabFrust::drawing_frust, ImageLabFrust::drawing_frustSize) });
+        if (! runtime.loadSource(drawKey, draw, loadError))
+        {
+            error = "Drawing FRust routines did not compile: " + juce::String(loadError);
+            return;
+        }
+        stroke = reinterpret_cast<decltype(stroke)>(runtime.getFunction(drawKey, "dr_stroke"));
+        fillShapes = reinterpret_cast<decltype(fillShapes)>(runtime.getFunction(drawKey, "dr_fill"));
+        composite = reinterpret_cast<decltype(composite)>(runtime.getFunction(drawKey, "dr_composite"));
+        if (! (stroke && fillShapes && composite))
+        {
+            error = "Drawing FRust routines are incomplete.";
+            return;
+        }
+
         // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
         // manifest, so one is put in front of the pod's own source, which is left exactly as published.
         image_demo_host::registerAll(runtime);
@@ -139,6 +166,10 @@ public:
     std::int64_t (*invert)(float*, std::int64_t) = nullptr;
     std::int64_t (*grayscale)(float*, std::int64_t) = nullptr;
     std::int64_t (*levels)(float*, std::int64_t, float, float, float, float, float) = nullptr;
+    // drawing.frust
+    std::int64_t (*stroke)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, std::int64_t, float, float, float) = nullptr;
+    std::int64_t (*fillShapes)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, float*, float*) = nullptr;
+    std::int64_t (*composite)(float*, const float*, std::int64_t, float, float, float, float) = nullptr;
     image_lab::Compositor compositor;
     juce::String error;
 };
@@ -201,6 +232,10 @@ ns::PinSignature enumIn(const std::string& name, const std::string& enumName, st
     pin.type.enumType = enumName;
     return pin;
 }
+ns::PinSignature drawingIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
+ns::PinSignature drawingOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
+ns::PinSignature brushIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
+ns::PinSignature brushOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
 ns::PinSignature textIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::String }, std::string("") }; }
 
 Definition define(std::string type, std::string name, std::string category, std::string description,
@@ -361,6 +396,8 @@ Library::Library()
     enums.push_back({ "GradientDirection", "Gradient Direction", { "Left to Right", "Top to Bottom", "Radial" },
                       "Which way a gradient runs." });
     enums.push_back({ "Axis", "Axis", { "Horizontal", "Vertical" }, "A horizontal or vertical direction." });
+    enums.push_back({ "PaintMode", "Paint Mode", { "Stroke", "Fill", "Fill and Stroke" },
+                      "Run the brush along the drawing's lines, fill its shapes, or both." });
 
     // --- Values --- one value, typed in, wired into any setting of the same type.
     auto valueNode = [](std::string type, std::string name, ns::PinSignature pin, std::string description) {
@@ -830,6 +867,134 @@ Library::Library()
             return true;
         }));
 
+    // --- Draw --- (section 5) shapes make a Drawing; Brush says how it is painted; Paint makes the image.
+    // Positions are 0..1 across the canvas, (0, 0) top-left.
+    auto shapeNode = [](std::string type, std::string name, std::string description, std::vector<ns::PinSignature> inputs,
+                        std::function<drawing::Path(Context&)> make) {
+        return define(std::move(type), std::move(name), "Draw", std::move(description), std::move(inputs), { drawingOut("drawing") },
+            [make](Context& c, auto&, juce::String&) {
+                auto result = std::make_shared<drawing::Drawing>();
+                result->paths.push_back(make(c));
+                c.drawingOutputs["drawing"] = result;
+                return true;
+            });
+    };
+    definitions.push_back(shapeNode("draw.line", "Line", "A straight line between two points.",
+        { floatIn("x1", 0.1f), floatIn("y1", 0.5f), floatIn("x2", 0.9f), floatIn("y2", 0.5f) },
+        [](Context& c) { return drawing::line({ c.number("x1", 0.1f), c.number("y1", 0.5f) }, { c.number("x2", 0.9f), c.number("y2", 0.5f) }); }));
+    definitions.push_back(shapeNode("draw.rectangle", "Rectangle", "A rectangle from its top-left corner.",
+        { floatIn("x", 0.25f), floatIn("y", 0.25f), floatIn("width", 0.5f), floatIn("height", 0.5f) },
+        [](Context& c) { return drawing::rectangle(c.number("x", 0.25f), c.number("y", 0.25f), c.number("width", 0.5f), c.number("height", 0.5f)); }));
+    definitions.push_back(shapeNode("draw.circle", "Circle", "A circle around a centre point.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f) },
+        [](Context& c) {
+            const float r = c.number("radius", 0.25f);
+            return drawing::ellipse({ c.number("x", 0.5f), c.number("y", 0.5f) }, r, r);
+        }));
+    definitions.push_back(shapeNode("draw.polygon", "Polygon", "A regular polygon: 3 sides is a triangle, 6 a hexagon. Rotation 0 puts a corner at the top.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f), intIn("sides", 6), floatIn("rotation", 0.0f) },
+        [](Context& c) {
+            return drawing::polygon({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("radius", 0.25f), juce::jlimit(3, 1000, c.integer("sides", 6)),
+                                    c.number("rotation", 0.0f));
+        }));
+
+    definitions.push_back(define("draw.brush", "Brush", "Draw",
+        "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "
+        "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre.",
+        { floatIn("size", 0.02f), floatIn("hardness", 0.8f), floatIn("spacing", 0.1f), colourIn("color", 1.0f, 1.0f, 1.0f), floatIn("opacity", 1.0f) },
+        { brushOut("brush") },
+        [](Context& c, auto&, juce::String&) {
+            auto brush = std::make_shared<drawing::Brush>();
+            brush->size = juce::jmax(0.0f, c.number("size", 0.02f));
+            brush->hardness = juce::jlimit(0.0f, 1.0f, c.number("hardness", 0.8f));
+            brush->spacing = juce::jlimit(0.01f, 10.0f, c.number("spacing", 0.1f));
+            const auto colour = c.colour("color", { 1.0f, 1.0f, 1.0f });
+            brush->red = colour.x;
+            brush->green = colour.y;
+            brush->blue = colour.z;
+            brush->opacity = juce::jlimit(0.0f, 1.0f, c.number("opacity", 1.0f));
+            c.brushOutputs["brush"] = brush;
+            return true;
+        }));
+
+    definitions.push_back(define("draw.paint", "Paint", "Draw",
+        "Paints a drawing onto the canvas image (or onto a new transparent image of width x height): Stroke runs the "
+        "brush along its lines, Fill fills its shapes with the fill colour. The result goes on down the graph like any image.",
+        { imageIn("canvas"), intIn("width", 1024), intIn("height", 1024), drawingIn("drawing"), brushIn("brush"),
+          enumIn("mode", "PaintMode", 0), colourIn("fill", 1.0f, 1.0f, 1.0f) },
+        { imageOut("image") },
+        [](Context& c, auto& out, juce::String& error) {
+            auto wired = c.drawings.find("drawing");
+            if (wired == c.drawings.end() || wired->second == nullptr)
+            {
+                error = "Paint needs a drawing wired in.";
+                return false;
+            }
+            const auto& shapes = *wired->second;
+            auto brushIt = c.brushes.find("brush");
+            const drawing::Brush brush = brushIt != c.brushes.end() && brushIt->second != nullptr ? *brushIt->second : drawing::Brush {};
+
+            auto canvasIt = c.inputs.find("canvas");
+            auto image = canvasIt != c.inputs.end() && canvasIt->second != nullptr ? copyOf(canvasIt->second)
+                                                                                     : blank(c.integer("width", 1024), c.integer("height", 1024), false);
+            image->data = false;
+            const int w = image->width, h = image->height;
+            const float sx = static_cast<float>(w), sy = static_cast<float>(h);
+            const auto count = pixelCount(*image);
+            std::vector<float> mask(static_cast<size_t>(count), 0.0f);
+            const int mode = juce::jlimit(0, 2, c.integer("mode", 0));
+
+            if (mode >= 1) // fill: every path's edges together, each path closed
+            {
+                std::vector<float> edges;
+                for (const auto& path : shapes.paths)
+                {
+                    const auto n = path.points.size();
+                    if (n < 3)
+                        continue;
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        const auto& a = path.points[i];
+                        const auto& b = path.points[(i + 1) % n];
+                        edges.insert(edges.end(), { a.x * sx, a.y * sy, b.x * sx, b.y * sy });
+                    }
+                }
+                const auto m = static_cast<std::int64_t>(edges.size() / 4);
+                if (m > 0)
+                {
+                    std::vector<float> xs(static_cast<size_t>(m)), dirs(static_cast<size_t>(m));
+                    if (! ok(c.routines.fillShapes(mask.data(), w, h, edges.data(), m, xs.data(), dirs.data()), "Fill", error))
+                        return false;
+                    const auto fill = c.colour("fill", { 1.0f, 1.0f, 1.0f });
+                    if (! ok(c.routines.composite(image->rgba.data(), mask.data(), count, fill.x, fill.y, fill.z, brush.opacity), "Fill", error))
+                        return false;
+                }
+            }
+            if (mode != 1) // stroke
+            {
+                std::fill(mask.begin(), mask.end(), 0.0f);
+                const float diameter = brush.size * std::min(sx, sy);
+                const float step = juce::jmax(0.25f, brush.spacing * diameter);
+                std::vector<float> points;
+                for (const auto& path : shapes.paths)
+                {
+                    points.clear();
+                    for (const auto& p : path.points)
+                        points.insert(points.end(), { p.x * sx, p.y * sy });
+                    if (points.empty())
+                        continue;
+                    if (! ok(c.routines.stroke(mask.data(), w, h, points.data(), static_cast<std::int64_t>(path.points.size()),
+                                               path.closed ? 1 : 0, diameter * 0.5f, brush.hardness, step), "Stroke", error))
+                        return false;
+                }
+                if (! ok(c.routines.composite(image->rgba.data(), mask.data(), count, brush.red, brush.green, brush.blue, brush.opacity),
+                         "Stroke", error))
+                    return false;
+            }
+            out["image"] = image;
+            return true;
+        }));
+
     // --- Combine ---
     definitions.push_back(define("image.blend", "Blend", "Combine",
         "Foreground over background, combined by the blend mode.",
@@ -995,6 +1160,25 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
     return found->second;
 }
 
+drawing::DrawingPtr Evaluator::evaluateDrawing(const ns::Graph& graph, ns::NodeId node, const std::string& output, juce::String& error)
+{
+    if (! isReady())
+    {
+        error = getError();
+        return nullptr;
+    }
+    std::string signature;
+    if (! evaluateNode(graph, node, { output }, signature, error, 0))
+        return nullptr;
+    auto found = cache[node].drawings.find(output);
+    if (found == cache[node].drawings.end())
+    {
+        error = "The node has no drawing output called " + juce::String(output) + ".";
+        return nullptr;
+    }
+    return found->second;
+}
+
 bool Evaluator::evaluateValue(const ns::Graph& graph, ns::NodeId node, const std::string& output, ns::PinDefaultValue& value,
                               juce::String& error)
 {
@@ -1050,6 +1234,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         auto& cachedGet = cache[id];
         cachedGet.signature = signatureOut;
         cachedGet.outputs.clear();
+        cachedGet.drawings.clear();
+        cachedGet.brushes.clear();
         cachedGet.values = { { ns::kSymbolValuePin, value } };
         return true;
     }
@@ -1084,10 +1270,14 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         std::string upstream;
         if (! evaluateNode(graph, wire->fromNode, { fromPin->name }, upstream, error, depth + 1))
             return false;
-        if (fromPin->type.dataType == ns::DataType::Texture)
-            context.inputs[pin.name] = cache[wire->fromNode].outputs[fromPin->name];
-        else
-            context.wiredValues[pin.name] = cache[wire->fromNode].values[fromPin->name];
+        auto& upstreamResult = cache[wire->fromNode];
+        switch (fromPin->type.dataType)
+        {
+            case ns::DataType::Texture: context.inputs[pin.name] = upstreamResult.outputs[fromPin->name]; break;
+            case ns::DataType::Drawing: context.drawings[pin.name] = upstreamResult.drawings[fromPin->name]; break;
+            case ns::DataType::Brush: context.brushes[pin.name] = upstreamResult.brushes[fromPin->name]; break;
+            default: context.wiredValues[pin.name] = upstreamResult.values[fromPin->name]; break;
+        }
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
     }
     signatureOut = std::to_string(std::hash<std::string> {}(signature));
@@ -1099,7 +1289,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     {
         bool complete = true;
         for (const auto& name : needed)
-            complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0);
+            complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0
+                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0);
         if (complete)
             return true;
         for (const auto& [name, image] : cached.outputs)
@@ -1118,6 +1309,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     cached.signature = signatureOut;
     cached.outputs = std::move(outputs);
     cached.values = std::move(context.valueOutputs);
+    cached.drawings = std::move(context.drawingOutputs);
+    cached.brushes = std::move(context.brushOutputs);
     return true;
 }
 

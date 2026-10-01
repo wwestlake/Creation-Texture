@@ -6,6 +6,7 @@
 #include <node_system/symbol_nodes.h>
 
 #include "SurfaceMaps.h"
+#include "Drawing.h"
 
 #include <functional>
 #include <map>
@@ -55,6 +56,11 @@ struct Context
     std::map<std::string, ce::node_system::PinDefaultValue> wiredValues;
     // Non-image outputs this node produces (Value nodes).
     std::map<std::string, ce::node_system::PinDefaultValue> valueOutputs;
+    // Wired Drawing and Brush inputs, by pin name, and the ones this node produces (section 5: Drawing).
+    std::map<std::string, drawing::DrawingPtr> drawings;
+    std::map<std::string, drawing::BrushPtr> brushes;
+    std::map<std::string, drawing::DrawingPtr> drawingOutputs;
+    std::map<std::string, drawing::BrushPtr> brushOutputs;
 
     // A setting: its wired value if one is wired in, else the value typed into the node.
     const ce::node_system::PinDefaultValue* setting(const std::string& pin) const;
@@ -103,6 +109,9 @@ public:
     // A non-image output (a Get node's or a Value node's value).
     bool evaluateValue(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::string& output,
                        ce::node_system::PinDefaultValue& value, juce::String& error);
+    // A Drawing output (what a shape or drawing node makes), for showing it over the canvas.
+    drawing::DrawingPtr evaluateDrawing(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::string& output,
+                                        juce::String& error);
     Host& getHost() noexcept { return host; }
 
     // Forget cached results (for example after the project's images change).
@@ -114,6 +123,8 @@ private:
         std::string signature;
         std::map<std::string, ImagePtr> outputs;
         std::map<std::string, ce::node_system::PinDefaultValue> values;
+        std::map<std::string, drawing::DrawingPtr> drawings;
+        std::map<std::string, drawing::BrushPtr> brushes;
     };
 
     bool evaluateNode(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::vector<std::string>& wanted,
