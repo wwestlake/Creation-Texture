@@ -7,6 +7,7 @@
 #include <creation/node_editor_ui/SymbolsPanel.h>
 #include <ImageGraph.h>
 #include "NodePropertiesPanel.h"
+#include "DrawPanels.h"
 #include "ProjectImagePicker.h"
 
 // Image Graph mode (Layout > Image Graph): make and process images with nodes. Panels: Nodes (palette), Graph,
@@ -28,6 +29,9 @@ public:
     juce::Component& getPropertiesPanel() noexcept { return properties; }
     juce::Component& getVariablesPanel() noexcept { return symbols; }
     juce::Component& getPreview() noexcept;
+    // The Draw view's own panels (Layout > Draw): the big canvas with the drawing's lines over it, and the script.
+    juce::Component& getDrawCanvas() noexcept { return drawCanvas; }
+    juce::Component& getScriptPanel() noexcept { return scriptPanel; }
 
     // File menu.
     void newGraph();
@@ -50,6 +54,8 @@ private:
     void graphEdited();
     void requestEvaluation();
     void selectionChanged(ce::node_system::NodeId id);
+    void forgetDrawTargets();
+    std::string scriptText(ce::node_system::NodeId id) const;
     std::unique_ptr<juce::Component> customEditor(ce::node_system::Node& node, const ce::node_system::Pin& pin, int& height);
     void chooseSurfaceMapFor(ce::node_system::NodeId node);
     void writeGraph(const juce::String& name);
@@ -67,6 +73,11 @@ private:
     NodePropertiesPanel properties;
     creation::node_editor_ui::SymbolsPanel symbols { graph };
     std::unique_ptr<PreviewPanel> preview;
+    DrawCanvas drawCanvas;
+    ScriptPanel scriptPanel;
+    ce::node_system::NodeId overlayNode = 0; // the drawing shown over the Draw canvas
+    ce::node_system::NodeId scriptNode = 0;  // the Draw Script node in the Script panel
+    juce::String overlayLabel;
     std::unique_ptr<Worker> worker;
 
     ce::node_system::NodeId selectedNode = 0;

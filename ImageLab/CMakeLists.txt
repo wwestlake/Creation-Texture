@@ -9,6 +9,7 @@ juce_add_binary_data(creation_texture_image_lab_frust
         Frust/surface_maps.frust
         Frust/image_graph.frust
         Frust/image_fx.frust
+        Frust/drawing.frust
         Frust/pods/frust_image_demo/lib.fr
 )
 
@@ -21,6 +22,10 @@ add_library(creation_texture_image_lab STATIC
     TextureSet.h
     ImageGraph.cpp
     ImageGraph.h
+    Drawing.cpp
+    Drawing.h
+    DrawScript.cpp
+    DrawScript.h
     ImageDemoHost.cpp
     ImageDemoHost.h
 )
@@ -59,6 +64,11 @@ set_target_properties(CreationTextureFrustProbe PROPERTIES OUTPUT_NAME "DjehutiT
 add_executable(CreationTextureSurfaceMapsBench "${CMAKE_CURRENT_SOURCE_DIR}/../tests/SurfaceMapsBench.cpp")
 target_link_libraries(CreationTextureSurfaceMapsBench PRIVATE creation_texture_image_lab)
 set_target_properties(CreationTextureSurfaceMapsBench PROPERTIES OUTPUT_NAME "DjehutiTextureSurfaceMapsBench")
+
+# Developer tool: renders a swatch sheet of the Drawing brushes to a PNG, to check them by eye.
+add_executable(CreationTextureDrawingSwatches "${CMAKE_CURRENT_SOURCE_DIR}/../tests/DrawingSwatches.cpp")
+target_link_libraries(CreationTextureDrawingSwatches PRIVATE creation_texture_image_lab)
+set_target_properties(CreationTextureDrawingSwatches PROPERTIES OUTPUT_NAME "DjehutiTextureDrawingSwatches")
 
 add_executable(CreationTextureImageGraphSmoke "${CMAKE_CURRENT_SOURCE_DIR}/../tests/ImageGraphSmoke.cpp")
 target_link_libraries(CreationTextureImageGraphSmoke PRIVATE creation_texture_image_lab)

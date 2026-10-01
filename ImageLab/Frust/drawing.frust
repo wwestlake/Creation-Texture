@@ -1,0 +1,543 @@
+manifest "{\"name\":\"drawing\",\"version\":\"0.1.0\",\"description\":\"Painting a Drawing (paths) with a brush: brush stamps (round, square, chalk, bristle, image tips), nonzero polygon fill with anti-aliasing, and compositing a coverage mask over a canvas. 32-bit float linear RGBA, straight alpha.\",\"entryPoints\":[],\"requiredHostFunctions\":[{\"name\":\"dr_host_floor\"},{\"name\":\"dr_host_sqrt\"},{\"name\":\"dr_host_i64_to_f32\"},{\"name\":\"dr_host_f32_to_i64\"},{\"name\":\"dr_host_sin\"},{\"name\":\"dr_host_cos\"},{\"name\":\"dr_host_hash\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Painting for Djehuti Texture's Image Graph (docs/REQUIREMENTS.md section 5: Drawing, Brush, Paint).
+//
+// A Paint works in two steps. First the drawing is turned into a coverage mask - one float per pixel, 0..1 - by
+// laying brush stamps along its paths (dr_stamps; where the stamps go is worked out by the host) or filling its
+// shapes (dr_fill). Stamps take the maximum, so a
+// stroke never darkens where it crosses itself. Then the mask is laid over the canvas in the brush colour
+// (dr_composite).
+//
+// Coordinates here are pixels, with pixel (x, y) covering x..x+1, y..y+1 (its centre is at x + 0.5, y + 0.5).
+// FRust today: a dereference must start an expression and pointer arithmetic is base + one offset, so offsets are
+// computed first and values read into locals.
+
+extern fn dr_host_floor(v: f32) -> f32;
+extern fn dr_host_sqrt(v: f32) -> f32;
+extern fn dr_host_i64_to_f32(v: i64) -> f32;
+extern fn dr_host_f32_to_i64(v: f32) -> i64;
+extern fn dr_host_sin(v: f32) -> f32;
+extern fn dr_host_cos(v: f32) -> f32;
+extern fn dr_host_hash(x: i64, y: i64, seed: i64) -> f32;
+
+// ---------------------------------------------------------------- helpers
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+fn imin(a: i64, b: i64) -> i64 = { if (a < b) { a } else { b } }
+fn imax(a: i64, b: i64) -> i64 = { if (a > b) { a } else { b } }
+fn fmin(a: f32, b: f32) -> f32 = { if (a < b) { a } else { b } }
+fn fmax(a: f32, b: f32) -> f32 = { if (a > b) { a } else { b } }
+
+fn getf(buf: raw* f32, index: i64) -> f32 = {
+    let mut p: raw* f32 = buf;
+    p = buf + index;
+    let v: f32 = *p;
+    v
+}
+
+fn setf(buf: raw* f32, index: i64, v: f32) -> i64 = {
+    let mut p: raw* f32 = buf;
+    p = buf + index;
+    *p = v;
+    1
+}
+
+fn floori(v: f32) -> i64 = { dr_host_f32_to_i64(dr_host_floor(v)) }
+
+// ---------------------------------------------------------------- stamping
+
+fn fabs(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    if (v < zero) { zero - v } else { v }
+}
+
+// Coverage at distance d from a tip's centre (or edge measure, for a square): full inside radius * hardness,
+// falling to none half a pixel past the radius, so a hard tip is still anti-aliased.
+fn ramp_cover(d: f32, radius: f32, hardness: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let zero: f32 = 0.0;
+    let rOut: f32 = radius + half;
+    let mut rIn: f32 = radius * clamp01(hardness);
+    if (rIn > radius - half) { rIn = radius - half; };
+    if (rIn < zero) { rIn = zero; };
+    clamp01((rOut - d) / (rOut - rIn))
+}
+
+// Bristle tip: eleven thin bristles in a row across the stroke (the tip's v axis), each carrying its own amount
+// of paint and a few left dry, picked by the seed - so overlapping stamps leave streaks along the stroke.
+fn bristle_cover(u: f32, v: f32, radius: f32, hardness: f32, seed: i64) -> f32 = {
+    let dry: f32 = 0.12;
+    let spread: f32 = 0.9;
+    let size: f32 = 0.07;
+    let half: f32 = 0.5;
+    let two: f32 = 2.0;
+    let ten: f32 = 10.0;
+    let minLoad: f32 = 0.35;
+    let loadRange: f32 = 0.65;
+    let mut best: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut offset: f32 = 0.0;
+    let mut dv: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut bristleRadius: f32 = radius * size;
+    let minRadius: f32 = 0.6;
+    if (bristleRadius < minRadius) { bristleRadius = minRadius; };
+    while (i < 11) {
+        if (dr_host_hash(i, 7, seed) >= dry) {
+            offset = (dr_host_i64_to_f32(i) / ten - half) * two * radius * spread;
+            dv = v - offset;
+            c = ramp_cover(dr_host_sqrt(u * u + dv * dv), bristleRadius, hardness);
+            c = c * (minLoad + loadRange * dr_host_hash(i, 11, seed));
+            if (c > best) { best = c; };
+        };
+        i = i + 1;
+    };
+    best
+}
+
+// Paper grain for chalk: smooth value noise fixed to the canvas, cells `scale` pixels across, 0..1.
+fn grain(x: i64, y: i64, scale: f32, seed: i64) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let three: f32 = 3.0;
+    let two: f32 = 2.0;
+    let gx: f32 = (dr_host_i64_to_f32(x) + half) / scale;
+    let gy: f32 = (dr_host_i64_to_f32(y) + half) / scale;
+    let fx: f32 = dr_host_floor(gx);
+    let fy: f32 = dr_host_floor(gy);
+    let ix: i64 = dr_host_f32_to_i64(fx);
+    let iy: i64 = dr_host_f32_to_i64(fy);
+    let tx0: f32 = gx - fx;
+    let ty0: f32 = gy - fy;
+    let tx: f32 = tx0 * tx0 * (three - two * tx0);
+    let ty: f32 = ty0 * ty0 * (three - two * ty0);
+    let a: f32 = dr_host_hash(ix, iy, seed);
+    let b: f32 = dr_host_hash(ix + 1, iy, seed);
+    let c: f32 = dr_host_hash(ix, iy + 1, seed);
+    let d: f32 = dr_host_hash(ix + 1, iy + 1, seed);
+    let top: f32 = a + (b - a) * tx;
+    let bottom: f32 = c + (d - c) * tx;
+    top + (bottom - top) * ty
+}
+
+// Image tip: the tip image stretched over the stamp's square; coverage is its luminance times its alpha, read
+// with bilinear filtering. Outside the square there is nothing.
+fn image_cover(tip: raw* f32, tw: i64, th: i64, u: f32, v: f32, radius: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let tu: f32 = (u / radius + one) * half;
+    let tv: f32 = (v / radius + one) * half;
+    if (tu < zero) { zero } else if (tu > one) { zero } else if (tv < zero) { zero } else if (tv > one) { zero } else {
+        let fx: f32 = tu * dr_host_i64_to_f32(tw) - half;
+        let fy: f32 = tv * dr_host_i64_to_f32(th) - half;
+        let x0f: f32 = dr_host_floor(fx);
+        let y0f: f32 = dr_host_floor(fy);
+        let ax: f32 = fx - x0f;
+        let ay: f32 = fy - y0f;
+        let x0: i64 = imin(tw - 1, imax(0, dr_host_f32_to_i64(x0f)));
+        let x1: i64 = imin(tw - 1, imax(0, dr_host_f32_to_i64(x0f) + 1));
+        let y0: i64 = imin(th - 1, imax(0, dr_host_f32_to_i64(y0f)));
+        let y1: i64 = imin(th - 1, imax(0, dr_host_f32_to_i64(y0f) + 1));
+        let a: f32 = tip_value(tip, y0 * tw + x0);
+        let b: f32 = tip_value(tip, y0 * tw + x1);
+        let c: f32 = tip_value(tip, y1 * tw + x0);
+        let d: f32 = tip_value(tip, y1 * tw + x1);
+        let top: f32 = a + (b - a) * ax;
+        let bottom: f32 = c + (d - c) * ax;
+        clamp01(top + (bottom - top) * ay)
+    }
+}
+
+fn tip_value(tip: raw* f32, index: i64) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let o: i64 = index * 4;
+    (kr * getf(tip, o) + kg * getf(tip, o + 1) + kb * getf(tip, o + 2)) * getf(tip, o + 3)
+}
+
+// Lays a list of stamps into the coverage mask, keeping the larger coverage at each pixel. stamps holds `count`
+// stamps of five floats: centre x, centre y (pixels), radius (pixels), angle (radians; the tip's u axis), opacity.
+// tip: 0 round, 1 square, 2 chalk (round, broken up by a grain fixed to the canvas), 3 bristle, 4 image (tipImage,
+// tw x th RGBA). seed varies the chalk grain and which bristles are left out.
+pub fn dr_stamps(mask: raw* f32, w: i64, h: i64, stamps: raw* f32, count: i64, tip: i64, hardness: f32,
+                 tipImage: raw* f32, tw: i64, th: i64, seed: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let reachFactor: f32 = 1.5;
+    let grainScale: f32 = 2.5;
+    let grainPress: f32 = 0.95;
+    let grainDepth: f32 = 1.0;
+    let grainGain: f32 = 3.0;
+    let mut s: i64 = 0;
+    let mut cx: f32 = 0.0;
+    let mut cy: f32 = 0.0;
+    let mut radius: f32 = 0.0;
+    let mut angle: f32 = 0.0;
+    let mut opacity: f32 = 0.0;
+    let mut ca: f32 = 0.0;
+    let mut sa: f32 = 0.0;
+    let mut reach: f32 = 0.0;
+    let mut x0: i64 = 0;
+    let mut x1: i64 = 0;
+    let mut y0: i64 = 0;
+    let mut y1: i64 = 0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut dx: f32 = 0.0;
+    let mut dy: f32 = 0.0;
+    let mut u: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut cover: f32 = 0.0;
+    let mut index: i64 = 0;
+    while (s < count) {
+        cx = getf(stamps, s * 5);
+        cy = getf(stamps, s * 5 + 1);
+        radius = getf(stamps, s * 5 + 2);
+        angle = getf(stamps, s * 5 + 3);
+        opacity = getf(stamps, s * 5 + 4);
+        ca = dr_host_cos(angle);
+        sa = dr_host_sin(angle);
+        reach = radius * reachFactor + one;
+        x0 = imax(0, floori(cx - reach));
+        x1 = imin(w - 1, floori(cx + reach));
+        y0 = imax(0, floori(cy - reach));
+        y1 = imin(h - 1, floori(cy + reach));
+        y = y0;
+        while (y <= y1) {
+            dy = dr_host_i64_to_f32(y) + half - cy;
+            x = x0;
+            while (x <= x1) {
+                dx = dr_host_i64_to_f32(x) + half - cx;
+                u = dx * ca + dy * sa;
+                v = dy * ca - dx * sa;
+                if (tip == 1) {
+                    cover = ramp_cover(fmax(fabs(u), fabs(v)), radius, hardness);
+                } else if (tip == 3) {
+                    cover = bristle_cover(u, v, radius, hardness, seed);
+                } else if (tip == 4) {
+                    cover = image_cover(tipImage, tw, th, u, v, radius);
+                } else {
+                    cover = ramp_cover(dr_host_sqrt(u * u + v * v), radius, hardness);
+                    if (tip == 2) {
+                        // Chalk catches on the paper's high spots: paint gets through where the grain is below
+                        // how hard the stamp presses, so the edges break up most and the middle fills in.
+                        cover = fmin(cover, clamp01((cover * grainPress - grain(x, y, grainScale, seed) * grainDepth) * grainGain));
+                    };
+                };
+                cover = cover * opacity;
+                index = y * w + x;
+                if (cover > getf(mask, index)) { setf(mask, index, cover); };
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        s = s + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- filling
+
+// Adds `weight` times the horizontal coverage of [xa, xb] to one row of the mask.
+fn add_span(mask: raw* f32, w: i64, row: i64, xa: f32, xb: f32, weight: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let first: i64 = imax(0, floori(xa));
+    let last: i64 = imin(w - 1, floori(xb));
+    let mut x: i64 = first;
+    let mut left: f32 = 0.0;
+    let mut overlap: f32 = 0.0;
+    let mut index: i64 = 0;
+    while (x <= last) {
+        left = dr_host_i64_to_f32(x);
+        overlap = fmin(xb, left + one) - fmax(xa, left);
+        if (overlap > zero) {
+            index = row * w + x;
+            setf(mask, index, getf(mask, index) + weight * overlap);
+        };
+        x = x + 1;
+    };
+    1
+}
+
+// Fills shapes by the nonzero rule (overlapping shapes stay filled; a hole is a shape drawn the other way round).
+// edges holds m edges as x0, y0, x1, y1 (pixels), every path already closed. xs and dirs are scratch space for m
+// crossings. Each pixel row is sampled on four lines, and spans are measured exactly across, so edges are
+// anti-aliased. The mask must start at zero.
+pub fn dr_fill(mask: raw* f32, w: i64, h: i64, edges: raw* f32, m: i64, xs: raw* f32, dirs: raw* f32) -> i64 = {
+    let quarter: f32 = 0.25;
+    let eighth: f32 = 0.125;
+    let one: f32 = 1.0;
+    let zero: f32 = 0.0;
+    let minusOne: f32 = zero - one;
+    let mut row: i64 = 0;
+    let mut sub: i64 = 0;
+    let mut sy: f32 = 0.0;
+    let mut e: i64 = 0;
+    let mut x0: f32 = 0.0;
+    let mut y0: f32 = 0.0;
+    let mut x1: f32 = 0.0;
+    let mut y1: f32 = 0.0;
+    let mut count: i64 = 0;
+    let mut k: i64 = 0;
+    let mut j: i64 = 0;
+    let mut kx: f32 = 0.0;
+    let mut kd: f32 = 0.0;
+    let mut winding: f32 = 0.0;
+    let mut before: f32 = 0.0;
+    let mut start: f32 = 0.0;
+    let mut crosses: i64 = 0;
+    let mut moving: i64 = 0;
+    let mut dir: f32 = 0.0;
+    let mut index: i64 = 0;
+    while (row < h) {
+        sub = 0;
+        while (sub < 4) {
+            sy = dr_host_i64_to_f32(row) + eighth + quarter * dr_host_i64_to_f32(sub);
+            count = 0;
+            e = 0;
+            while (e < m) {
+                x0 = getf(edges, e * 4);
+                y0 = getf(edges, e * 4 + 1);
+                x1 = getf(edges, e * 4 + 2);
+                y1 = getf(edges, e * 4 + 3);
+                crosses = 0;
+                dir = zero;
+                if (y0 <= sy) { if (sy < y1) { crosses = 1; dir = one; }; };
+                if (y1 <= sy) { if (sy < y0) { crosses = 1; dir = minusOne; }; };
+                if (crosses != 0) {
+                    setf(xs, count, x0 + (sy - y0) * (x1 - x0) / (y1 - y0));
+                    setf(dirs, count, dir);
+                    count = count + 1;
+                };
+                e = e + 1;
+            };
+            // Insertion sort of the crossings by x.
+            k = 1;
+            while (k < count) {
+                kx = getf(xs, k);
+                kd = getf(dirs, k);
+                j = k - 1;
+                moving = 1;
+                while (moving != 0) {
+                    if (j < 0) {
+                        moving = 0;
+                    } else {
+                        if (getf(xs, j) > kx) {
+                            setf(xs, j + 1, getf(xs, j));
+                            setf(dirs, j + 1, getf(dirs, j));
+                            j = j - 1;
+                        } else {
+                            moving = 0;
+                        };
+                    };
+                };
+                setf(xs, j + 1, kx);
+                setf(dirs, j + 1, kd);
+                k = k + 1;
+            };
+            winding = zero;
+            k = 0;
+            while (k < count) {
+                before = winding;
+                winding = winding + getf(dirs, k);
+                if (before == zero) { if (winding != zero) { start = getf(xs, k); }; };
+                if (before != zero) { if (winding == zero) { add_span(mask, w, row, start, getf(xs, k), quarter); }; };
+                k = k + 1;
+            };
+            sub = sub + 1;
+        };
+        row = row + 1;
+    };
+    // Spans never overlap within one sample line, but rounding can push a pixel a hair over 1.
+    index = 0;
+    while (index < w * h) {
+        if (getf(mask, index) > one) { setf(mask, index, one); };
+        index = index + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- from images to drawings
+
+fn lum_at(rgba: raw* f32, index: i64) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let o: i64 = index * 4;
+    kr * getf(rgba, o) + kg * getf(rgba, o + 1) + kb * getf(rgba, o + 2)
+}
+
+// Where the level crosses between two samples, as a fraction 0..1 from the first.
+fn crossing(a: f32, b: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    if (a == b) { half } else { clamp01((level - a) / (b - a)) }
+}
+
+// A point on one edge of the cell whose top-left sample is at pixel centre (x + 0.5, y + 0.5).
+// Edges: 0 top (a-b), 1 right (b-c), 2 bottom (d-c), 3 left (a-d), corners a top-left, b top-right, c bottom-right,
+// d bottom-left. ex gives its x, ey its y (pixels).
+fn ex(edge: i64, x: i64, a: f32, b: f32, c: f32, d: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let left: f32 = dr_host_i64_to_f32(x) + half;
+    if (edge == 0) { left + crossing(a, b, level) } else if (edge == 1) { left + one } else if (edge == 2) { left + crossing(d, c, level) } else { left }
+}
+
+fn ey(edge: i64, y: i64, a: f32, b: f32, c: f32, d: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let top: f32 = dr_host_i64_to_f32(y) + half;
+    if (edge == 0) { top } else if (edge == 1) { top + crossing(b, c, level) } else if (edge == 2) { top + one } else { top + crossing(a, d, level) }
+}
+
+fn emit(segs: raw* f32, n: i64, maxSegs: i64, x0: f32, y0: f32, x1: f32, y1: f32) -> i64 = {
+    if (n < maxSegs) {
+        setf(segs, n * 4, x0);
+        setf(segs, n * 4 + 1, y0);
+        setf(segs, n * 4 + 2, x1);
+        setf(segs, n * 4 + 3, y1);
+    };
+    n + 1
+}
+
+// Marching squares: the line where the image's luminance crosses `level`, as separate segments (x0, y0, x1, y1 in
+// pixels) between neighbouring pixel centres. Writes at most maxSegs; returns how many there are in all.
+pub fn dr_contour(rgba: raw* f32, w: i64, h: i64, level: f32, segs: raw* f32, maxSegs: i64) -> i64 = {
+    let quarter: f32 = 0.25;
+    let mut n: i64 = 0;
+    let mut y: i64 = 0;
+    let mut x: i64 = 0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut code: i64 = 0;
+    let mut e0: i64 = 0;
+    let mut e1: i64 = 0;
+    let mut e2: i64 = 0;
+    let mut e3: i64 = 0;
+    let mut centre: f32 = 0.0;
+    while (y < h - 1) {
+        x = 0;
+        while (x < w - 1) {
+            a = lum_at(rgba, y * w + x);
+            b = lum_at(rgba, y * w + x + 1);
+            c = lum_at(rgba, (y + 1) * w + x + 1);
+            d = lum_at(rgba, (y + 1) * w + x);
+            code = 0;
+            if (a >= level) { code = code + 1; };
+            if (b >= level) { code = code + 2; };
+            if (c >= level) { code = code + 4; };
+            if (d >= level) { code = code + 8; };
+            e0 = 9; // 9: no segment
+            e2 = 9;
+            if (code == 1) { e0 = 3; e1 = 0; };
+            if (code == 14) { e0 = 3; e1 = 0; };
+            if (code == 2) { e0 = 0; e1 = 1; };
+            if (code == 13) { e0 = 0; e1 = 1; };
+            if (code == 3) { e0 = 3; e1 = 1; };
+            if (code == 12) { e0 = 3; e1 = 1; };
+            if (code == 4) { e0 = 1; e1 = 2; };
+            if (code == 11) { e0 = 1; e1 = 2; };
+            if (code == 6) { e0 = 0; e1 = 2; };
+            if (code == 9) { e0 = 0; e1 = 2; };
+            if (code == 7) { e0 = 3; e1 = 2; };
+            if (code == 8) { e0 = 3; e1 = 2; };
+            // Saddles: the average in the middle decides which corners join.
+            if (code == 5) {
+                centre = (a + b + c + d) * quarter;
+                if (centre >= level) { e0 = 3; e1 = 2; e2 = 0; e3 = 1; } else { e0 = 3; e1 = 0; e2 = 1; e3 = 2; };
+            };
+            if (code == 10) {
+                centre = (a + b + c + d) * quarter;
+                if (centre >= level) { e0 = 3; e1 = 0; e2 = 1; e3 = 2; } else { e0 = 3; e1 = 2; e2 = 0; e3 = 1; };
+            };
+            if (e0 < 4) {
+                n = emit(segs, n, maxSegs, ex(e0, x, a, b, c, d, level), ey(e0, y, a, b, c, d, level),
+                         ex(e1, x, a, b, c, d, level), ey(e1, y, a, b, c, d, level));
+            };
+            if (e2 < 4) {
+                n = emit(segs, n, maxSegs, ex(e2, x, a, b, c, d, level), ey(e2, y, a, b, c, d, level),
+                         ex(e3, x, a, b, c, d, level), ey(e3, y, a, b, c, d, level));
+            };
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    n
+}
+
+// Random points where the image is bright: each try picks a point and keeps it with a chance equal to the pixel's
+// luminance times its alpha (or one minus that, inverted). Writes up to `count` points (x, y as canvas fractions)
+// and returns how many it placed; gives up after maxTries.
+pub fn dr_sample(rgba: raw* f32, w: i64, h: i64, count: i64, seed: i64, invert: i64, points: raw* f32, maxTries: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let mut placed: i64 = 0;
+    let mut tries: i64 = 0;
+    let mut rx: f32 = 0.0;
+    let mut ry: f32 = 0.0;
+    let mut px: i64 = 0;
+    let mut py: i64 = 0;
+    let mut density: f32 = 0.0;
+    let mut index: i64 = 0;
+    let mut going: i64 = 1;
+    while (going != 0) {
+        if (placed >= count) {
+            going = 0;
+        } else if (tries >= maxTries) {
+            going = 0;
+        } else {
+            rx = dr_host_hash(tries, 101, seed);
+            ry = dr_host_hash(tries, 102, seed);
+            px = imin(w - 1, floori(rx * dr_host_i64_to_f32(w)));
+            py = imin(h - 1, floori(ry * dr_host_i64_to_f32(h)));
+            index = py * w + px;
+            density = clamp01(lum_at(rgba, index)) * clamp01(getf(rgba, index * 4 + 3));
+            if (invert != 0) { density = one - density; };
+            if (dr_host_hash(tries, 103, seed) < density) {
+                setf(points, placed * 2, rx);
+                setf(points, placed * 2 + 1, ry);
+                placed = placed + 1;
+            };
+            tries = tries + 1;
+        };
+    };
+    placed
+}
+
+// ---------------------------------------------------------------- compositing
+
+// Lays the mask over the canvas in colour (r, g, b) at `opacity`: source-over with straight alpha.
+pub fn dr_composite(rgba: raw* f32, mask: raw* f32, count: i64, r: f32, g: f32, b: f32, opacity: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut sa: f32 = 0.0;
+    let mut da: f32 = 0.0;
+    let mut oa: f32 = 0.0;
+    let mut keep: f32 = 0.0;
+    let mut o: i64 = 0;
+    while (i < count) {
+        sa = getf(mask, i) * opacity;
+        if (sa > zero) {
+            o = i * 4;
+            da = getf(rgba, o + 3);
+            keep = da * (one - sa);
+            oa = sa + keep;
+            setf(rgba, o, (r * sa + getf(rgba, o) * keep) / oa);
+            setf(rgba, o + 1, (g * sa + getf(rgba, o + 1) * keep) / oa);
+            setf(rgba, o + 2, (b * sa + getf(rgba, o + 2) * keep) / oa);
+            setf(rgba, o + 3, oa);
+        };
+        i = i + 1;
+    };
+    1
+}

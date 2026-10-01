@@ -3,6 +3,7 @@
 #include "ImageLabFrustSources.h"
 #include "TextureSet.h"
 #include "ImageDemoHost.h"
+#include "DrawScript.h"
 
 #include <creation/frust/PluginRuntime.h>
 
@@ -41,7 +42,16 @@ extern "C" float fx_host_i64_to_f32(std::int64_t v) { return static_cast<float>(
 extern "C" std::int64_t fx_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
 extern "C" float fx_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
 
+extern "C" float dr_host_floor(float v) { return std::floor(v); }
+extern "C" float dr_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
+extern "C" float dr_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
+extern "C" std::int64_t dr_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+extern "C" float dr_host_sin(float v) { return std::sin(v); }
+extern "C" float dr_host_cos(float v) { return std::cos(v); }
+extern "C" float dr_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
+
 constexpr const char* key = "image_graph";
+constexpr const char* drawKey = "drawing";
 constexpr const char* demoKey = "frust_image_demo";
 constexpr const char* fxKey = "image_fx";
 constexpr int maxDepth = 256;
@@ -103,6 +113,32 @@ public:
             return;
         }
 
+        // Painting a Drawing with a Brush (drawing.frust).
+        runtime.registerHostFunction("dr_host_floor", reinterpret_cast<void*>(&dr_host_floor));
+        runtime.registerHostFunction("dr_host_sqrt", reinterpret_cast<void*>(&dr_host_sqrt));
+        runtime.registerHostFunction("dr_host_i64_to_f32", reinterpret_cast<void*>(&dr_host_i64_to_f32));
+        runtime.registerHostFunction("dr_host_f32_to_i64", reinterpret_cast<void*>(&dr_host_f32_to_i64));
+        runtime.registerHostFunction("dr_host_sin", reinterpret_cast<void*>(&dr_host_sin));
+        runtime.registerHostFunction("dr_host_cos", reinterpret_cast<void*>(&dr_host_cos));
+        runtime.registerHostFunction("dr_host_hash", reinterpret_cast<void*>(&dr_host_hash));
+        ::frust::CompileRequest draw;
+        draw.sources.push_back({ "drawing.frust", std::string(ImageLabFrust::drawing_frust, ImageLabFrust::drawing_frustSize) });
+        if (! runtime.loadSource(drawKey, draw, loadError))
+        {
+            error = "Drawing FRust routines did not compile: " + juce::String(loadError);
+            return;
+        }
+        stamps = reinterpret_cast<decltype(stamps)>(runtime.getFunction(drawKey, "dr_stamps"));
+        fillShapes = reinterpret_cast<decltype(fillShapes)>(runtime.getFunction(drawKey, "dr_fill"));
+        composite = reinterpret_cast<decltype(composite)>(runtime.getFunction(drawKey, "dr_composite"));
+        contour = reinterpret_cast<decltype(contour)>(runtime.getFunction(drawKey, "dr_contour"));
+        sample = reinterpret_cast<decltype(sample)>(runtime.getFunction(drawKey, "dr_sample"));
+        if (! (stamps && fillShapes && composite && contour && sample))
+        {
+            error = "Drawing FRust routines are incomplete.";
+            return;
+        }
+
         // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
         // manifest, so one is put in front of the pod's own source, which is left exactly as published.
         image_demo_host::registerAll(runtime);
@@ -139,6 +175,13 @@ public:
     std::int64_t (*invert)(float*, std::int64_t) = nullptr;
     std::int64_t (*grayscale)(float*, std::int64_t) = nullptr;
     std::int64_t (*levels)(float*, std::int64_t, float, float, float, float, float) = nullptr;
+    // drawing.frust
+    std::int64_t (*stamps)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, std::int64_t, float, const float*, std::int64_t,
+                           std::int64_t, std::int64_t) = nullptr;
+    std::int64_t (*fillShapes)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, float*, float*) = nullptr;
+    std::int64_t (*composite)(float*, const float*, std::int64_t, float, float, float, float) = nullptr;
+    std::int64_t (*contour)(const float*, std::int64_t, std::int64_t, float, float*, std::int64_t) = nullptr;
+    std::int64_t (*sample)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t) = nullptr;
     image_lab::Compositor compositor;
     juce::String error;
 };
@@ -201,6 +244,10 @@ ns::PinSignature enumIn(const std::string& name, const std::string& enumName, st
     pin.type.enumType = enumName;
     return pin;
 }
+ns::PinSignature drawingIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
+ns::PinSignature drawingOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
+ns::PinSignature brushIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
+ns::PinSignature brushOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
 ns::PinSignature textIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::String }, std::string("") }; }
 
 Definition define(std::string type, std::string name, std::string category, std::string description,
@@ -279,6 +326,27 @@ const ns::PinDefaultValue* Context::setting(const std::string& pin) const
     if (wired != wiredValues.end())
         return &wired->second;
     return defaultOf(node, pin);
+}
+
+std::map<std::string, double> Context::numericVariables() const
+{
+    std::map<std::string, double> values;
+    if (graph == nullptr)
+        return values;
+    for (const auto& symbol : graph->Symbols())
+    {
+        auto value = symbol.value;
+        if (symbol.kind == ns::SymbolKind::Param)
+        {
+            auto overridden = host.paramOverrides.find(symbol.id);
+            if (overridden != host.paramOverrides.end())
+                value = overridden->second;
+        }
+        if (const auto* f = std::get_if<float>(&value)) values[symbol.id] = *f;
+        else if (const auto* i = std::get_if<std::int64_t>(&value)) values[symbol.id] = static_cast<double>(*i);
+        else if (const auto* b = std::get_if<bool>(&value)) values[symbol.id] = *b ? 1.0 : 0.0;
+    }
+    return values;
 }
 
 float Context::number(const std::string& pin, float fallback) const
@@ -361,6 +429,13 @@ Library::Library()
     enums.push_back({ "GradientDirection", "Gradient Direction", { "Left to Right", "Top to Bottom", "Radial" },
                       "Which way a gradient runs." });
     enums.push_back({ "Axis", "Axis", { "Horizontal", "Vertical" }, "A horizontal or vertical direction." });
+    enums.push_back({ "BrushTip", "Brush Tip", { "Round", "Square", "Chalk", "Bristle", "Image" },
+                      "The shape a brush stamps: Chalk is round, broken by a grain fixed to the canvas; Bristle is a row of "
+                      "small bristles that streak; Image uses the image wired into tipImage." });
+    enums.push_back({ "BrushRotation", "Brush Rotation", { "Fixed", "Follow Stroke", "Random" },
+                      "How a brush's tip is turned: by its angle only, along the stroke's direction, or at random." });
+    enums.push_back({ "PaintMode", "Paint Mode", { "Stroke", "Fill", "Fill and Stroke" },
+                      "Run the brush along the drawing's lines, fill its shapes, or both." });
 
     // --- Values --- one value, typed in, wired into any setting of the same type.
     auto valueNode = [](std::string type, std::string name, ns::PinSignature pin, std::string description) {
@@ -830,6 +905,341 @@ Library::Library()
             return true;
         }));
 
+    // --- Draw --- (section 5) shapes make a Drawing; Brush says how it is painted; Paint makes the image.
+    // Positions are 0..1 across the canvas, (0, 0) top-left.
+    auto shapeNode = [](std::string type, std::string name, std::string description, std::vector<ns::PinSignature> inputs,
+                        std::function<drawing::Path(Context&)> make) {
+        return define(std::move(type), std::move(name), "Draw", std::move(description), std::move(inputs), { drawingOut("drawing") },
+            [make](Context& c, auto&, juce::String&) {
+                auto result = std::make_shared<drawing::Drawing>();
+                result->paths.push_back(make(c));
+                c.drawingOutputs["drawing"] = result;
+                return true;
+            });
+    };
+    definitions.push_back(shapeNode("draw.line", "Line", "A straight line between two points.",
+        { floatIn("x1", 0.1f), floatIn("y1", 0.5f), floatIn("x2", 0.9f), floatIn("y2", 0.5f) },
+        [](Context& c) { return drawing::line({ c.number("x1", 0.1f), c.number("y1", 0.5f) }, { c.number("x2", 0.9f), c.number("y2", 0.5f) }); }));
+    definitions.push_back(shapeNode("draw.rectangle", "Rectangle", "A rectangle from its top-left corner.",
+        { floatIn("x", 0.25f), floatIn("y", 0.25f), floatIn("width", 0.5f), floatIn("height", 0.5f) },
+        [](Context& c) { return drawing::rectangle(c.number("x", 0.25f), c.number("y", 0.25f), c.number("width", 0.5f), c.number("height", 0.5f)); }));
+    definitions.push_back(shapeNode("draw.circle", "Circle", "A circle around a centre point.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f) },
+        [](Context& c) {
+            const float r = c.number("radius", 0.25f);
+            return drawing::ellipse({ c.number("x", 0.5f), c.number("y", 0.5f) }, r, r);
+        }));
+    definitions.push_back(shapeNode("draw.polygon", "Polygon", "A regular polygon: 3 sides is a triangle, 6 a hexagon. Rotation 0 puts a corner at the top.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f), intIn("sides", 6), floatIn("rotation", 0.0f) },
+        [](Context& c) {
+            return drawing::polygon({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("radius", 0.25f), juce::jlimit(3, 1000, c.integer("sides", 6)),
+                                    c.number("rotation", 0.0f));
+        }));
+
+    definitions.push_back(shapeNode("draw.star", "Star", "A star with a point straight up at rotation 0.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("outerRadius", 0.3f), floatIn("innerRadius", 0.12f), intIn("points", 5),
+          floatIn("rotation", 0.0f) },
+        [](Context& c) {
+            return drawing::star({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("outerRadius", 0.3f), c.number("innerRadius", 0.12f),
+                                 juce::jlimit(2, 1000, c.integer("points", 5)), c.number("rotation", 0.0f));
+        }));
+    definitions.push_back(shapeNode("draw.arc", "Arc", "Part of a circle: from the start angle, through the sweep (degrees, clockwise, 0 pointing right).",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f), floatIn("start", 0.0f), floatIn("sweep", 180.0f) },
+        [](Context& c) {
+            return drawing::arc({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("radius", 0.25f), c.number("start", 0.0f), c.number("sweep", 180.0f));
+        }));
+    definitions.push_back(shapeNode("draw.bezier", "Curve", "A smooth curve from (x1, y1) to (x2, y2), pulled towards two control points.",
+        { floatIn("x1", 0.1f), floatIn("y1", 0.7f), floatIn("cx1", 0.3f), floatIn("cy1", 0.1f), floatIn("cx2", 0.7f), floatIn("cy2", 0.9f),
+          floatIn("x2", 0.9f), floatIn("y2", 0.3f) },
+        [](Context& c) {
+            return drawing::bezier({ c.number("x1", 0.1f), c.number("y1", 0.7f) }, { c.number("cx1", 0.3f), c.number("cy1", 0.1f) },
+                                   { c.number("cx2", 0.7f), c.number("cy2", 0.9f) }, { c.number("x2", 0.9f), c.number("y2", 0.3f) });
+        }));
+    definitions.push_back(shapeNode("draw.spiral", "Spiral", "A spiral out from the inner radius to the outer one, starting to the right.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("innerRadius", 0.0f), floatIn("outerRadius", 0.4f), floatIn("turns", 4.0f) },
+        [](Context& c) {
+            return drawing::spiral({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("innerRadius", 0.0f), c.number("outerRadius", 0.4f),
+                                   c.number("turns", 4.0f));
+        }));
+
+    // Modifiers: a Drawing in, a new Drawing out.
+    auto modifierNode = [](std::string type, std::string name, std::string description, std::vector<ns::PinSignature> settings,
+                           std::function<drawing::Drawing(Context&, const drawing::Drawing&)> change) {
+        std::vector<ns::PinSignature> inputs { drawingIn("drawing") };
+        inputs.insert(inputs.end(), settings.begin(), settings.end());
+        return define(std::move(type), std::move(name), "Draw", std::move(description), std::move(inputs), { drawingOut("drawing") },
+            [change](Context& c, auto&, juce::String& error) {
+                auto wired = c.drawings.find("drawing");
+                if (wired == c.drawings.end() || wired->second == nullptr)
+                {
+                    error = "Needs a drawing wired in.";
+                    return false;
+                }
+                c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(change(c, *wired->second));
+                return true;
+            });
+    };
+    definitions.push_back(define("draw.merge", "Merge", "Draw", "Puts up to four drawings together into one.",
+        { drawingIn("a"), drawingIn("b"), drawingIn("c"), drawingIn("d") }, { drawingOut("drawing") },
+        [](Context& c, auto&, juce::String&) {
+            auto result = std::make_shared<drawing::Drawing>();
+            for (const char* pin : { "a", "b", "c", "d" })
+            {
+                auto wired = c.drawings.find(pin);
+                if (wired != c.drawings.end() && wired->second != nullptr)
+                    result->paths.insert(result->paths.end(), wired->second->paths.begin(), wired->second->paths.end());
+            }
+            c.drawingOutputs["drawing"] = result;
+            return true;
+        }));
+    definitions.push_back(modifierNode("draw.transform", "Transform",
+        "Scales and turns the drawing about the pivot (rotation in degrees, clockwise), then moves it.",
+        { floatIn("moveX", 0.0f), floatIn("moveY", 0.0f), floatIn("rotation", 0.0f), floatIn("scaleX", 1.0f), floatIn("scaleY", 1.0f),
+          floatIn("pivotX", 0.5f), floatIn("pivotY", 0.5f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::transformed(d, c.number("moveX", 0.0f), c.number("moveY", 0.0f), c.number("rotation", 0.0f), c.number("scaleX", 1.0f),
+                                        c.number("scaleY", 1.0f), { c.number("pivotX", 0.5f), c.number("pivotY", 0.5f) });
+        }));
+    definitions.push_back(modifierNode("draw.repeat.linear", "Repeat in a Line",
+        "Copies in a row: copy i is moved i x (dx, dy), turned i x rotateStep degrees and scaled scaleStep^i about its centre.",
+        { intIn("count", 5), floatIn("dx", 0.1f), floatIn("dy", 0.0f), floatIn("rotateStep", 0.0f), floatIn("scaleStep", 1.0f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatLinear(d, juce::jlimit(0, 10000, c.integer("count", 5)), c.number("dx", 0.1f), c.number("dy", 0.0f),
+                                         c.number("rotateStep", 0.0f), c.number("scaleStep", 1.0f));
+        }));
+    definitions.push_back(modifierNode("draw.repeat.radial", "Repeat Around",
+        "Copies turned around a centre, evenly through the sweep (degrees; 360 is all the way round).",
+        { intIn("count", 8), floatIn("centerX", 0.5f), floatIn("centerY", 0.5f), floatIn("sweep", 360.0f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatRadial(d, juce::jlimit(0, 10000, c.integer("count", 8)), { c.number("centerX", 0.5f), c.number("centerY", 0.5f) },
+                                         c.number("sweep", 360.0f));
+        }));
+    definitions.push_back(modifierNode("draw.repeat.grid", "Repeat in a Grid", "Copies in columns and rows, (dx, dy) apart.",
+        { intIn("columns", 4), intIn("rows", 4), floatIn("dx", 0.25f), floatIn("dy", 0.25f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatGrid(d, juce::jlimit(0, 1000, c.integer("columns", 4)), juce::jlimit(0, 1000, c.integer("rows", 4)),
+                                       c.number("dx", 0.25f), c.number("dy", 0.25f));
+        }));
+    definitions.push_back(modifierNode("draw.scatter", "Scatter",
+        "Copies placed at random in an area (x, y, width, height), each turned up to +- maxRotation degrees and scaled "
+        "between scaleMin and scaleMax. The seed picks the arrangement.",
+        { intIn("count", 50), floatIn("x", 0.0f), floatIn("y", 0.0f), floatIn("width", 1.0f), floatIn("height", 1.0f),
+          floatIn("maxRotation", 180.0f), floatIn("scaleMin", 0.5f), floatIn("scaleMax", 1.0f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) {
+            const float x = c.number("x", 0.0f), y = c.number("y", 0.0f);
+            return drawing::scattered(d, juce::jlimit(0, 100000, c.integer("count", 50)),
+                                      { x, y, x + c.number("width", 1.0f), y + c.number("height", 1.0f) }, c.number("maxRotation", 180.0f),
+                                      c.number("scaleMin", 0.5f), c.number("scaleMax", 1.0f), c.integer("seed", 1));
+        }));
+    definitions.push_back(modifierNode("draw.jitter", "Jitter", "Moves every point at random by up to the amount.",
+        { floatIn("amount", 0.01f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) { return drawing::jittered(d, c.number("amount", 0.01f), c.integer("seed", 1)); }));
+    definitions.push_back(modifierNode("draw.wobble", "Wobble",
+        "Makes lines look hand-drawn: pushes them sideways by up to the amount, with smooth noise that changes over the wavelength.",
+        { floatIn("amount", 0.01f), floatIn("wavelength", 0.1f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::wobbled(d, c.number("amount", 0.01f), c.number("wavelength", 0.1f), c.integer("seed", 1));
+        }));
+    definitions.push_back(modifierNode("draw.mirror", "Mirror",
+        "A mirror image: Horizontal flips left to right about x = position, Vertical flips top to bottom about y = position. "
+        "Keep Original keeps the drawing as well.",
+        { enumIn("axis", "Axis", 0), floatIn("position", 0.5f), boolIn("keepOriginal", true) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::mirrored(d, c.integer("axis", 0) == 0, c.number("position", 0.5f), c.flag("keepOriginal", true));
+        }));
+
+    {
+        auto script = define("draw.script", "Draw Script", "Draw",
+            "A drawing written as commands - the way the AI draws. A pen moves over the canvas ((0, 0) top-left, (1, 1) "
+            "bottom-right, heading 0 = right, clockwise): move, line, forward, turn, arc, curve, close; shapes circle, "
+            "ellipse, rect, polygon, star; repeat n { }, if / else, let, push / pop, scale, seed. The graph's Variables "
+            "can be used by id. See docs/DRAW_SCRIPT.md.",
+            { textIn("script"), intIn("seed", 1) }, { drawingOut("drawing") },
+            [](Context& c, auto&, juce::String& error) {
+                const auto result = draw_script::run(c.text("script").toStdString(), c.numericVariables(), c.integer("seed", 1));
+                if (! result.error.empty())
+                {
+                    error = juce::String(result.error);
+                    return false;
+                }
+                c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(result.drawing);
+                return true;
+            });
+        script.readsVariables = true;
+        definitions.push_back(std::move(script));
+    }
+
+    // From images: the image decides the drawing.
+    definitions.push_back(define("draw.contour", "Contour", "Draw",
+        "Traces the lines where the image's brightness crosses the level - outlines of shapes, edges of a pattern, "
+        "contour lines of a height map. Lines shorter than minLength (a fraction of the canvas) are left out.",
+        { imageIn("image"), floatIn("level", 0.5f), floatIn("minLength", 0.01f) }, { drawingOut("drawing") },
+        [needInput](Context& c, auto&, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto level = c.number("level", 0.5f);
+            // Count first, then trace into a buffer of exactly that size.
+            const auto total = c.routines.contour(input->rgba.data(), input->width, input->height, level, nullptr, 0);
+            std::vector<float> segments(static_cast<size_t>(juce::jmax<std::int64_t>(0, total)) * 4);
+            if (total > 0)
+                c.routines.contour(input->rgba.data(), input->width, input->height, level, segments.data(), total);
+            c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(
+                drawing::joinSegments(segments, input->width, input->height, juce::jmax(0.0f, c.number("minLength", 0.01f))));
+            return true;
+        }));
+    definitions.push_back(define("draw.sample", "Sample", "Draw",
+        "Random points where the image is bright (or dark, inverted): the brighter, the more likely. With a drawing wired "
+        "in, a copy of it is placed on each point, turned up to +- maxRotation degrees and scaled between scaleMin and "
+        "scaleMax; without one, each point is a dot for Paint to stamp.",
+        { imageIn("image"), drawingIn("drawing"), intIn("count", 200), intIn("seed", 1), boolIn("invert", false),
+          floatIn("maxRotation", 180.0f), floatIn("scaleMin", 0.5f), floatIn("scaleMax", 1.0f) },
+        { drawingOut("drawing") },
+        [needInput](Context& c, auto&, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto count = juce::jlimit(0, 1000000, c.integer("count", 200));
+            std::vector<float> xy(static_cast<size_t>(count) * 2);
+            const auto placed = count == 0 ? 0 : c.routines.sample(input->rgba.data(), input->width, input->height, count, c.integer("seed", 1),
+                                                                    c.flag("invert", false) ? 1 : 0, xy.data(), static_cast<std::int64_t>(count) * 50);
+            std::vector<drawing::Point> points;
+            for (std::int64_t i = 0; i < placed; ++i)
+                points.push_back({ xy[static_cast<size_t>(i) * 2], xy[static_cast<size_t>(i) * 2 + 1] });
+            auto result = std::make_shared<drawing::Drawing>();
+            auto wired = c.drawings.find("drawing");
+            if (wired != c.drawings.end() && wired->second != nullptr)
+                *result = drawing::placedAt(*wired->second, points, c.number("maxRotation", 180.0f), c.number("scaleMin", 0.5f),
+                                            c.number("scaleMax", 1.0f), c.integer("seed", 1));
+            else
+                for (const auto& p : points)
+                    result->paths.push_back({ { p }, false });
+            c.drawingOutputs["drawing"] = result;
+            return true;
+        }));
+
+    definitions.push_back(define("draw.brush", "Brush", "Draw",
+        "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "
+        "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre. Angle is in degrees. "
+        "Scatter moves each stamp at random (a fraction of the size); size and opacity jitter shrink or fade stamps at "
+        "random; taper start / end grow and shrink the stroke over that fraction of its length; seed picks the randomness.",
+        { enumIn("tip", "BrushTip", 0), imageIn("tipImage"), floatIn("size", 0.02f), floatIn("hardness", 0.8f), floatIn("spacing", 0.1f),
+          colourIn("color", 1.0f, 1.0f, 1.0f), floatIn("opacity", 1.0f), enumIn("rotation", "BrushRotation", 0), floatIn("angle", 0.0f),
+          floatIn("scatter", 0.0f), floatIn("sizeJitter", 0.0f), floatIn("opacityJitter", 0.0f), floatIn("taperStart", 0.0f),
+          floatIn("taperEnd", 0.0f), intIn("seed", 1) },
+        { brushOut("brush") },
+        [](Context& c, auto&, juce::String& error) {
+            auto brush = std::make_shared<drawing::Brush>();
+            brush->tip = static_cast<drawing::Brush::Tip>(juce::jlimit(0, 4, c.integer("tip", 0)));
+            if (brush->tip == drawing::Brush::Tip::image)
+            {
+                auto wired = c.inputs.find("tipImage");
+                if (wired == c.inputs.end() || wired->second == nullptr)
+                {
+                    error = "An Image tip needs an image wired into tipImage.";
+                    return false;
+                }
+                auto tip = std::make_shared<drawing::TipImage>();
+                tip->width = wired->second->width;
+                tip->height = wired->second->height;
+                tip->rgba = wired->second->rgba;
+                brush->tipImage = tip;
+            }
+            brush->size = juce::jmax(0.0f, c.number("size", 0.02f));
+            brush->hardness = juce::jlimit(0.0f, 1.0f, c.number("hardness", 0.8f));
+            brush->spacing = juce::jlimit(0.01f, 10.0f, c.number("spacing", 0.1f));
+            const auto colour = c.colour("color", { 1.0f, 1.0f, 1.0f });
+            brush->red = colour.x;
+            brush->green = colour.y;
+            brush->blue = colour.z;
+            brush->opacity = juce::jlimit(0.0f, 1.0f, c.number("opacity", 1.0f));
+            brush->rotation = static_cast<drawing::Brush::Rotation>(juce::jlimit(0, 2, c.integer("rotation", 0)));
+            brush->angle = c.number("angle", 0.0f);
+            brush->scatter = juce::jmax(0.0f, c.number("scatter", 0.0f));
+            brush->sizeJitter = juce::jlimit(0.0f, 1.0f, c.number("sizeJitter", 0.0f));
+            brush->opacityJitter = juce::jlimit(0.0f, 1.0f, c.number("opacityJitter", 0.0f));
+            brush->taperStart = juce::jlimit(0.0f, 1.0f, c.number("taperStart", 0.0f));
+            brush->taperEnd = juce::jlimit(0.0f, 1.0f, c.number("taperEnd", 0.0f));
+            brush->seed = c.integer("seed", 1);
+            c.brushOutputs["brush"] = brush;
+            return true;
+        }));
+
+    definitions.push_back(define("draw.paint", "Paint", "Draw",
+        "Paints a drawing onto the canvas image (or onto a new transparent image of width x height): Stroke runs the "
+        "brush along its lines, Fill fills its shapes with the fill colour. The result goes on down the graph like any image.",
+        { imageIn("canvas"), intIn("width", 1024), intIn("height", 1024), drawingIn("drawing"), brushIn("brush"),
+          enumIn("mode", "PaintMode", 0), colourIn("fill", 1.0f, 1.0f, 1.0f) },
+        { imageOut("image") },
+        [](Context& c, auto& out, juce::String& error) {
+            auto wired = c.drawings.find("drawing");
+            if (wired == c.drawings.end() || wired->second == nullptr)
+            {
+                error = "Paint needs a drawing wired in.";
+                return false;
+            }
+            const auto& shapes = *wired->second;
+            auto brushIt = c.brushes.find("brush");
+            const drawing::Brush brush = brushIt != c.brushes.end() && brushIt->second != nullptr ? *brushIt->second : drawing::Brush {};
+
+            auto canvasIt = c.inputs.find("canvas");
+            auto image = canvasIt != c.inputs.end() && canvasIt->second != nullptr ? copyOf(canvasIt->second)
+                                                                                     : blank(c.integer("width", 1024), c.integer("height", 1024), false);
+            image->data = false;
+            const int w = image->width, h = image->height;
+            const float sx = static_cast<float>(w), sy = static_cast<float>(h);
+            const auto count = pixelCount(*image);
+            std::vector<float> mask(static_cast<size_t>(count), 0.0f);
+            const int mode = juce::jlimit(0, 2, c.integer("mode", 0));
+
+            if (mode >= 1) // fill: every path's edges together, each path closed
+            {
+                std::vector<float> edges;
+                for (const auto& path : shapes.paths)
+                {
+                    const auto n = path.points.size();
+                    if (n < 3)
+                        continue;
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        const auto& a = path.points[i];
+                        const auto& b = path.points[(i + 1) % n];
+                        edges.insert(edges.end(), { a.x * sx, a.y * sy, b.x * sx, b.y * sy });
+                    }
+                }
+                const auto m = static_cast<std::int64_t>(edges.size() / 4);
+                if (m > 0)
+                {
+                    std::vector<float> xs(static_cast<size_t>(m)), dirs(static_cast<size_t>(m));
+                    if (! ok(c.routines.fillShapes(mask.data(), w, h, edges.data(), m, xs.data(), dirs.data()), "Fill", error))
+                        return false;
+                    const auto fill = c.colour("fill", { 1.0f, 1.0f, 1.0f });
+                    if (! ok(c.routines.composite(image->rgba.data(), mask.data(), count, fill.x, fill.y, fill.z, brush.opacity), "Fill", error))
+                        return false;
+                }
+            }
+            if (mode != 1) // stroke
+            {
+                std::fill(mask.begin(), mask.end(), 0.0f);
+                // Where the stamps go is geometry (Drawing.cpp); laying them down is FRust (dr_stamps).
+                std::vector<float> stamps;
+                for (size_t p = 0; p < shapes.paths.size(); ++p)
+                    for (const auto& stamp : drawing::placeStamps(shapes.paths[p], brush, w, h, static_cast<int>(p)))
+                        stamps.insert(stamps.end(), { stamp.x, stamp.y, stamp.radius, stamp.angle, stamp.opacity });
+                const float noTip[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                const auto* tip = brush.tipImage.get();
+                const bool useTip = tip != nullptr && tip->width > 0 && tip->height > 0;
+                if (! stamps.empty()
+                    && ! ok(c.routines.stamps(mask.data(), w, h, stamps.data(), static_cast<std::int64_t>(stamps.size() / 5),
+                                              static_cast<std::int64_t>(brush.tip), brush.hardness, useTip ? tip->rgba.data() : noTip,
+                                              useTip ? tip->width : 1, useTip ? tip->height : 1, brush.seed), "Stroke", error))
+                    return false;
+                if (! ok(c.routines.composite(image->rgba.data(), mask.data(), count, brush.red, brush.green, brush.blue, brush.opacity),
+                         "Stroke", error))
+                    return false;
+            }
+            out["image"] = image;
+            return true;
+        }));
+
     // --- Combine ---
     definitions.push_back(define("image.blend", "Blend", "Combine",
         "Foreground over background, combined by the blend mode.",
@@ -995,6 +1405,25 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
     return found->second;
 }
 
+drawing::DrawingPtr Evaluator::evaluateDrawing(const ns::Graph& graph, ns::NodeId node, const std::string& output, juce::String& error)
+{
+    if (! isReady())
+    {
+        error = getError();
+        return nullptr;
+    }
+    std::string signature;
+    if (! evaluateNode(graph, node, { output }, signature, error, 0))
+        return nullptr;
+    auto found = cache[node].drawings.find(output);
+    if (found == cache[node].drawings.end())
+    {
+        error = "The node has no drawing output called " + juce::String(output) + ".";
+        return nullptr;
+    }
+    return found->second;
+}
+
 bool Evaluator::evaluateValue(const ns::Graph& graph, ns::NodeId node, const std::string& output, ns::PinDefaultValue& value,
                               juce::String& error)
 {
@@ -1050,6 +1479,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         auto& cachedGet = cache[id];
         cachedGet.signature = signatureOut;
         cachedGet.outputs.clear();
+        cachedGet.drawings.clear();
+        cachedGet.brushes.clear();
         cachedGet.values = { { ns::kSymbolValuePin, value } };
         return true;
     }
@@ -1063,7 +1494,11 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
 
     // Wired image inputs first (each computes only the output it is asked for), building this node's signature.
     Context context { *node, host, *routines, *surfaceMaps, {}, {}, {}, {} };
+    context.graph = &graph;
     std::string signature = node->TypeName();
+    if (definition->readsVariables)
+        for (const auto& [name, value] : context.numericVariables())
+            signature += "|$" + name + "=" + std::to_string(value);
     for (const auto& pin : node->Inputs())
     {
         const ns::Connection* wire = nullptr;
@@ -1084,10 +1519,14 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         std::string upstream;
         if (! evaluateNode(graph, wire->fromNode, { fromPin->name }, upstream, error, depth + 1))
             return false;
-        if (fromPin->type.dataType == ns::DataType::Texture)
-            context.inputs[pin.name] = cache[wire->fromNode].outputs[fromPin->name];
-        else
-            context.wiredValues[pin.name] = cache[wire->fromNode].values[fromPin->name];
+        auto& upstreamResult = cache[wire->fromNode];
+        switch (fromPin->type.dataType)
+        {
+            case ns::DataType::Texture: context.inputs[pin.name] = upstreamResult.outputs[fromPin->name]; break;
+            case ns::DataType::Drawing: context.drawings[pin.name] = upstreamResult.drawings[fromPin->name]; break;
+            case ns::DataType::Brush: context.brushes[pin.name] = upstreamResult.brushes[fromPin->name]; break;
+            default: context.wiredValues[pin.name] = upstreamResult.values[fromPin->name]; break;
+        }
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
     }
     signatureOut = std::to_string(std::hash<std::string> {}(signature));
@@ -1099,7 +1538,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     {
         bool complete = true;
         for (const auto& name : needed)
-            complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0);
+            complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0
+                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0);
         if (complete)
             return true;
         for (const auto& [name, image] : cached.outputs)
@@ -1118,6 +1558,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     cached.signature = signatureOut;
     cached.outputs = std::move(outputs);
     cached.values = std::move(context.valueOutputs);
+    cached.drawings = std::move(context.drawingOutputs);
+    cached.brushes = std::move(context.brushOutputs);
     return true;
 }
 

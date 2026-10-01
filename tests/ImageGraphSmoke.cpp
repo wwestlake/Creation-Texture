@@ -4,6 +4,7 @@
 #include "NoCrashDialogs.h"
 
 #include <ImageGraph.h>
+#include <DrawScript.h>
 
 #include <cmath>
 #include <iostream>
@@ -348,6 +349,467 @@ int main()
         }
         else
             std::cout << "ok   a Blend Mode choice does not wire into an Axis setting\n";
+    }
+
+    // Drawing (requirements section 5): shapes -> Paint with a Brush -> an image. All on a 10 x 10 opaque black canvas,
+    // so a drawing point x maps to pixel x * 10 and pixel (i, j) covers i..i+1, j..j+1.
+    {
+        auto blackCanvas = [&]() {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 10 });
+            set(n, "height", std::int64_t { 10 });
+            set(n, "color", ns::Vec3Default { 0.0f, 0.0f, 0.0f });
+            return n;
+        };
+        auto paint = [&](ns::Node* canvas, ns::Node* shape, ns::Node* brush, std::int64_t mode) {
+            auto* p = add("draw.paint");
+            if (canvas != nullptr) connect(graph, canvas, "image", p, "canvas");
+            connect(graph, shape, "drawing", p, "drawing");
+            if (brush != nullptr) connect(graph, brush, "brush", p, "brush");
+            set(p, "mode", mode);
+            return p;
+        };
+        auto image = [&](ns::Node* n) { return evaluator.evaluate(graph, n->Id(), "image", error); };
+
+        // Stroke: a horizontal line at y 0.45 -> pixel row 4.5. A white hard brush 2 px across (size 0.2 of 10 px),
+        // stamps every 0.2 px. Coverage runs from full within 0.5 px of the line to none at 1.5 px:
+        //   row 4 (centre 4.5, distance 0) -> 1;  row 3 (distance 1) -> 0.5;  row 2 (distance 2) -> 0.
+        auto* line = add("draw.line");
+        set(line, "x1", 0.05f); set(line, "y1", 0.45f); set(line, "x2", 0.95f); set(line, "y2", 0.45f);
+        auto* hard = add("draw.brush");
+        set(hard, "size", 0.2f); set(hard, "hardness", 1.0f); set(hard, "spacing", 0.1f);
+        auto* stroked = paint(blackCanvas(), line, hard, 0);
+        expectPixel("Stroke: on the line", image(stroked), 4, 4, { 1.0f, 1.0f, 1.0f, 1.0f }, 1.0e-3f);
+        expectPixel("Stroke: 1 px away, half covered", image(stroked), 4, 3, { 0.5f, 0.5f, 0.5f, 1.0f }, 1.0e-3f);
+        expectPixel("Stroke: 2 px away, untouched", image(stroked), 4, 2, { 0.0f, 0.0f, 0.0f, 1.0f }, 1.0e-3f);
+
+        // Fill: a rectangle x 0.25..0.65, y 0.2..0.6 -> pixels x 2.5..6.5, y 2..6, filled red.
+        //   pixel (4, 3) is inside -> 1; (2, 3) and (6, 3) are half inside -> 0.5; (4, 6) is below -> 0.
+        auto* rect = add("draw.rectangle");
+        set(rect, "x", 0.25f); set(rect, "y", 0.2f); set(rect, "width", 0.4f); set(rect, "height", 0.4f);
+        auto* filled = paint(blackCanvas(), rect, nullptr, 1);
+        set(filled, "fill", ns::Vec3Default { 1.0f, 0.0f, 0.0f });
+        expectPixel("Fill: inside", image(filled), 4, 3, { 1.0f, 0.0f, 0.0f, 1.0f }, 1.0e-3f);
+        expectPixel("Fill: left edge half covered", image(filled), 2, 3, { 0.5f, 0.0f, 0.0f }, 1.0e-3f);
+        expectPixel("Fill: right edge half covered", image(filled), 6, 3, { 0.5f, 0.0f, 0.0f }, 1.0e-3f);
+        expectPixel("Fill: below the shape", image(filled), 4, 6, { 0.0f, 0.0f, 0.0f }, 1.0e-3f);
+
+        // No canvas: Paint makes a transparent width x height image; a full-canvas fill gives exactly the fill colour.
+        auto* whole = add("draw.rectangle");
+        set(whole, "x", 0.0f); set(whole, "y", 0.0f); set(whole, "width", 1.0f); set(whole, "height", 1.0f);
+        auto* fresh = paint(nullptr, whole, nullptr, 1);
+        set(fresh, "width", std::int64_t { 4 });
+        set(fresh, "height", std::int64_t { 4 });
+        set(fresh, "fill", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        const auto freshImage = image(fresh);
+        expectPixel("Paint without a canvas: fill colour, opaque", freshImage, 3, 3, { 0.2f, 0.4f, 0.6f, 1.0f }, 1.0e-3f);
+        if (freshImage == nullptr || freshImage->width != 4 || freshImage->height != 4)
+        {
+            std::cerr << "FAIL Paint without a canvas did not make a 4 x 4 image\n";
+            ++failures;
+        }
+
+        // Brush tips: one stamp (a zero-length line) at pixel (4.5, 4.5), size 0.4 -> radius 2 px, hardness 1, so
+        // coverage is 1 up to 1.5 px from the centre and falls to 0 at 2.5 px.
+        auto dot = [&]() {
+            auto* n = add("draw.line");
+            set(n, "x1", 0.45f); set(n, "y1", 0.45f); set(n, "x2", 0.45f); set(n, "y2", 0.45f);
+            return n;
+        };
+        auto tipBrush = [&](std::int64_t tip, float angle) {
+            auto* b = add("draw.brush");
+            set(b, "tip", tip); set(b, "size", 0.4f); set(b, "hardness", 1.0f); set(b, "angle", angle);
+            return b;
+        };
+        // Round: pixel (6, 6) is 2.83 px away -> 0. Square: its edge distance is max(2, 2) = 2 -> 0.5; (7, 4) is 3 -> 0.
+        expectPixel("Round tip: corner pixel outside", image(paint(blackCanvas(), dot(), tipBrush(0, 0.0f), 0)), 6, 6, { 0.0f }, 1.0e-3f);
+        auto* square = paint(blackCanvas(), dot(), tipBrush(1, 0.0f), 0);
+        expectPixel("Square tip: corner pixel half covered", image(square), 6, 6, { 0.5f }, 1.0e-3f);
+        expectPixel("Square tip: 3 px out, nothing", image(square), 7, 4, { 0.0f }, 1.0e-3f);
+        // Square turned 45 degrees: (7, 4) is (3, 0) from the centre -> (2.1213, -2.1213) in the tip -> 2.5 - 2.1213 = 0.3787;
+        // (6, 6) is (2, 2) -> (2.8284, 0) -> 0.
+        auto* diamond = paint(blackCanvas(), dot(), tipBrush(1, 45.0f), 0);
+        expectPixel("Square tip at 45 degrees: (7, 4)", image(diamond), 7, 4, { 0.37868f }, 1.0e-3f);
+        expectPixel("Square tip at 45 degrees: (6, 6) outside", image(diamond), 6, 6, { 0.0f }, 1.0e-3f);
+        // Image tip: a white 4 x 4 image stretched over the stamp's 4 x 4 px square: (5, 5) inside -> 1, (7, 5) outside -> 0.
+        {
+            auto* white = add("image.create");
+            set(white, "width", std::int64_t { 4 });
+            set(white, "height", std::int64_t { 4 });
+            set(white, "color", ns::Vec3Default { 1.0f, 1.0f, 1.0f });
+            auto* stamp = tipBrush(4, 0.0f);
+            connect(graph, white, "image", stamp, "tipImage");
+            auto* stamped = paint(blackCanvas(), dot(), stamp, 0);
+            expectPixel("Image tip: inside the stamp", image(stamped), 5, 5, { 1.0f }, 1.0e-3f);
+            expectPixel("Image tip: outside the stamp", image(stamped), 7, 5, { 0.0f }, 1.0e-3f);
+        }
+
+        // Taper start over the whole line (0.5 -> 9.5 px at row 4.5, size 0.2 -> radius 1): the stroke grows from nothing.
+        // (0, 3) is 1 px from a line that is still thinner than that there -> 0; (9, 3) sits 1 px from the end stamp,
+        // which has its full radius -> 0.5; (9, 4) on the line -> 1.
+        {
+            auto* taperLine = add("draw.line");
+            set(taperLine, "x1", 0.05f); set(taperLine, "y1", 0.45f); set(taperLine, "x2", 0.95f); set(taperLine, "y2", 0.45f);
+            auto* taper = add("draw.brush");
+            set(taper, "size", 0.2f); set(taper, "hardness", 1.0f); set(taper, "taperStart", 1.0f);
+            auto* tapered = paint(blackCanvas(), taperLine, taper, 0);
+            expectPixel("Taper: thin start", image(tapered), 0, 3, { 0.0f }, 1.0e-3f);
+            expectPixel("Taper: full end", image(tapered), 9, 3, { 0.5f }, 1.0e-3f);
+            expectPixel("Taper: on the line at the end", image(tapered), 9, 4, { 1.0f }, 1.0e-3f);
+        }
+
+        // Randomness is repeatable: scatter with seed 1 twice gives the same pixels, seed 2 different ones.
+        // Chalk never lays down more than the round tip it breaks up, and breaks up the middle of the stroke somewhere.
+        {
+            auto scattered = [&](std::int64_t seed, std::int64_t tip, float scatter) {
+                auto* l = add("draw.line");
+                set(l, "x1", 0.05f); set(l, "y1", 0.45f); set(l, "x2", 0.95f); set(l, "y2", 0.45f);
+                auto* b = add("draw.brush");
+                set(b, "tip", tip); set(b, "size", 0.3f); set(b, "hardness", 1.0f); set(b, "scatter", scatter); set(b, "seed", seed);
+                set(b, "spacing", 0.5f);
+                return image(paint(blackCanvas(), l, b, 0));
+            };
+            const auto a = scattered(1, 0, 0.5f), again = scattered(1, 0, 0.5f), other = scattered(2, 0, 0.5f);
+            const bool same = a != nullptr && again != nullptr && a->rgba == again->rgba;
+            const bool differs = a != nullptr && other != nullptr && a->rgba != other->rgba;
+            if (! same || ! differs)
+            {
+                std::cerr << "FAIL scatter is not repeatable by seed (same " << same << ", differs " << differs << ")\n";
+                ++failures;
+            }
+            else
+                std::cout << "ok   scatter repeats with its seed and changes with another\n";
+
+            const auto round = scattered(1, 0, 0.0f), chalk = scattered(1, 2, 0.0f);
+            bool never_more = round != nullptr && chalk != nullptr, broken = false;
+            for (size_t i = 0; never_more && i < round->rgba.size(); i += 4)
+                never_more = chalk->rgba[i] <= round->rgba[i] + 1.0e-5f;
+            for (int x = 1; never_more && x < 9; ++x)
+                broken = broken || chalk->rgba[(4 * 10 + static_cast<size_t>(x)) * 4] < 0.99f;
+            if (! never_more || ! broken)
+            {
+                std::cerr << "FAIL chalk (never more than round " << never_more << ", broken up " << broken << ")\n";
+                ++failures;
+            }
+            else
+                std::cout << "ok   chalk breaks up the round tip and never adds to it\n";
+        }
+
+        // Polygon: 3 sides, rotation 0 -> a corner straight up from the centre: (0.5, 0.5 - 0.25).
+        auto* triangle = add("draw.polygon");
+        set(triangle, "sides", std::int64_t { 3 });
+        const auto shape = evaluator.evaluateDrawing(graph, triangle->Id(), "drawing", error);
+        if (shape == nullptr || shape->paths.size() != 1 || shape->paths[0].points.size() != 3 || ! shape->paths[0].closed
+            || std::abs(shape->paths[0].points[0].x - 0.5f) > 1.0e-5f || std::abs(shape->paths[0].points[0].y - 0.25f) > 1.0e-5f)
+        {
+            std::cerr << "FAIL a triangle does not start at its top corner\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   a triangle starts at its top corner\n";
+
+        // Shapes and modifiers (milestone 3). Angles are clockwise on screen, y down.
+        {
+            auto drawingOf = [&](ns::Node* n) { return evaluator.evaluateDrawing(graph, n->Id(), "drawing", error); };
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            auto at = [](const drawing::DrawingPtr& d, size_t path, size_t point, float x, float y) {
+                if (d == nullptr || path >= d->paths.size() || d->paths[path].points.empty())
+                    return false;
+                const auto& pts = d->paths[path].points;
+                const auto& p = point == SIZE_MAX ? pts.back() : pts[point];
+                return std::abs(p.x - x) < 1.0e-4f && std::abs(p.y - y) < 1.0e-4f;
+            };
+            auto lineFrom = [&](float x1, float y1, float x2, float y2) {
+                auto* n = add("draw.line");
+                set(n, "x1", x1); set(n, "y1", y1); set(n, "x2", x2); set(n, "y2", y2);
+                return n;
+            };
+            auto modify = [&](const char* type, ns::Node* input) {
+                auto* n = add(type);
+                connect(graph, input, "drawing", n, "drawing");
+                return n;
+            };
+
+            // Transform: a horizontal line through the centre turned 90 degrees about it runs top to bottom: (0.5, 0.1) first.
+            auto* turned = modify("draw.transform", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(turned, "rotation", 90.0f);
+            check("Transform turns 90 degrees clockwise", at(drawingOf(turned), 0, 0, 0.5f, 0.1f) && at(drawingOf(turned), 0, 1, 0.5f, 0.9f));
+
+            // Repeat Around: a spoke (0.5, 0.5) -> (0.7, 0.5), 4 copies: copy 1 ends at (0.5, 0.7), copy 2 at (0.3, 0.5).
+            auto* around = modify("draw.repeat.radial", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(around, "count", std::int64_t { 4 });
+            const auto spokes = drawingOf(around);
+            check("Repeat Around: 4 spokes, a quarter turn apart",
+                  spokes != nullptr && spokes->paths.size() == 4 && at(spokes, 1, 1, 0.5f, 0.7f) && at(spokes, 2, 1, 0.3f, 0.5f));
+
+            // Repeat in a Line: 3 copies 0.1 apart -> the third starts at x 0.7.
+            auto* row = modify("draw.repeat.linear", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(row, "count", std::int64_t { 3 });
+            const auto rowDrawing = drawingOf(row);
+            check("Repeat in a Line: 3 copies, the third 0.2 along", rowDrawing != nullptr && rowDrawing->paths.size() == 3 && at(rowDrawing, 2, 0, 0.7f, 0.5f));
+
+            // Repeat in a Grid: 2 columns x 3 rows, 0.25 apart -> 6 copies, the last moved (0.25, 0.5).
+            auto* grid = modify("draw.repeat.grid", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(grid, "columns", std::int64_t { 2 });
+            set(grid, "rows", std::int64_t { 3 });
+            const auto gridDrawing = drawingOf(grid);
+            check("Repeat in a Grid: 6 copies, the last at (0.75, 1.0)", gridDrawing != nullptr && gridDrawing->paths.size() == 6 && at(gridDrawing, 5, 0, 0.75f, 1.0f));
+
+            // Mirror left-right about x 0.5, keeping the original: the copy of (0.5..0.7) ends at x 0.3.
+            auto* mirror = modify("draw.mirror", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            const auto mirrorDrawing = drawingOf(mirror);
+            check("Mirror keeps the original and adds the flipped copy",
+                  mirrorDrawing != nullptr && mirrorDrawing->paths.size() == 2 && at(mirrorDrawing, 1, 1, 0.3f, 0.5f));
+
+            // Merge: two lines -> one drawing of two paths.
+            auto* merge = add("draw.merge");
+            connect(graph, lineFrom(0.0f, 0.0f, 1.0f, 1.0f), "drawing", merge, "a");
+            connect(graph, lineFrom(1.0f, 0.0f, 0.0f, 1.0f), "drawing", merge, "c");
+            check("Merge puts two drawings together", drawingOf(merge) != nullptr && drawingOf(merge)->paths.size() == 2);
+
+            // Scatter: 10 copies, every copy's centre inside the area; the same seed repeats, another changes it.
+            auto scatter = [&](std::int64_t seed) {
+                auto* n = modify("draw.scatter", lineFrom(0.45f, 0.5f, 0.55f, 0.5f));
+                set(n, "count", std::int64_t { 10 });
+                set(n, "x", 0.2f); set(n, "y", 0.2f); set(n, "width", 0.6f); set(n, "height", 0.6f);
+                set(n, "seed", seed);
+                return drawingOf(n);
+            };
+            const auto s1 = scatter(1), s1again = scatter(1), s2 = scatter(2);
+            bool inside = s1 != nullptr && s1->paths.size() == 10;
+            for (size_t i = 0; inside && i < s1->paths.size(); ++i)
+            {
+                drawing::Drawing one;
+                one.paths.push_back(s1->paths[i]);
+                const auto c = drawing::bounds(one).centre();
+                inside = c.x >= 0.2f - 1.0e-4f && c.x <= 0.8f + 1.0e-4f && c.y >= 0.2f - 1.0e-4f && c.y <= 0.8f + 1.0e-4f;
+            }
+            auto samePoints = [](const drawing::DrawingPtr& a, const drawing::DrawingPtr& b) {
+                if (a == nullptr || b == nullptr || a->paths.size() != b->paths.size())
+                    return false;
+                for (size_t i = 0; i < a->paths.size(); ++i)
+                    for (size_t k = 0; k < a->paths[i].points.size(); ++k)
+                        if (a->paths[i].points[k].x != b->paths[i].points[k].x || a->paths[i].points[k].y != b->paths[i].points[k].y)
+                            return false;
+                return true;
+            };
+            check("Scatter: 10 copies, centres inside the area", inside);
+            check("Scatter repeats with its seed and changes with another", samePoints(s1, s1again) && ! samePoints(s1, s2));
+
+            // Jitter 0.1: every point within 0.1 of where it was.
+            auto* jitter = modify("draw.jitter", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(jitter, "amount", 0.1f);
+            const auto jittered = drawingOf(jitter);
+            check("Jitter stays within its amount", jittered != nullptr && std::abs(jittered->paths[0].points[0].x - 0.1f) <= 0.1f
+                                                        && std::abs(jittered->paths[0].points[1].y - 0.5f) <= 0.1f
+                                                        && ! at(jittered, 0, 0, 0.1f, 0.5f));
+
+            // Wobble a line 0.1 -> 0.9 along y 0.5, amount 0.02, wavelength 0.1: points every 0.0125 -> 64 + the end = 65,
+            // only pushed sideways (y within 0.48..0.52), starting at x 0.1 and ending at x 0.9.
+            auto* wobble = modify("draw.wobble", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(wobble, "amount", 0.02f);
+            set(wobble, "wavelength", 0.1f);
+            const auto wobbled = drawingOf(wobble);
+            bool sideways = wobbled != nullptr && wobbled->paths.size() == 1 && wobbled->paths[0].points.size() == 65;
+            for (size_t i = 0; sideways && i < wobbled->paths[0].points.size(); ++i)
+                sideways = std::abs(wobbled->paths[0].points[i].y - 0.5f) <= 0.02f + 1.0e-5f;
+            check("Wobble: 65 points, pushed only sideways, within its amount",
+                  sideways && std::abs(wobbled->paths[0].points.front().x - 0.1f) < 1.0e-5f && std::abs(wobbled->paths[0].points.back().x - 0.9f) < 1.0e-5f);
+
+            // Star 5 points: 10 corners, the first straight up at (0.5, 0.5 - 0.3).
+            const auto starDrawing = drawingOf(add("draw.star"));
+            check("Star: 10 corners, a point straight up", starDrawing != nullptr && starDrawing->paths[0].points.size() == 10 && at(starDrawing, 0, 0, 0.5f, 0.2f));
+            // Arc from 0 through 90 degrees, radius 0.25: (0.75, 0.5) round to (0.5, 0.75).
+            auto* quarter = add("draw.arc");
+            set(quarter, "sweep", 90.0f);
+            check("Arc: a quarter from right to bottom", at(drawingOf(quarter), 0, 0, 0.75f, 0.5f) && at(drawingOf(quarter), 0, SIZE_MAX, 0.5f, 0.75f));
+            // Spiral 1 turn from the centre out to 0.2: ends at (0.7, 0.5).
+            auto* coil = add("draw.spiral");
+            set(coil, "outerRadius", 0.2f);
+            set(coil, "turns", 1.0f);
+            check("Spiral: from the centre to (0.7, 0.5)", at(drawingOf(coil), 0, 0, 0.5f, 0.5f) && at(drawingOf(coil), 0, SIZE_MAX, 0.7f, 0.5f));
+            // Curve: from (0.1, 0.7) to (0.9, 0.3) exactly.
+            auto* curve = add("draw.bezier");
+            check("Curve: starts and ends on its end points", at(drawingOf(curve), 0, 0, 0.1f, 0.7f) && at(drawingOf(curve), 0, SIZE_MAX, 0.9f, 0.3f));
+        }
+
+        // Draw Script (milestone 4). Heading 0 = right, turning clockwise; worked out by hand.
+        {
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            auto closeTo = [](const drawing::Point& p, float x, float y) { return std::abs(p.x - x) < 1.0e-4f && std::abs(p.y - y) < 1.0e-4f; };
+            auto script = [&](const char* text) { return draw_script::run(text, {}, 1); };
+
+            const auto twoPoints = script("move 0.1 0.5\nline 0.9 0.5");
+            check("Script: move + line is one path of two points",
+                  twoPoints.error.empty() && twoPoints.drawing.paths.size() == 1 && twoPoints.drawing.paths[0].points.size() == 2
+                      && closeTo(twoPoints.drawing.paths[0].points[1], 0.9f, 0.5f));
+
+            // A square: start (0.25, 0.25), forward 0.5 then turn 90 four times -> right, down, left, up -> back to the start.
+            const auto square = script("move 0.25 0.25\nrepeat 4 {\n  forward 0.5\n  turn 90\n}");
+            check("Script: a turtle square closes on its start",
+                  square.error.empty() && square.drawing.paths.size() == 1 && square.drawing.paths[0].points.size() == 5
+                      && closeTo(square.drawing.paths[0].points[1], 0.75f, 0.25f) && closeTo(square.drawing.paths[0].points[2], 0.75f, 0.75f)
+                      && closeTo(square.drawing.paths[0].points[4], 0.25f, 0.25f));
+
+            // let and expressions: r = 0.2 -> a circle whose first point is (0.7, 0.5).
+            const auto circle = script("let r = 0.1 * 2\ncircle 0.5 0.5 r");
+            check("Script: let and expressions", circle.error.empty() && circle.drawing.paths.size() == 1 && closeTo(circle.drawing.paths[0].points[0], 0.7f, 0.5f));
+
+            // The loop index: circles at x 0.2, 0.5, 0.8 -> the third starts at (0.85, 0.5). "0.5 -0.1"-style arguments split.
+            const auto loop = script("repeat 3 { circle 0.2 + i * 0.3, 0.5, 0.05 }\ncircle 0.5 -0.1 0.05");
+            check("Script: the loop index, and a minus sign starting an argument",
+                  loop.error.empty() && loop.drawing.paths.size() == 4 && closeTo(loop.drawing.paths[2].points[0], 0.85f, 0.5f)
+                      && closeTo(loop.drawing.paths[3].points[0], 0.55f, -0.1f));
+
+            // push / pop: forward 0.2 then back to the saved pen, turn 90, forward 0.1 -> two paths, the second (0.5, 0.5) -> (0.5, 0.6).
+            const auto branch = script("move 0.5 0.5\npush\nforward 0.2\npop\nturn 90\nforward 0.1");
+            check("Script: push and pop", branch.error.empty() && branch.drawing.paths.size() == 2 && closeTo(branch.drawing.paths[0].points[1], 0.7f, 0.5f)
+                                              && closeTo(branch.drawing.paths[1].points[0], 0.5f, 0.5f) && closeTo(branch.drawing.paths[1].points[1], 0.5f, 0.6f));
+
+            // arc 0.1 90 from (0.5, 0.5) heading right: centre (0.5, 0.6), ends at (0.6, 0.6) heading down; forward 0.1 -> (0.6, 0.7).
+            const auto bend = script("move 0.5 0.5\narc 0.1 90\nforward 0.1");
+            check("Script: arc turns right around a centre beside the pen",
+                  bend.error.empty() && bend.drawing.paths.size() == 1 && closeTo(bend.drawing.paths[0].points.back(), 0.6f, 0.7f));
+
+            // if / else: a = 2 > 1 -> the radius 0.1 branch.
+            const auto choice = script("let a = 2\nif a > 1 {\n  circle 0.5 0.5 0.1\n} else {\n  circle 0.5 0.5 0.2\n}");
+            check("Script: if / else", choice.error.empty() && choice.drawing.paths.size() == 1 && closeTo(choice.drawing.paths[0].points[0], 0.6f, 0.5f));
+
+            // Errors name the line.
+            const auto typo = script("move 0.1 0.1\nforwrd 0.2");
+            check("Script: an unknown command names its line", typo.error.find("line 2") != std::string::npos && typo.error.find("forwrd") != std::string::npos);
+
+            // Procedures and recursion: a staircase of 3 steps (right 0.1, down 0.1) from (0.1, 0.1) ends at (0.4, 0.4), 7 points.
+            const auto stairs = script("def stair n {\n  if n > 0 {\n    forward 0.1\n    turn 90\n    forward 0.1\n    turn -90\n    stair n - 1\n  }\n}\n"
+                                       "move 0.1 0.1\nstair 3");
+            check("Script: a procedure calling itself",
+                  stairs.error.empty() && stairs.drawing.paths.size() == 1 && stairs.drawing.paths[0].points.size() == 7
+                      && closeTo(stairs.drawing.paths[0].points.back(), 0.4f, 0.4f));
+            // let is local to a procedure (x stays 1 -> radius 0.1 -> (0.6, 0.5)); set changes an outer variable (c = 3 -> (0.8, 0.5)).
+            const auto scoped = script("let x = 1\ndef f {\n  let x = 5\n}\nf\ncircle 0.5 0.5 x * 0.1\nlet c = 0\nrepeat 3 { set c = c + 1 }\ncircle 0.5 0.5 c * 0.1");
+            check("Script: let is local, set changes the outer variable",
+                  scoped.error.empty() && scoped.drawing.paths.size() == 2 && closeTo(scoped.drawing.paths[0].points[0], 0.6f, 0.5f)
+                      && closeTo(scoped.drawing.paths[1].points[0], 0.8f, 0.5f));
+            const auto endless = script("def f {\n  f\n}\nf");
+            check("Script: endless recursion stops with an error", endless.error.find("too deeply") != std::string::npos);
+
+            // random repeats with the seed.
+            const auto r1 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 7), r2 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 7),
+                       r3 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 8);
+            check("Script: random repeats with its seed",
+                  r1.error.empty() && r1.drawing.paths[0].points[0].x == r2.drawing.paths[0].points[0].x
+                      && r1.drawing.paths[0].points[0].x != r3.drawing.paths[0].points[0].x);
+
+            // The node reads the graph's Variables: a param "size" 0.3 -> first point (0.8, 0.5); overridden to 0.1 -> (0.6, 0.5).
+            ns::Symbol size;
+            size.id = "size";
+            size.name = "Size";
+            size.kind = ns::SymbolKind::Param;
+            size.type = ns::DataType::Float;
+            size.value = 0.3f;
+            graph.AddSymbol(size);
+            auto* node = add("draw.script");
+            set(node, "script", std::string("circle 0.5 0.5 size"));
+            const auto fromVariable = evaluator.evaluateDrawing(graph, node->Id(), "drawing", error);
+            evaluator.getHost().paramOverrides["size"] = 0.1f;
+            const auto overridden = evaluator.evaluateDrawing(graph, node->Id(), "drawing", error);
+            evaluator.getHost().paramOverrides.clear();
+            check("Draw Script node reads a graph Variable, and its outside value",
+                  fromVariable != nullptr && closeTo(fromVariable->paths[0].points[0], 0.8f, 0.5f) && overridden != nullptr
+                      && closeTo(overridden->paths[0].points[0], 0.6f, 0.5f));
+        }
+
+        // From images (milestone 5).
+        {
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            // Contour of an 11 x 11 left-to-right gradient (pixel i = i / 10) at level 0.55: it crosses halfway between
+            // pixel centres 5.5 (0.5) and 6.5 (0.6), at x = 6 px, straight down from y 0.5 to 10.5 px.
+            // One path of 11 points, x = 6 / 11 = 0.545455, y from 0.5 / 11 = 0.045455 to 10.5 / 11 = 0.954545.
+            auto* ramp = add("image.gradient");
+            set(ramp, "width", std::int64_t { 11 });
+            set(ramp, "height", std::int64_t { 11 });
+            auto* contour = add("draw.contour");
+            connect(graph, ramp, "image", contour, "image");
+            set(contour, "level", 0.55f);
+            const auto lines = evaluator.evaluateDrawing(graph, contour->Id(), "drawing", error);
+            bool straight = lines != nullptr && lines->paths.size() == 1 && lines->paths[0].points.size() == 11 && ! lines->paths[0].closed;
+            float top = 1.0f, bottom = 0.0f;
+            for (size_t i = 0; straight && i < lines->paths[0].points.size(); ++i)
+            {
+                const auto& p = lines->paths[0].points[i];
+                straight = std::abs(p.x - 0.545455f) < 1.0e-4f;
+                top = std::min(top, p.y);
+                bottom = std::max(bottom, p.y);
+            }
+            check("Contour of a gradient is one straight line at the level",
+                  straight && std::abs(top - 0.045455f) < 1.0e-4f && std::abs(bottom - 0.954545f) < 1.0e-4f);
+
+            // Sample: on white every try keeps its point -> all 20, inside the canvas; on black none; black inverted -> 20.
+            auto plain = [&](float v) {
+                auto* n = add("image.create");
+                set(n, "width", std::int64_t { 4 });
+                set(n, "height", std::int64_t { 4 });
+                set(n, "color", ns::Vec3Default { v, v, v });
+                return n;
+            };
+            auto sampled = [&](ns::Node* image, bool invert, ns::Node* shape) {
+                auto* n = add("draw.sample");
+                connect(graph, image, "image", n, "image");
+                if (shape != nullptr) connect(graph, shape, "drawing", n, "drawing");
+                set(n, "count", std::int64_t { 20 });
+                set(n, "invert", invert);
+                return evaluator.evaluateDrawing(graph, n->Id(), "drawing", error);
+            };
+            const auto onWhite = sampled(plain(1.0f), false, nullptr);
+            bool inCanvas = onWhite != nullptr && onWhite->paths.size() == 20;
+            for (size_t i = 0; inCanvas && i < onWhite->paths.size(); ++i)
+                inCanvas = onWhite->paths[i].points.size() == 1 && onWhite->paths[i].points[0].x >= 0.0f && onWhite->paths[i].points[0].x <= 1.0f
+                           && onWhite->paths[i].points[0].y >= 0.0f && onWhite->paths[i].points[0].y <= 1.0f;
+            check("Sample on white: 20 dots inside the canvas", inCanvas);
+            const auto onBlack = sampled(plain(0.0f), false, nullptr);
+            check("Sample on black: no points", onBlack != nullptr && onBlack->paths.empty());
+            const auto inverted = sampled(plain(0.0f), true, nullptr);
+            check("Sample on black, inverted: 20 points", inverted != nullptr && inverted->paths.size() == 20);
+            auto* tick = add("draw.line");
+            set(tick, "x1", 0.45f); set(tick, "y1", 0.5f); set(tick, "x2", 0.55f); set(tick, "y2", 0.5f);
+            const auto copies = sampled(plain(1.0f), false, tick);
+            check("Sample with a drawing: a copy on each point", copies != nullptr && copies->paths.size() == 20 && copies->paths[0].points.size() == 2);
+        }
+
+        // Paint with nothing wired to draw reports it.
+        auto* empty = add("draw.paint");
+        juce::String paintError;
+        if (evaluator.evaluate(graph, empty->Id(), "image", paintError) != nullptr || ! paintError.contains("drawing"))
+        {
+            std::cerr << "FAIL Paint without a drawing did not say so\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   Paint without a drawing says so\n";
     }
 
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
