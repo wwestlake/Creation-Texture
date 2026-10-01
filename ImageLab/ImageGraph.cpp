@@ -9,6 +9,7 @@
 #include <node_system/frgraph_serialization.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <set>
@@ -51,7 +52,18 @@ extern "C" float dr_host_sin(float v) { return std::sin(v); }
 extern "C" float dr_host_cos(float v) { return std::cos(v); }
 extern "C" float dr_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
 
+extern "C" float an_host_sin(float v) { return std::sin(v); }
+extern "C" float an_host_cos(float v) { return std::cos(v); }
+extern "C" float an_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
+extern "C" float an_host_atan2(float y, float x) { return std::atan2(y, x); }
+extern "C" float an_host_log(float v) { return std::log(v > 1.0e-30f ? v : 1.0e-30f); }
+extern "C" float an_host_pow(float b, float e) { return std::pow(b, e); }
+extern "C" float an_host_floor(float v) { return std::floor(v); }
+extern "C" float an_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
+extern "C" std::int64_t an_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+
 constexpr const char* key = "image_graph";
+constexpr const char* analysisKey = "image_analysis";
 constexpr const char* drawKey = "drawing";
 constexpr const char* demoKey = "frust_image_demo";
 constexpr const char* fxKey = "image_fx";
@@ -140,6 +152,25 @@ public:
             return;
         }
 
+        // Image analysis (analysis.frust - to become the frust_image_analysis pod).
+        for (auto [name, fn] : { std::pair { "an_host_sin", reinterpret_cast<void*>(&an_host_sin) },
+                                 std::pair { "an_host_cos", reinterpret_cast<void*>(&an_host_cos) },
+                                 std::pair { "an_host_sqrt", reinterpret_cast<void*>(&an_host_sqrt) },
+                                 std::pair { "an_host_atan2", reinterpret_cast<void*>(&an_host_atan2) },
+                                 std::pair { "an_host_log", reinterpret_cast<void*>(&an_host_log) },
+                                 std::pair { "an_host_pow", reinterpret_cast<void*>(&an_host_pow) },
+                                 std::pair { "an_host_floor", reinterpret_cast<void*>(&an_host_floor) },
+                                 std::pair { "an_host_i64_to_f32", reinterpret_cast<void*>(&an_host_i64_to_f32) },
+                                 std::pair { "an_host_f32_to_i64", reinterpret_cast<void*>(&an_host_f32_to_i64) } })
+            runtime.registerHostFunction(name, fn);
+        ::frust::CompileRequest analysis;
+        analysis.sources.push_back({ "analysis.frust", std::string(ImageLabFrust::analysis_frust, ImageLabFrust::analysis_frustSize) });
+        if (! runtime.loadSource(analysisKey, analysis, loadError))
+        {
+            error = "Image analysis FRust routines did not compile: " + juce::String(loadError);
+            return;
+        }
+
         // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
         // manifest, so one is put in front of the pod's own source, which is left exactly as published.
         image_demo_host::registerAll(runtime);
@@ -153,6 +184,13 @@ public:
             error = "The frust_image_demo generators did not compile: " + juce::String(loadError);
     }
 
+
+    // An image-analysis routine by name (analysis.frust).
+    template <typename Fn>
+    Fn an(const char* name)
+    {
+        return reinterpret_cast<Fn>(runtime.getFunction(analysisKey, name));
+    }
 
     // An image-effect routine by name (image_fx.frust).
     template <typename Fn>
@@ -993,6 +1031,395 @@ Library::Library()
             return true;
         }));
     definitions.back().descriptor.graphPort = ns::GraphPort::output; // an output of the graph when it is used as a node
+
+    // --- Analysis --- measuring an image: colour channels, frequencies (Fourier), local detail, the colour spectrum.
+    // The maths is the general analysis.frust pack; these nodes call it.
+    auto greyImage = [](int w, int h) {
+        auto image = std::make_shared<Image>();
+        image->width = w;
+        image->height = h;
+        image->rgba.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 0.0f);
+        image->data = true;
+        return image;
+    };
+    // Split: one grey map per channel of a colour model; only the wanted ones are made.
+    auto splitNode = [needInput, greyImage](std::string type, std::string name, std::string description, std::int64_t mode,
+                                           std::vector<std::string> channels) {
+        std::vector<ns::PinSignature> outs;
+        for (const auto& ch : channels)
+            outs.push_back(imageOut(ch));
+        return define(std::move(type), std::move(name), "Analysis", std::move(description), { imageIn("image") }, outs,
+            [needInput, greyImage, mode, channels](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                auto channel = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("an_channel");
+                for (size_t i = 0; i < channels.size(); ++i)
+                    if (c.wants(channels[i]))
+                    {
+                        auto map = greyImage(input->width, input->height);
+                        if (! ok(channel(input->rgba.data(), map->rgba.data(), pixelCount(*map), mode, static_cast<std::int64_t>(i)), "Split", error))
+                            return false;
+                        out[channels[i]] = map;
+                    }
+                return true;
+            });
+    };
+    definitions.push_back(splitNode("image.analysis.split_rgb", "Split RGB", "The red, green, blue and alpha channels as grey maps.", 0,
+                                    { "r", "g", "b", "a" }));
+    definitions.push_back(splitNode("image.analysis.split_cmyk", "Split CMYK", "Cyan, magenta, yellow and black - the print separations.", 1,
+                                    { "c", "m", "y", "k" }));
+    definitions.push_back(splitNode("image.analysis.split_lab", "Split Lab",
+                                    "Lightness (0..1) and the colour axes a (green-red) and b (blue-yellow), 0.5 = neutral. "
+                                    "Detail usually lives in lightness, colour in broad patches.", 2, { "l", "a", "b" }));
+    definitions.push_back(splitNode("image.analysis.split_hsv", "Split HSV", "Hue (0..1 around the wheel), saturation and value.", 3,
+                                    { "h", "s", "v" }));
+
+    // Combine: grey maps back into colour; a channel not wired takes its neutral value.
+    auto combineNode = [greyImage](std::string type, std::string name, std::string description, std::int64_t mode,
+                                   std::vector<std::string> channels, std::vector<float> neutral) {
+        std::vector<ns::PinSignature> ins;
+        for (const auto& ch : channels)
+            ins.push_back(imageIn(ch));
+        return define(std::move(type), std::move(name), "Analysis", std::move(description), ins, { imageOut("image") },
+            [greyImage, mode, channels, neutral](Context& c, auto& out, juce::String& error) {
+                int w = 0, h = 0;
+                for (const auto& ch : channels)
+                    if (auto in = c.inputs.find(ch); in != c.inputs.end() && in->second != nullptr)
+                    {
+                        if (w != 0 && (in->second->width != w || in->second->height != h))
+                        {
+                            error = "The channels must all be the same size.";
+                            return false;
+                        }
+                        w = in->second->width;
+                        h = in->second->height;
+                    }
+                if (w == 0)
+                {
+                    error = "Wire at least one channel in.";
+                    return false;
+                }
+                std::vector<std::shared_ptr<Image>> fills;
+                std::vector<const float*> parts;
+                for (size_t i = 0; i < 4; ++i)
+                {
+                    auto in = i < channels.size() ? c.inputs.find(channels[i]) : c.inputs.end();
+                    if (in != c.inputs.end() && in->second != nullptr)
+                        parts.push_back(in->second->rgba.data());
+                    else
+                    {
+                        auto fill = greyImage(w, h);
+                        std::fill(fill->rgba.begin(), fill->rgba.end(), i < neutral.size() ? neutral[i] : 1.0f);
+                        fills.push_back(fill);
+                        parts.push_back(fill->rgba.data());
+                    }
+                }
+                auto image = greyImage(w, h);
+                image->data = false;
+                auto combine = c.routines.an<std::int64_t (*)(const float*, const float*, const float*, const float*, float*, std::int64_t,
+                                                              std::int64_t)>("an_combine");
+                if (! ok(combine(parts[0], parts[1], parts[2], parts[3], image->rgba.data(), pixelCount(*image), mode), "Combine", error))
+                    return false;
+                out["image"] = image;
+                return true;
+            });
+    };
+    definitions.push_back(combineNode("image.analysis.combine_rgb", "Combine RGB", "Red, green, blue and alpha maps into an image.", 0,
+                                      { "r", "g", "b", "a" }, { 0.0f, 0.0f, 0.0f, 1.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_cmyk", "Combine CMYK", "Cyan, magenta, yellow and black into an image.", 1,
+                                      { "c", "m", "y", "k" }, { 0.0f, 0.0f, 0.0f, 0.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_lab", "Combine Lab", "Lightness and the a / b colour axes into an image.", 2,
+                                      { "l", "a", "b" }, { 0.5f, 0.5f, 0.5f, 1.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_hsv", "Combine HSV", "Hue, saturation and value into an image.", 3,
+                                      { "h", "s", "v" }, { 0.0f, 0.0f, 1.0f, 1.0f }));
+
+    definitions.push_back(define("image.analysis.colour_mask", "Colour Mask", "Analysis",
+        "How much of a chosen colour each pixel holds: 1 within the tolerance of it, fading to 0 over the softness.",
+        { imageIn("image"), colourIn("color", 0.8f, 0.4f, 0.1f), floatIn("tolerance", 0.1f), floatIn("softness", 0.1f) }, { imageOut("mask") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto colour = c.colour("color", { 0.8f, 0.4f, 0.1f });
+            auto mask = greyImage(input->width, input->height);
+            auto fn = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, float, float, float, float, float)>("an_colour_mask");
+            if (! ok(fn(input->rgba.data(), mask->rgba.data(), pixelCount(*mask), colour.x, colour.y, colour.z, c.number("tolerance", 0.1f),
+                        c.number("softness", 0.1f)), "Colour Mask", error))
+                return false;
+            out["mask"] = mask;
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.hue_band", "Hue Band", "Analysis",
+        "The colours in a range of hues (degrees around the wheel: 0 red, 60 yellow, 120 green, 180 cyan, 240 blue, 300 magenta), "
+        "weighted by how saturated they are.",
+        { imageIn("image"), floatIn("hue", 30.0f), floatIn("width", 40.0f), floatIn("softness", 20.0f) }, { imageOut("mask") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            auto mask = greyImage(input->width, input->height);
+            auto fn = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, float, float, float)>("an_hue_band");
+            if (! ok(fn(input->rgba.data(), mask->rgba.data(), pixelCount(*mask), c.number("hue", 30.0f) / 360.0f,
+                        c.number("width", 40.0f) / 360.0f, c.number("softness", 20.0f) / 360.0f), "Hue Band", error))
+                return false;
+            out["mask"] = mask;
+            return true;
+        }));
+
+    // Fourier: the FFT needs power-of-two sizes, so an image that is not is resampled (wrapping, so tiling holds)
+    // to the nearest, worked on, and resampled back.
+    auto toPow2 = [](int n) {
+        int p = 2;
+        while (p < 4096 && p * 2 - n < n - p) // nearest power of two
+            p *= 2;
+        return juce::jlimit(2, 4096, p);
+    };
+    auto resampled = [](Context& c, const Image& from, int w, int h) {
+        auto image = std::make_shared<Image>();
+        image->width = w;
+        image->height = h;
+        image->data = from.data;
+        image->rgba.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 0.0f);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t)>("an_resample")(
+            from.rgba.data(), from.width, from.height, image->rgba.data(), w, h);
+        return image;
+    };
+    definitions.push_back(define("image.analysis.frequency_band", "Frequency Band", "Analysis",
+        "Keeps only the detail between two sizes (fractions of the image width): coarse shapes, fine grain, or one pattern's "
+        "scale. Softness is in octaves; Keep Average keeps the overall brightness. The image is treated as repeating, so a "
+        "tileable image stays tileable.",
+        { imageIn("image"), floatIn("smallest", 0.02f), floatIn("largest", 0.1f), floatIn("softness", 0.5f), boolIn("keepAverage", true) },
+        { imageOut("image") },
+        [needInput, toPow2, resampled](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int w = toPow2(input->width), h = toPow2(input->height);
+            auto work = (w == input->width && h == input->height) ? copyOf(input) : resampled(c, *input, w, h);
+            std::vector<float> complexBuffer(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
+            auto pack = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_pack");
+            auto fft = c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, std::int64_t)>("an_fft2d");
+            auto band = c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, float, float, float, std::int64_t)>("an_band");
+            auto unpack = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_unpack");
+            const float smallest = juce::jmax(1.0e-4f, c.number("smallest", 0.02f)) * static_cast<float>(w);
+            const float largest = juce::jmax(1.0e-4f, c.number("largest", 0.1f)) * static_cast<float>(w);
+            for (std::int64_t channel = 0; channel < 3; ++channel)
+            {
+                pack(work->rgba.data(), complexBuffer.data(), pixelCount(*work), channel);
+                fft(complexBuffer.data(), w, h, 0);
+                band(complexBuffer.data(), w, h, smallest, largest, juce::jmax(0.0f, c.number("softness", 0.5f)), c.flag("keepAverage", true) ? 1 : 0);
+                fft(complexBuffer.data(), w, h, 1);
+                unpack(complexBuffer.data(), work->rgba.data(), pixelCount(*work), channel);
+            }
+            out["image"] = (w == input->width && h == input->height) ? work : resampled(c, *work, input->width, input->height);
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.spectrum", "Spectrum", "Analysis",
+        "The image's frequency picture (brightness): the average in the middle, fine detail towards the edges, the direction "
+        "of a pattern as a line of bright points across it.",
+        { imageIn("image") }, { imageOut("spectrum") },
+        [needInput, toPow2, resampled, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int w = toPow2(input->width), h = toPow2(input->height);
+            auto work = (w == input->width && h == input->height) ? input : ImagePtr(resampled(c, *input, w, h));
+            std::vector<float> complexBuffer(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
+            c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_pack")(work->rgba.data(), complexBuffer.data(),
+                                                                                                         pixelCount(*work), 4);
+            c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, std::int64_t)>("an_fft2d")(complexBuffer.data(), w, h, 0);
+            auto spectrum = greyImage(w, h);
+            c.routines.an<std::int64_t (*)(float*, float*, std::int64_t, std::int64_t)>("an_spectrum")(complexBuffer.data(), spectrum->rgba.data(), w, h);
+            out["spectrum"] = spectrum;
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.detail_map", "Detail Map", "Analysis",
+        "How much change each part of the image holds: the brightness spread in a square (a fraction of the width) around each "
+        "pixel. Busy areas are bright, flat ones dark.",
+        { imageIn("image"), floatIn("square", 0.02f) }, { imageOut("detail") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int radius = juce::jlimit(1, 256, juce::roundToInt(c.number("square", 0.02f) * static_cast<float>(input->width) * 0.5f));
+            std::vector<float> a(static_cast<size_t>(pixelCount(*input))), b(a.size());
+            auto detail = greyImage(input->width, input->height);
+            c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, float*, float*, float*)>("an_detail")(
+                input->rgba.data(), input->width, input->height, radius, a.data(), b.data(), detail->rgba.data());
+            out["detail"] = detail;
+            return true;
+        }));
+
+    // Local frequency: a windowed FFT square by square (squares half-overlapping), then spread over the image.
+    struct LocalAnalysis
+    {
+        int win = 0, hop = 0, gw = 0, gh = 0;
+        std::vector<float> scale, direction, strength, bands;
+    };
+    auto analyseLocally = [](Context& c, const Image& input, float square) {
+        LocalAnalysis local;
+        int win = 8;
+        const float target = square * static_cast<float>(input.width);
+        while (win < 256 && static_cast<float>(win * 2) <= target * 1.414f)
+            win *= 2;
+        local.win = win;
+        local.hop = win / 2;
+        local.gw = (input.width + local.hop - 1) / local.hop;
+        local.gh = (input.height + local.hop - 1) / local.hop;
+        const auto cells = static_cast<size_t>(local.gw) * static_cast<size_t>(local.gh);
+        local.scale.assign(cells, 0.0f);
+        local.direction.assign(cells, 0.0f);
+        local.strength.assign(cells, 0.0f);
+        local.bands.assign(cells * 7, 0.0f);
+        std::vector<float> scratch(static_cast<size_t>(win) * static_cast<size_t>(win) * 2);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t,
+                                       float*, float*, float*, float*)>("an_local")(
+            input.rgba.data(), input.width, input.height, win, local.hop, scratch.data(), local.gw, local.gh, local.scale.data(),
+            local.direction.data(), local.strength.data(), local.bands.data());
+        return local;
+    };
+    auto gridImage = [greyImage](Context& c, const LocalAnalysis& local, const std::vector<float>& grid, const Image& like) {
+        auto map = greyImage(like.width, like.height);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t)>(
+            "an_grid_to_image")(grid.data(), local.gw, local.gh, local.win, local.hop, map->rgba.data(), like.width, like.height);
+        return map;
+    };
+    definitions.push_back(define("image.analysis.local_frequency", "Local Frequency", "Analysis",
+        "Looks at the image square by square (a Fourier transform of each): Scale is the typical size of the detail there (a "
+        "fraction of the square), Direction which way its lines run (0 horizontal, 0.5 vertical, 1 horizontal again), Strength "
+        "how much it runs one way.",
+        { imageIn("image"), floatIn("square", 0.0625f) }, { imageOut("scale"), imageOut("direction"), imageOut("strength") },
+        [needInput, analyseLocally, gridImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto local = analyseLocally(c, *input, c.number("square", 0.0625f));
+            if (c.wants("scale")) out["scale"] = gridImage(c, local, local.scale, *input);
+            if (c.wants("direction")) out["direction"] = gridImage(c, local, local.direction, *input);
+            if (c.wants("strength")) out["strength"] = gridImage(c, local, local.strength, *input);
+            return true;
+        }));
+    {
+        auto evenness = define("image.analysis.evenness", "Evenness", "Analysis",
+            "Whether the image is the same kind of thing all over - what a texture needs to tile without patterning out. "
+            "Compares each square's frequency make-up and contrast with the whole: the map is bright where a square differs, "
+            "Evenness is 1 for perfectly even.",
+            { imageIn("image"), floatIn("square", 0.125f) }, { imageOut("map"), floatOut("evenness") },
+            [needInput, analyseLocally, gridImage](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                const auto local = analyseLocally(c, *input, c.number("square", 0.125f));
+                const size_t cells = local.scale.size();
+                // Each square: six band fractions and its energy against the mean energy.
+                std::array<double, 6> meanBands {};
+                double meanEnergy = 0.0;
+                for (size_t i = 0; i < cells; ++i)
+                {
+                    for (size_t b = 0; b < 6; ++b)
+                        meanBands[b] += local.bands[i * 7 + b];
+                    meanEnergy += local.bands[i * 7 + 6];
+                }
+                for (auto& m : meanBands)
+                    m /= static_cast<double>(cells);
+                meanEnergy /= static_cast<double>(cells);
+                std::vector<float> distance(cells, 0.0f);
+                double total = 0.0;
+                for (size_t i = 0; i < cells; ++i)
+                {
+                    double d = 0.0;
+                    for (size_t b = 0; b < 6; ++b)
+                        d += std::abs(local.bands[i * 7 + b] - meanBands[b]);
+                    const double energy = meanEnergy > 0.0 ? local.bands[i * 7 + 6] / meanEnergy : 1.0;
+                    d = 0.5 * d + 0.5 * std::min(1.0, std::abs(energy - 1.0));
+                    distance[i] = static_cast<float>(std::min(1.0, d));
+                    total += distance[i];
+                }
+                if (c.wants("map")) out["map"] = gridImage(c, local, distance, *input);
+                c.valueOutputs["evenness"] = static_cast<float>(1.0 - total / static_cast<double>(cells));
+                return true;
+            });
+        definitions.push_back(std::move(evenness));
+    }
+    definitions.push_back(define("image.analysis.colour_spectrum", "Colour Spectrum", "Analysis",
+        "The image's colours around the hue wheel: Chart shows how much of each hue it holds; Dominant 1-3 are its main hues; "
+        "Harmony is the shape of its palette from a Fourier analysis of the hues - 1 one main hue, 2 complementary, 3 a triad, "
+        "4 a tetrad, 0 an even spread or no colour.",
+        { imageIn("image") }, { imageOut("chart"), { "dominant1", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "dominant2", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "dominant3", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "harmony", { ns::PinKind::Data, ns::DataType::Int }, {} } },
+        [needInput](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            constexpr int bins = 36;
+            std::vector<float> hist(bins);
+            c.routines.an<std::int64_t (*)(const float*, std::int64_t, float*, std::int64_t)>("an_hue_histogram")(input->rgba.data(), pixelCount(*input),
+                                                                                                                hist.data(), bins);
+            if (c.wants("chart"))
+            {
+                auto chart = std::make_shared<Image>();
+                chart->width = 360;
+                chart->height = 120;
+                chart->rgba.assign(360 * 120 * 4, 0.0f);
+                c.routines.an<std::int64_t (*)(const float*, std::int64_t, float*, std::int64_t, std::int64_t)>("an_hue_chart")(hist.data(), bins,
+                                                                                                                             chart->rgba.data(), 360, 120);
+                out["chart"] = chart;
+            }
+            // Harmony: the strongest of the first four circular harmonics of the hue histogram.
+            double sum = 0.0;
+            for (float v : hist) sum += v;
+            int harmony = 0;
+            double best = 0.0;
+            for (int k = 1; k <= 4 && sum > 0.0; ++k)
+            {
+                double re = 0.0, im = 0.0;
+                for (int j = 0; j < bins; ++j)
+                {
+                    const double a = 2.0 * juce::MathConstants<double>::pi * k * j / bins;
+                    re += hist[static_cast<size_t>(j)] * std::cos(a);
+                    im -= hist[static_cast<size_t>(j)] * std::sin(a);
+                }
+                const double magnitude = std::sqrt(re * re + im * im) / sum;
+                if (magnitude > best + 1.0e-6)
+                {
+                    best = magnitude;
+                    harmony = k;
+                }
+            }
+            if (best < 0.15)
+                harmony = 0;
+            c.valueOutputs["harmony"] = static_cast<std::int64_t>(harmony);
+            // Dominant hues: the highest peaks of the (lightly smoothed) histogram, at least 30 degrees apart.
+            std::vector<float> smooth(bins);
+            float top = 0.0f;
+            for (int j = 0; j < bins; ++j)
+            {
+                smooth[static_cast<size_t>(j)] = 0.25f * hist[static_cast<size_t>((j + bins - 1) % bins)] + 0.5f * hist[static_cast<size_t>(j)]
+                                               + 0.25f * hist[static_cast<size_t>((j + 1) % bins)];
+                top = std::max(top, smooth[static_cast<size_t>(j)]);
+            }
+            std::vector<int> peaks;
+            for (int pick = 0; pick < 3; ++pick)
+            {
+                int bestBin = -1;
+                for (int j = 0; j < bins; ++j)
+                {
+                    bool tooClose = false;
+                    for (int p : peaks)
+                        tooClose = tooClose || std::min((j - p + bins) % bins, (p - j + bins) % bins) < 3;
+                    if (! tooClose && smooth[static_cast<size_t>(j)] > 0.05f * top && (bestBin < 0 || smooth[static_cast<size_t>(j)] > smooth[static_cast<size_t>(bestBin)]))
+                        bestBin = j;
+                }
+                if (bestBin >= 0)
+                    peaks.push_back(bestBin);
+            }
+            const char* names[3] = { "dominant1", "dominant2", "dominant3" };
+            for (int i = 0; i < 3; ++i)
+            {
+                ns::Vec3Default colour { 0.0f, 0.0f, 0.0f };
+                if (i < static_cast<int>(peaks.size()))
+                {
+                    const auto hue = juce::Colour::fromHSV((static_cast<float>(peaks[static_cast<size_t>(i)]) + 0.5f) / bins, 1.0f, 1.0f, 1.0f);
+                    colour = { hue.getFloatRed(), hue.getFloatGreen(), hue.getFloatBlue() };
+                }
+                c.valueOutputs[names[i]] = colour;
+            }
+            return true;
+        }));
 
     // --- Draw --- (section 5) shapes make a Drawing; Brush says how it is painted; Paint makes the image.
     // Positions are 0..1 across the canvas, (0, 0) top-left.

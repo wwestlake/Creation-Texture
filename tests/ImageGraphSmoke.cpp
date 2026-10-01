@@ -7,7 +7,10 @@
 #include <DrawScript.h>
 #include <node_system/frgraph_serialization.h>
 
+#include <array>
 #include <cmath>
+#include <functional>
+#include <map>
 #include <iostream>
 
 namespace ns = ce::node_system;
@@ -987,6 +990,144 @@ int main()
         check("Math 2 x 3 = 6, Logic on and off = off",
               evaluator.evaluateValue(graph, times->Id(), "result", product, valueError) && std::get<float>(product) == 6.0f
                   && evaluator.evaluateValue(graph, logic->Id(), "result", both, valueError) && ! std::get<bool>(both));
+    }
+
+    // Analysis: channels, colour masks, Fourier, local frequency, evenness, colour spectrum. Test images come in
+    // through Load Image: a 64 x 64 grey sine with period 8 px across (0.5 + 0.25 sin(2 pi x / 8)), the same on the
+    // left half with flat 0.5 on the right, half red / half cyan, and a single colour.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto makeImage = [](int w, int h, std::function<std::array<float, 3>(int, int)> colourAt) {
+            auto image = std::make_shared<image_graph::Image>();
+            image->width = w;
+            image->height = h;
+            image->rgba.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const auto c = colourAt(x, y);
+                    const size_t o = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4;
+                    image->rgba[o] = c[0]; image->rgba[o + 1] = c[1]; image->rgba[o + 2] = c[2]; image->rgba[o + 3] = 1.0f;
+                }
+            return image_graph::ImagePtr(image);
+        };
+        const double twoPi = 6.283185307179586;
+        auto sineAt = [twoPi](int x) { return static_cast<float>(0.5 + 0.25 * std::sin(twoPi * x / 8.0)); };
+        std::map<juce::String, image_graph::ImagePtr> testImages {
+            { "test://sine", makeImage(64, 64, [&](int x, int) { const float v = sineAt(x); return std::array<float, 3> { v, v, v }; }) },
+            { "test://half", makeImage(64, 64, [&](int x, int) { const float v = x < 32 ? sineAt(x) : 0.5f; return std::array<float, 3> { v, v, v }; }) },
+            { "test://redcyan", makeImage(8, 8, [](int x, int) { return x < 4 ? std::array<float, 3> { 1.0f, 0.0f, 0.0f } : std::array<float, 3> { 0.0f, 1.0f, 1.0f }; }) },
+            { "test://colour", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 0.2f, 0.4f, 0.6f }; }) },
+            { "test://red", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 1.0f, 0.0f, 0.0f }; }) },
+            { "test://green", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 0.0f, 1.0f, 0.0f }; }) },
+            { "test://white", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 1.0f, 1.0f, 1.0f }; }) },
+        };
+        evaluator.getHost().loadImage = [testImages](const juce::String& path) {
+            auto found = testImages.find(path);
+            return found != testImages.end() ? found->second : nullptr;
+        };
+        auto load = [&](const char* path) {
+            auto* n = add("image.load");
+            set(n, "image", std::string(path));
+            return n;
+        };
+        auto analyse = [&](const char* type, const char* path) {
+            auto* n = add(type);
+            connect(graph, load(path), "image", n, "image");
+            return n;
+        };
+        auto output = [&](ns::Node* n, const char* name) { return evaluator.evaluate(graph, n->Id(), name, error); };
+
+        // Channels.
+        expectPixel("Split RGB: green of (0.2, 0.4, 0.6) is 0.4", output(analyse("image.analysis.split_rgb", "test://colour"), "g"), 0, 0, { 0.4f });
+        auto* cmyk = analyse("image.analysis.split_cmyk", "test://red");
+        expectPixel("Split CMYK of red: magenta 1", output(cmyk, "m"), 0, 0, { 1.0f });
+        expectPixel("Split CMYK of red: cyan 0", output(cmyk, "c"), 0, 0, { 0.0f });
+        expectPixel("Split CMYK of red: black 0", output(cmyk, "k"), 0, 0, { 0.0f });
+        auto* back = add("image.analysis.combine_cmyk");
+        for (const char* ch : { "c", "m", "y", "k" })
+            connect(graph, cmyk, ch, back, ch);
+        expectPixel("CMYK back together is red", output(back, "image"), 0, 0, { 1.0f, 0.0f, 0.0f, 1.0f }, 1.0e-4f);
+        auto* white = analyse("image.analysis.split_lab", "test://white");
+        expectPixel("Lab of white: lightness 1", output(white, "l"), 0, 0, { 1.0f }, 2.0e-3f);
+        expectPixel("Lab of white: a neutral 0.5", output(white, "a"), 0, 0, { 0.5f }, 2.0e-3f);
+        auto* lab = analyse("image.analysis.split_lab", "test://colour");
+        auto* labBack = add("image.analysis.combine_lab");
+        for (const char* ch : { "l", "a", "b" })
+            connect(graph, lab, ch, labBack, ch);
+        expectPixel("Lab there and back keeps (0.2, 0.4, 0.6)", output(labBack, "image"), 0, 0, { 0.2f, 0.4f, 0.6f }, 2.0e-3f);
+        expectPixel("HSV of green: hue 1/3", output(analyse("image.analysis.split_hsv", "test://green"), "h"), 0, 0, { 0.333333f }, 1.0e-4f);
+
+        // Colour masks: the colour itself is 1; black is 0.432 away, past tolerance 0.1 + softness 0.1 -> 0.
+        auto* mask = analyse("image.analysis.colour_mask", "test://colour");
+        set(mask, "color", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        expectPixel("Colour Mask of the colour itself", output(mask, "mask"), 0, 0, { 1.0f });
+        set(mask, "color", ns::Vec3Default { 0.0f, 0.0f, 0.0f });
+        expectPixel("Colour Mask of a far colour", output(mask, "mask"), 0, 0, { 0.0f });
+        auto* hues = analyse("image.analysis.hue_band", "test://redcyan");
+        set(hues, "hue", 0.0f); set(hues, "width", 20.0f); set(hues, "softness", 10.0f);
+        expectPixel("Hue Band around red: red is in", output(hues, "mask"), 0, 0, { 1.0f });
+        expectPixel("Hue Band around red: cyan is out", output(hues, "mask"), 7, 0, { 0.0f });
+
+        // Frequency Band: keeping 6.4 - 12.8 px (0.1 - 0.2 of 64) keeps the period-8 sine: pixel x 3 stays
+        // 0.5 + 0.25 sin(3 pi / 4) = 0.676777; keeping 16 - 32 px leaves only the average 0.5.
+        auto* keep = analyse("image.analysis.frequency_band", "test://sine");
+        set(keep, "smallest", 0.1f); set(keep, "largest", 0.2f); set(keep, "softness", 0.0f);
+        expectPixel("Frequency Band keeps detail of its size", output(keep, "image"), 3, 5, { 0.676777f }, 2.0e-3f);
+        auto* drop = analyse("image.analysis.frequency_band", "test://sine");
+        set(drop, "smallest", 0.25f); set(drop, "largest", 0.5f); set(drop, "softness", 0.0f);
+        expectPixel("Frequency Band drops detail of another size", output(drop, "image"), 3, 5, { 0.5f }, 2.0e-3f);
+        // Spectrum: the average 2048 -> log 2049 is the top; the sine's 512 at 8 cycles shows at (32 + 8, 32) as
+        // log 513 / log 2049 = 0.81839; between them, at (36, 32), nothing.
+        auto* spectrum = analyse("image.analysis.spectrum", "test://sine");
+        expectPixel("Spectrum: the sine's frequency", output(spectrum, "spectrum"), 40, 32, { 0.81839f }, 2.0e-3f);
+        expectPixel("Spectrum: nothing between", output(spectrum, "spectrum"), 36, 32, { 0.0f }, 2.0e-3f);
+
+        // Detail Map: a flat image has none.
+        expectPixel("Detail Map of a flat image is 0", output(analyse("image.analysis.detail_map", "test://white"), "detail"), 0, 0, { 0.0f }, 1.0e-4f);
+
+        // Local Frequency, squares of 32 px on the sine: its wavelength 8 is 0.25 of a square; its lines run vertically
+        // (0.5), all one way (strength near 1).
+        auto* local = analyse("image.analysis.local_frequency", "test://sine");
+        set(local, "square", 0.5f);
+        expectPixel("Local Frequency: scale 0.25", output(local, "scale"), 20, 20, { 0.25f }, 0.03f);
+        expectPixel("Local Frequency: vertical lines", output(local, "direction"), 20, 20, { 0.5f }, 0.02f);
+        const auto strength = output(local, "strength");
+        check("Local Frequency: one direction", strength != nullptr && strength->rgba[(20 * 64 + 20) * 4] > 0.9f);
+
+        // Evenness: the sine is the same everywhere (1); sine on one half and flat on the other is not.
+        auto evenness = [&](const char* path) {
+            auto* n = analyse("image.analysis.evenness", path);
+            set(n, "square", 0.25f);
+            ns::PinDefaultValue v;
+            juce::String e;
+            return evaluator.evaluateValue(graph, n->Id(), "evenness", v, e) ? std::get<float>(v) : -1.0f;
+        };
+        const float even = evenness("test://sine"), uneven = evenness("test://half");
+        check("Evenness: an even image is near 1", even > 0.98f);
+        check("Evenness: half pattern, half flat is well below", uneven >= 0.0f && uneven < 0.8f);
+
+        // Colour Spectrum of half red, half cyan: two opposite hues -> harmony 2, the dominant hues red and cyan.
+        auto* palette = analyse("image.analysis.colour_spectrum", "test://redcyan");
+        ns::PinDefaultValue harmony, first, second;
+        juce::String e;
+        const bool read = evaluator.evaluateValue(graph, palette->Id(), "harmony", harmony, e)
+                       && evaluator.evaluateValue(graph, palette->Id(), "dominant1", first, e)
+                       && evaluator.evaluateValue(graph, palette->Id(), "dominant2", second, e);
+        auto isRed = [](const ns::PinDefaultValue& v) { const auto c = std::get<ns::Vec3Default>(v); return c.x > 0.9f && c.z < 0.1f; };
+        auto isCyan = [](const ns::PinDefaultValue& v) { const auto c = std::get<ns::Vec3Default>(v); return c.x < 0.1f && c.z > 0.9f; };
+        check("Colour Spectrum: complementary pair, red and cyan",
+              read && std::get<std::int64_t>(harmony) == 2 && ((isRed(first) && isCyan(second)) || (isCyan(first) && isRed(second))));
+        const auto chart = output(palette, "chart");
+        check("Colour Spectrum: a 360 x 120 chart", chart != nullptr && chart->width == 360 && chart->height == 120);
     }
 
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
