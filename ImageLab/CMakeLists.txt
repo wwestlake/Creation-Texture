@@ -63,6 +63,11 @@ add_executable(CreationTextureSurfaceMapsBench "${CMAKE_CURRENT_SOURCE_DIR}/../t
 target_link_libraries(CreationTextureSurfaceMapsBench PRIVATE creation_texture_image_lab)
 set_target_properties(CreationTextureSurfaceMapsBench PROPERTIES OUTPUT_NAME "DjehutiTextureSurfaceMapsBench")
 
+# Developer tool: renders a swatch sheet of the Drawing brushes to a PNG, to check them by eye.
+add_executable(CreationTextureDrawingSwatches "${CMAKE_CURRENT_SOURCE_DIR}/../tests/DrawingSwatches.cpp")
+target_link_libraries(CreationTextureDrawingSwatches PRIVATE creation_texture_image_lab)
+set_target_properties(CreationTextureDrawingSwatches PROPERTIES OUTPUT_NAME "DjehutiTextureDrawingSwatches")
+
 add_executable(CreationTextureImageGraphSmoke "${CMAKE_CURRENT_SOURCE_DIR}/../tests/ImageGraphSmoke.cpp")
 target_link_libraries(CreationTextureImageGraphSmoke PRIVATE creation_texture_image_lab)
 set_target_properties(CreationTextureImageGraphSmoke PROPERTIES OUTPUT_NAME "DjehutiTextureImageGraphSmoke")

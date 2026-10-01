@@ -45,6 +45,9 @@ extern "C" float dr_host_floor(float v) { return std::floor(v); }
 extern "C" float dr_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
 extern "C" float dr_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
 extern "C" std::int64_t dr_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+extern "C" float dr_host_sin(float v) { return std::sin(v); }
+extern "C" float dr_host_cos(float v) { return std::cos(v); }
+extern "C" float dr_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
 
 constexpr const char* key = "image_graph";
 constexpr const char* drawKey = "drawing";
@@ -114,6 +117,9 @@ public:
         runtime.registerHostFunction("dr_host_sqrt", reinterpret_cast<void*>(&dr_host_sqrt));
         runtime.registerHostFunction("dr_host_i64_to_f32", reinterpret_cast<void*>(&dr_host_i64_to_f32));
         runtime.registerHostFunction("dr_host_f32_to_i64", reinterpret_cast<void*>(&dr_host_f32_to_i64));
+        runtime.registerHostFunction("dr_host_sin", reinterpret_cast<void*>(&dr_host_sin));
+        runtime.registerHostFunction("dr_host_cos", reinterpret_cast<void*>(&dr_host_cos));
+        runtime.registerHostFunction("dr_host_hash", reinterpret_cast<void*>(&dr_host_hash));
         ::frust::CompileRequest draw;
         draw.sources.push_back({ "drawing.frust", std::string(ImageLabFrust::drawing_frust, ImageLabFrust::drawing_frustSize) });
         if (! runtime.loadSource(drawKey, draw, loadError))
@@ -121,10 +127,10 @@ public:
             error = "Drawing FRust routines did not compile: " + juce::String(loadError);
             return;
         }
-        stroke = reinterpret_cast<decltype(stroke)>(runtime.getFunction(drawKey, "dr_stroke"));
+        stamps = reinterpret_cast<decltype(stamps)>(runtime.getFunction(drawKey, "dr_stamps"));
         fillShapes = reinterpret_cast<decltype(fillShapes)>(runtime.getFunction(drawKey, "dr_fill"));
         composite = reinterpret_cast<decltype(composite)>(runtime.getFunction(drawKey, "dr_composite"));
-        if (! (stroke && fillShapes && composite))
+        if (! (stamps && fillShapes && composite))
         {
             error = "Drawing FRust routines are incomplete.";
             return;
@@ -167,7 +173,8 @@ public:
     std::int64_t (*grayscale)(float*, std::int64_t) = nullptr;
     std::int64_t (*levels)(float*, std::int64_t, float, float, float, float, float) = nullptr;
     // drawing.frust
-    std::int64_t (*stroke)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, std::int64_t, float, float, float) = nullptr;
+    std::int64_t (*stamps)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, std::int64_t, float, const float*, std::int64_t,
+                           std::int64_t, std::int64_t) = nullptr;
     std::int64_t (*fillShapes)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, float*, float*) = nullptr;
     std::int64_t (*composite)(float*, const float*, std::int64_t, float, float, float, float) = nullptr;
     image_lab::Compositor compositor;
@@ -396,6 +403,11 @@ Library::Library()
     enums.push_back({ "GradientDirection", "Gradient Direction", { "Left to Right", "Top to Bottom", "Radial" },
                       "Which way a gradient runs." });
     enums.push_back({ "Axis", "Axis", { "Horizontal", "Vertical" }, "A horizontal or vertical direction." });
+    enums.push_back({ "BrushTip", "Brush Tip", { "Round", "Square", "Chalk", "Bristle", "Image" },
+                      "The shape a brush stamps: Chalk is round, broken by a grain fixed to the canvas; Bristle is a row of "
+                      "small bristles that streak; Image uses the image wired into tipImage." });
+    enums.push_back({ "BrushRotation", "Brush Rotation", { "Fixed", "Follow Stroke", "Random" },
+                      "How a brush's tip is turned: by its angle only, along the stroke's direction, or at random." });
     enums.push_back({ "PaintMode", "Paint Mode", { "Stroke", "Fill", "Fill and Stroke" },
                       "Run the brush along the drawing's lines, fill its shapes, or both." });
 
@@ -900,11 +912,31 @@ Library::Library()
 
     definitions.push_back(define("draw.brush", "Brush", "Draw",
         "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "
-        "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre.",
-        { floatIn("size", 0.02f), floatIn("hardness", 0.8f), floatIn("spacing", 0.1f), colourIn("color", 1.0f, 1.0f, 1.0f), floatIn("opacity", 1.0f) },
+        "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre. Angle is in degrees. "
+        "Scatter moves each stamp at random (a fraction of the size); size and opacity jitter shrink or fade stamps at "
+        "random; taper start / end grow and shrink the stroke over that fraction of its length; seed picks the randomness.",
+        { enumIn("tip", "BrushTip", 0), imageIn("tipImage"), floatIn("size", 0.02f), floatIn("hardness", 0.8f), floatIn("spacing", 0.1f),
+          colourIn("color", 1.0f, 1.0f, 1.0f), floatIn("opacity", 1.0f), enumIn("rotation", "BrushRotation", 0), floatIn("angle", 0.0f),
+          floatIn("scatter", 0.0f), floatIn("sizeJitter", 0.0f), floatIn("opacityJitter", 0.0f), floatIn("taperStart", 0.0f),
+          floatIn("taperEnd", 0.0f), intIn("seed", 1) },
         { brushOut("brush") },
-        [](Context& c, auto&, juce::String&) {
+        [](Context& c, auto&, juce::String& error) {
             auto brush = std::make_shared<drawing::Brush>();
+            brush->tip = static_cast<drawing::Brush::Tip>(juce::jlimit(0, 4, c.integer("tip", 0)));
+            if (brush->tip == drawing::Brush::Tip::image)
+            {
+                auto wired = c.inputs.find("tipImage");
+                if (wired == c.inputs.end() || wired->second == nullptr)
+                {
+                    error = "An Image tip needs an image wired into tipImage.";
+                    return false;
+                }
+                auto tip = std::make_shared<drawing::TipImage>();
+                tip->width = wired->second->width;
+                tip->height = wired->second->height;
+                tip->rgba = wired->second->rgba;
+                brush->tipImage = tip;
+            }
             brush->size = juce::jmax(0.0f, c.number("size", 0.02f));
             brush->hardness = juce::jlimit(0.0f, 1.0f, c.number("hardness", 0.8f));
             brush->spacing = juce::jlimit(0.01f, 10.0f, c.number("spacing", 0.1f));
@@ -913,6 +945,14 @@ Library::Library()
             brush->green = colour.y;
             brush->blue = colour.z;
             brush->opacity = juce::jlimit(0.0f, 1.0f, c.number("opacity", 1.0f));
+            brush->rotation = static_cast<drawing::Brush::Rotation>(juce::jlimit(0, 2, c.integer("rotation", 0)));
+            brush->angle = c.number("angle", 0.0f);
+            brush->scatter = juce::jmax(0.0f, c.number("scatter", 0.0f));
+            brush->sizeJitter = juce::jlimit(0.0f, 1.0f, c.number("sizeJitter", 0.0f));
+            brush->opacityJitter = juce::jlimit(0.0f, 1.0f, c.number("opacityJitter", 0.0f));
+            brush->taperStart = juce::jlimit(0.0f, 1.0f, c.number("taperStart", 0.0f));
+            brush->taperEnd = juce::jlimit(0.0f, 1.0f, c.number("taperEnd", 0.0f));
+            brush->seed = c.integer("seed", 1);
             c.brushOutputs["brush"] = brush;
             return true;
         }));
@@ -973,20 +1013,19 @@ Library::Library()
             if (mode != 1) // stroke
             {
                 std::fill(mask.begin(), mask.end(), 0.0f);
-                const float diameter = brush.size * std::min(sx, sy);
-                const float step = juce::jmax(0.25f, brush.spacing * diameter);
-                std::vector<float> points;
-                for (const auto& path : shapes.paths)
-                {
-                    points.clear();
-                    for (const auto& p : path.points)
-                        points.insert(points.end(), { p.x * sx, p.y * sy });
-                    if (points.empty())
-                        continue;
-                    if (! ok(c.routines.stroke(mask.data(), w, h, points.data(), static_cast<std::int64_t>(path.points.size()),
-                                               path.closed ? 1 : 0, diameter * 0.5f, brush.hardness, step), "Stroke", error))
-                        return false;
-                }
+                // Where the stamps go is geometry (Drawing.cpp); laying them down is FRust (dr_stamps).
+                std::vector<float> stamps;
+                for (size_t p = 0; p < shapes.paths.size(); ++p)
+                    for (const auto& stamp : drawing::placeStamps(shapes.paths[p], brush, w, h, static_cast<int>(p)))
+                        stamps.insert(stamps.end(), { stamp.x, stamp.y, stamp.radius, stamp.angle, stamp.opacity });
+                const float noTip[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                const auto* tip = brush.tipImage.get();
+                const bool useTip = tip != nullptr && tip->width > 0 && tip->height > 0;
+                if (! stamps.empty()
+                    && ! ok(c.routines.stamps(mask.data(), w, h, stamps.data(), static_cast<std::int64_t>(stamps.size() / 5),
+                                              static_cast<std::int64_t>(brush.tip), brush.hardness, useTip ? tip->rgba.data() : noTip,
+                                              useTip ? tip->width : 1, useTip ? tip->height : 1, brush.seed), "Stroke", error))
+                    return false;
                 if (! ok(c.routines.composite(image->rgba.data(), mask.data(), count, brush.red, brush.green, brush.blue, brush.opacity),
                          "Stroke", error))
                     return false;

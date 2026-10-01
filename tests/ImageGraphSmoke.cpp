@@ -408,6 +408,92 @@ int main()
             ++failures;
         }
 
+        // Brush tips: one stamp (a zero-length line) at pixel (4.5, 4.5), size 0.4 -> radius 2 px, hardness 1, so
+        // coverage is 1 up to 1.5 px from the centre and falls to 0 at 2.5 px.
+        auto dot = [&]() {
+            auto* n = add("draw.line");
+            set(n, "x1", 0.45f); set(n, "y1", 0.45f); set(n, "x2", 0.45f); set(n, "y2", 0.45f);
+            return n;
+        };
+        auto tipBrush = [&](std::int64_t tip, float angle) {
+            auto* b = add("draw.brush");
+            set(b, "tip", tip); set(b, "size", 0.4f); set(b, "hardness", 1.0f); set(b, "angle", angle);
+            return b;
+        };
+        // Round: pixel (6, 6) is 2.83 px away -> 0. Square: its edge distance is max(2, 2) = 2 -> 0.5; (7, 4) is 3 -> 0.
+        expectPixel("Round tip: corner pixel outside", image(paint(blackCanvas(), dot(), tipBrush(0, 0.0f), 0)), 6, 6, { 0.0f }, 1.0e-3f);
+        auto* square = paint(blackCanvas(), dot(), tipBrush(1, 0.0f), 0);
+        expectPixel("Square tip: corner pixel half covered", image(square), 6, 6, { 0.5f }, 1.0e-3f);
+        expectPixel("Square tip: 3 px out, nothing", image(square), 7, 4, { 0.0f }, 1.0e-3f);
+        // Square turned 45 degrees: (7, 4) is (3, 0) from the centre -> (2.1213, -2.1213) in the tip -> 2.5 - 2.1213 = 0.3787;
+        // (6, 6) is (2, 2) -> (2.8284, 0) -> 0.
+        auto* diamond = paint(blackCanvas(), dot(), tipBrush(1, 45.0f), 0);
+        expectPixel("Square tip at 45 degrees: (7, 4)", image(diamond), 7, 4, { 0.37868f }, 1.0e-3f);
+        expectPixel("Square tip at 45 degrees: (6, 6) outside", image(diamond), 6, 6, { 0.0f }, 1.0e-3f);
+        // Image tip: a white 4 x 4 image stretched over the stamp's 4 x 4 px square: (5, 5) inside -> 1, (7, 5) outside -> 0.
+        {
+            auto* white = add("image.create");
+            set(white, "width", std::int64_t { 4 });
+            set(white, "height", std::int64_t { 4 });
+            set(white, "color", ns::Vec3Default { 1.0f, 1.0f, 1.0f });
+            auto* stamp = tipBrush(4, 0.0f);
+            connect(graph, white, "image", stamp, "tipImage");
+            auto* stamped = paint(blackCanvas(), dot(), stamp, 0);
+            expectPixel("Image tip: inside the stamp", image(stamped), 5, 5, { 1.0f }, 1.0e-3f);
+            expectPixel("Image tip: outside the stamp", image(stamped), 7, 5, { 0.0f }, 1.0e-3f);
+        }
+
+        // Taper start over the whole line (0.5 -> 9.5 px at row 4.5, size 0.2 -> radius 1): the stroke grows from nothing.
+        // (0, 3) is 1 px from a line that is still thinner than that there -> 0; (9, 3) sits 1 px from the end stamp,
+        // which has its full radius -> 0.5; (9, 4) on the line -> 1.
+        {
+            auto* taperLine = add("draw.line");
+            set(taperLine, "x1", 0.05f); set(taperLine, "y1", 0.45f); set(taperLine, "x2", 0.95f); set(taperLine, "y2", 0.45f);
+            auto* taper = add("draw.brush");
+            set(taper, "size", 0.2f); set(taper, "hardness", 1.0f); set(taper, "taperStart", 1.0f);
+            auto* tapered = paint(blackCanvas(), taperLine, taper, 0);
+            expectPixel("Taper: thin start", image(tapered), 0, 3, { 0.0f }, 1.0e-3f);
+            expectPixel("Taper: full end", image(tapered), 9, 3, { 0.5f }, 1.0e-3f);
+            expectPixel("Taper: on the line at the end", image(tapered), 9, 4, { 1.0f }, 1.0e-3f);
+        }
+
+        // Randomness is repeatable: scatter with seed 1 twice gives the same pixels, seed 2 different ones.
+        // Chalk never lays down more than the round tip it breaks up, and breaks up the middle of the stroke somewhere.
+        {
+            auto scattered = [&](std::int64_t seed, std::int64_t tip, float scatter) {
+                auto* l = add("draw.line");
+                set(l, "x1", 0.05f); set(l, "y1", 0.45f); set(l, "x2", 0.95f); set(l, "y2", 0.45f);
+                auto* b = add("draw.brush");
+                set(b, "tip", tip); set(b, "size", 0.3f); set(b, "hardness", 1.0f); set(b, "scatter", scatter); set(b, "seed", seed);
+                set(b, "spacing", 0.5f);
+                return image(paint(blackCanvas(), l, b, 0));
+            };
+            const auto a = scattered(1, 0, 0.5f), again = scattered(1, 0, 0.5f), other = scattered(2, 0, 0.5f);
+            const bool same = a != nullptr && again != nullptr && a->rgba == again->rgba;
+            const bool differs = a != nullptr && other != nullptr && a->rgba != other->rgba;
+            if (! same || ! differs)
+            {
+                std::cerr << "FAIL scatter is not repeatable by seed (same " << same << ", differs " << differs << ")\n";
+                ++failures;
+            }
+            else
+                std::cout << "ok   scatter repeats with its seed and changes with another\n";
+
+            const auto round = scattered(1, 0, 0.0f), chalk = scattered(1, 2, 0.0f);
+            bool never_more = round != nullptr && chalk != nullptr, broken = false;
+            for (size_t i = 0; never_more && i < round->rgba.size(); i += 4)
+                never_more = chalk->rgba[i] <= round->rgba[i] + 1.0e-5f;
+            for (int x = 1; never_more && x < 9; ++x)
+                broken = broken || chalk->rgba[(4 * 10 + static_cast<size_t>(x)) * 4] < 0.99f;
+            if (! never_more || ! broken)
+            {
+                std::cerr << "FAIL chalk (never more than round " << never_more << ", broken up " << broken << ")\n";
+                ++failures;
+            }
+            else
+                std::cout << "ok   chalk breaks up the round tip and never adds to it\n";
+        }
+
         // Polygon: 3 sides, rotation 0 -> a corner straight up from the centre: (0.5, 0.5 - 0.25).
         auto* triangle = add("draw.polygon");
         set(triangle, "sides", std::int64_t { 3 });

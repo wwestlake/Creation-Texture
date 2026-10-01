@@ -1,9 +1,10 @@
-manifest "{\"name\":\"drawing\",\"version\":\"0.1.0\",\"description\":\"Painting a Drawing (paths) with a brush: round stamps along paths, nonzero polygon fill with anti-aliasing, and compositing a coverage mask over a canvas. 32-bit float linear RGBA, straight alpha.\",\"entryPoints\":[],\"requiredHostFunctions\":[{\"name\":\"dr_host_floor\"},{\"name\":\"dr_host_sqrt\"},{\"name\":\"dr_host_i64_to_f32\"},{\"name\":\"dr_host_f32_to_i64\"}],\"intendedApplications\":[\"creation-texture\"]}";
+manifest "{\"name\":\"drawing\",\"version\":\"0.1.0\",\"description\":\"Painting a Drawing (paths) with a brush: brush stamps (round, square, chalk, bristle, image tips), nonzero polygon fill with anti-aliasing, and compositing a coverage mask over a canvas. 32-bit float linear RGBA, straight alpha.\",\"entryPoints\":[],\"requiredHostFunctions\":[{\"name\":\"dr_host_floor\"},{\"name\":\"dr_host_sqrt\"},{\"name\":\"dr_host_i64_to_f32\"},{\"name\":\"dr_host_f32_to_i64\"},{\"name\":\"dr_host_sin\"},{\"name\":\"dr_host_cos\"},{\"name\":\"dr_host_hash\"}],\"intendedApplications\":[\"creation-texture\"]}";
 
 // Painting for Djehuti Texture's Image Graph (docs/REQUIREMENTS.md section 5: Drawing, Brush, Paint).
 //
 // A Paint works in two steps. First the drawing is turned into a coverage mask - one float per pixel, 0..1 - by
-// stamping the brush along its paths (dr_stroke) or filling its shapes (dr_fill). Stamps take the maximum, so a
+// laying brush stamps along its paths (dr_stamps; where the stamps go is worked out by the host) or filling its
+// shapes (dr_fill). Stamps take the maximum, so a
 // stroke never darkens where it crosses itself. Then the mask is laid over the canvas in the brush colour
 // (dr_composite).
 //
@@ -15,6 +16,9 @@ extern fn dr_host_floor(v: f32) -> f32;
 extern fn dr_host_sqrt(v: f32) -> f32;
 extern fn dr_host_i64_to_f32(v: i64) -> f32;
 extern fn dr_host_f32_to_i64(v: f32) -> i64;
+extern fn dr_host_sin(v: f32) -> f32;
+extern fn dr_host_cos(v: f32) -> f32;
+extern fn dr_host_hash(x: i64, y: i64, seed: i64) -> f32;
 
 // ---------------------------------------------------------------- helpers
 
@@ -47,86 +51,196 @@ fn floori(v: f32) -> i64 = { dr_host_f32_to_i64(dr_host_floor(v)) }
 
 // ---------------------------------------------------------------- stamping
 
-// One round stamp centred at (cx, cy), radius in pixels. Full coverage inside radius * hardness, falling to none
-// half a pixel past the radius (so a hard brush is still anti-aliased). Keeps the larger of old and new coverage.
-pub fn dr_stamp(mask: raw* f32, w: i64, h: i64, cx: f32, cy: f32, radius: f32, hardness: f32) -> i64 = {
+fn fabs(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    if (v < zero) { zero - v } else { v }
+}
+
+// Coverage at distance d from a tip's centre (or edge measure, for a square): full inside radius * hardness,
+// falling to none half a pixel past the radius, so a hard tip is still anti-aliased.
+fn ramp_cover(d: f32, radius: f32, hardness: f32) -> f32 = {
     let half: f32 = 0.5;
     let zero: f32 = 0.0;
-    let one: f32 = 1.0;
     let rOut: f32 = radius + half;
     let mut rIn: f32 = radius * clamp01(hardness);
     if (rIn > radius - half) { rIn = radius - half; };
     if (rIn < zero) { rIn = zero; };
-    let ramp: f32 = rOut - rIn;
-    let x0: i64 = imax(0, floori(cx - rOut));
-    let x1: i64 = imin(w - 1, floori(cx + rOut));
-    let y0: i64 = imax(0, floori(cy - rOut));
-    let y1: i64 = imin(h - 1, floori(cy + rOut));
-    let mut y: i64 = y0;
-    let mut x: i64 = 0;
-    let mut dx: f32 = 0.0;
-    let mut dy: f32 = 0.0;
-    let mut d: f32 = 0.0;
-    let mut cover: f32 = 0.0;
-    let mut index: i64 = 0;
-    while (y <= y1) {
-        dy = dr_host_i64_to_f32(y) + half - cy;
-        x = x0;
-        while (x <= x1) {
-            dx = dr_host_i64_to_f32(x) + half - cx;
-            d = dr_host_sqrt(dx * dx + dy * dy);
-            cover = clamp01((rOut - d) / ramp);
-            index = y * w + x;
-            if (cover > getf(mask, index)) { setf(mask, index, cover); };
-            x = x + 1;
-        };
-        y = y + 1;
-    };
-    1
+    clamp01((rOut - d) / (rOut - rIn))
 }
 
-// Stamps along a path: pts holds n points as x, y pairs (pixels). A stamp at the start, then one every `step`
-// pixels of path length, carrying the remainder across corners; closed adds the segment back to the start.
-pub fn dr_stroke(mask: raw* f32, w: i64, h: i64, pts: raw* f32, n: i64, closed: i64, radius: f32, hardness: f32, step: f32) -> i64 = {
-    let zero: f32 = 0.0;
-    let minStep: f32 = 0.25;
-    let mut spacing: f32 = step;
-    if (spacing < minStep) { spacing = minStep; };
-    if (n < 1) {
-        0
-    } else {
-        dr_stamp(mask, w, h, getf(pts, 0), getf(pts, 1), radius, hardness);
-        let mut segments: i64 = n - 1;
-        if (closed != 0) { segments = n; };
-        let mut s: i64 = 0;
-        let mut carry: f32 = 0.0;
-        let mut ax: f32 = 0.0;
-        let mut ay: f32 = 0.0;
-        let mut bx: f32 = 0.0;
-        let mut by: f32 = 0.0;
-        let mut len: f32 = 0.0;
-        let mut along: f32 = 0.0;
-        let mut b: i64 = 0;
-        while (s < segments) {
-            b = s + 1;
-            if (b == n) { b = 0; };
-            ax = getf(pts, s * 2);
-            ay = getf(pts, s * 2 + 1);
-            bx = getf(pts, b * 2);
-            by = getf(pts, b * 2 + 1);
-            len = dr_host_sqrt((bx - ax) * (bx - ax) + (by - ay) * (by - ay));
-            if (len > zero) {
-                along = spacing - carry;
-                while (along <= len) {
-                    dr_stamp(mask, w, h, ax + (bx - ax) * along / len, ay + (by - ay) * along / len, radius, hardness);
-                    along = along + spacing;
-                };
-                carry = len - (along - spacing);
-            };
-            s = s + 1;
+// Bristle tip: eleven thin bristles in a row across the stroke (the tip's v axis), each carrying its own amount
+// of paint and a few left dry, picked by the seed - so overlapping stamps leave streaks along the stroke.
+fn bristle_cover(u: f32, v: f32, radius: f32, hardness: f32, seed: i64) -> f32 = {
+    let dry: f32 = 0.12;
+    let spread: f32 = 0.9;
+    let size: f32 = 0.07;
+    let half: f32 = 0.5;
+    let two: f32 = 2.0;
+    let ten: f32 = 10.0;
+    let minLoad: f32 = 0.35;
+    let loadRange: f32 = 0.65;
+    let mut best: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut offset: f32 = 0.0;
+    let mut dv: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut bristleRadius: f32 = radius * size;
+    let minRadius: f32 = 0.6;
+    if (bristleRadius < minRadius) { bristleRadius = minRadius; };
+    while (i < 11) {
+        if (dr_host_hash(i, 7, seed) >= dry) {
+            offset = (dr_host_i64_to_f32(i) / ten - half) * two * radius * spread;
+            dv = v - offset;
+            c = ramp_cover(dr_host_sqrt(u * u + dv * dv), bristleRadius, hardness);
+            c = c * (minLoad + loadRange * dr_host_hash(i, 11, seed));
+            if (c > best) { best = c; };
         };
-        1
+        i = i + 1;
+    };
+    best
+}
+
+// Paper grain for chalk: smooth value noise fixed to the canvas, cells `scale` pixels across, 0..1.
+fn grain(x: i64, y: i64, scale: f32, seed: i64) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let three: f32 = 3.0;
+    let two: f32 = 2.0;
+    let gx: f32 = (dr_host_i64_to_f32(x) + half) / scale;
+    let gy: f32 = (dr_host_i64_to_f32(y) + half) / scale;
+    let fx: f32 = dr_host_floor(gx);
+    let fy: f32 = dr_host_floor(gy);
+    let ix: i64 = dr_host_f32_to_i64(fx);
+    let iy: i64 = dr_host_f32_to_i64(fy);
+    let tx0: f32 = gx - fx;
+    let ty0: f32 = gy - fy;
+    let tx: f32 = tx0 * tx0 * (three - two * tx0);
+    let ty: f32 = ty0 * ty0 * (three - two * ty0);
+    let a: f32 = dr_host_hash(ix, iy, seed);
+    let b: f32 = dr_host_hash(ix + 1, iy, seed);
+    let c: f32 = dr_host_hash(ix, iy + 1, seed);
+    let d: f32 = dr_host_hash(ix + 1, iy + 1, seed);
+    let top: f32 = a + (b - a) * tx;
+    let bottom: f32 = c + (d - c) * tx;
+    top + (bottom - top) * ty
+}
+
+// Image tip: the tip image stretched over the stamp's square; coverage is its luminance times its alpha, read
+// with bilinear filtering. Outside the square there is nothing.
+fn image_cover(tip: raw* f32, tw: i64, th: i64, u: f32, v: f32, radius: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let tu: f32 = (u / radius + one) * half;
+    let tv: f32 = (v / radius + one) * half;
+    if (tu < zero) { zero } else if (tu > one) { zero } else if (tv < zero) { zero } else if (tv > one) { zero } else {
+        let fx: f32 = tu * dr_host_i64_to_f32(tw) - half;
+        let fy: f32 = tv * dr_host_i64_to_f32(th) - half;
+        let x0f: f32 = dr_host_floor(fx);
+        let y0f: f32 = dr_host_floor(fy);
+        let ax: f32 = fx - x0f;
+        let ay: f32 = fy - y0f;
+        let x0: i64 = imin(tw - 1, imax(0, dr_host_f32_to_i64(x0f)));
+        let x1: i64 = imin(tw - 1, imax(0, dr_host_f32_to_i64(x0f) + 1));
+        let y0: i64 = imin(th - 1, imax(0, dr_host_f32_to_i64(y0f)));
+        let y1: i64 = imin(th - 1, imax(0, dr_host_f32_to_i64(y0f) + 1));
+        let a: f32 = tip_value(tip, y0 * tw + x0);
+        let b: f32 = tip_value(tip, y0 * tw + x1);
+        let c: f32 = tip_value(tip, y1 * tw + x0);
+        let d: f32 = tip_value(tip, y1 * tw + x1);
+        let top: f32 = a + (b - a) * ax;
+        let bottom: f32 = c + (d - c) * ax;
+        clamp01(top + (bottom - top) * ay)
     }
+}
+
+fn tip_value(tip: raw* f32, index: i64) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let o: i64 = index * 4;
+    (kr * getf(tip, o) + kg * getf(tip, o + 1) + kb * getf(tip, o + 2)) * getf(tip, o + 3)
+}
+
+// Lays a list of stamps into the coverage mask, keeping the larger coverage at each pixel. stamps holds `count`
+// stamps of five floats: centre x, centre y (pixels), radius (pixels), angle (radians; the tip's u axis), opacity.
+// tip: 0 round, 1 square, 2 chalk (round, broken up by a grain fixed to the canvas), 3 bristle, 4 image (tipImage,
+// tw x th RGBA). seed varies the chalk grain and which bristles are left out.
+pub fn dr_stamps(mask: raw* f32, w: i64, h: i64, stamps: raw* f32, count: i64, tip: i64, hardness: f32,
+                 tipImage: raw* f32, tw: i64, th: i64, seed: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let reachFactor: f32 = 1.5;
+    let grainScale: f32 = 2.5;
+    let grainPress: f32 = 0.95;
+    let grainDepth: f32 = 1.0;
+    let grainGain: f32 = 3.0;
+    let mut s: i64 = 0;
+    let mut cx: f32 = 0.0;
+    let mut cy: f32 = 0.0;
+    let mut radius: f32 = 0.0;
+    let mut angle: f32 = 0.0;
+    let mut opacity: f32 = 0.0;
+    let mut ca: f32 = 0.0;
+    let mut sa: f32 = 0.0;
+    let mut reach: f32 = 0.0;
+    let mut x0: i64 = 0;
+    let mut x1: i64 = 0;
+    let mut y0: i64 = 0;
+    let mut y1: i64 = 0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut dx: f32 = 0.0;
+    let mut dy: f32 = 0.0;
+    let mut u: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut cover: f32 = 0.0;
+    let mut index: i64 = 0;
+    while (s < count) {
+        cx = getf(stamps, s * 5);
+        cy = getf(stamps, s * 5 + 1);
+        radius = getf(stamps, s * 5 + 2);
+        angle = getf(stamps, s * 5 + 3);
+        opacity = getf(stamps, s * 5 + 4);
+        ca = dr_host_cos(angle);
+        sa = dr_host_sin(angle);
+        reach = radius * reachFactor + one;
+        x0 = imax(0, floori(cx - reach));
+        x1 = imin(w - 1, floori(cx + reach));
+        y0 = imax(0, floori(cy - reach));
+        y1 = imin(h - 1, floori(cy + reach));
+        y = y0;
+        while (y <= y1) {
+            dy = dr_host_i64_to_f32(y) + half - cy;
+            x = x0;
+            while (x <= x1) {
+                dx = dr_host_i64_to_f32(x) + half - cx;
+                u = dx * ca + dy * sa;
+                v = dy * ca - dx * sa;
+                if (tip == 1) {
+                    cover = ramp_cover(fmax(fabs(u), fabs(v)), radius, hardness);
+                } else if (tip == 3) {
+                    cover = bristle_cover(u, v, radius, hardness, seed);
+                } else if (tip == 4) {
+                    cover = image_cover(tipImage, tw, th, u, v, radius);
+                } else {
+                    cover = ramp_cover(dr_host_sqrt(u * u + v * v), radius, hardness);
+                    if (tip == 2) {
+                        // Chalk catches on the paper's high spots: paint gets through where the grain is below
+                        // how hard the stamp presses, so the edges break up most and the middle fills in.
+                        cover = fmin(cover, clamp01((cover * grainPress - grain(x, y, grainScale, seed) * grainDepth) * grainGain));
+                    };
+                };
+                cover = cover * opacity;
+                index = y * w + x;
+                if (cover > getf(mask, index)) { setf(mask, index, cover); };
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        s = s + 1;
+    };
+    1
 }
 
 // ---------------------------------------------------------------- filling
