@@ -507,6 +507,139 @@ int main()
         else
             std::cout << "ok   a triangle starts at its top corner\n";
 
+        // Shapes and modifiers (milestone 3). Angles are clockwise on screen, y down.
+        {
+            auto drawingOf = [&](ns::Node* n) { return evaluator.evaluateDrawing(graph, n->Id(), "drawing", error); };
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            auto at = [](const drawing::DrawingPtr& d, size_t path, size_t point, float x, float y) {
+                if (d == nullptr || path >= d->paths.size() || d->paths[path].points.empty())
+                    return false;
+                const auto& pts = d->paths[path].points;
+                const auto& p = point == SIZE_MAX ? pts.back() : pts[point];
+                return std::abs(p.x - x) < 1.0e-4f && std::abs(p.y - y) < 1.0e-4f;
+            };
+            auto lineFrom = [&](float x1, float y1, float x2, float y2) {
+                auto* n = add("draw.line");
+                set(n, "x1", x1); set(n, "y1", y1); set(n, "x2", x2); set(n, "y2", y2);
+                return n;
+            };
+            auto modify = [&](const char* type, ns::Node* input) {
+                auto* n = add(type);
+                connect(graph, input, "drawing", n, "drawing");
+                return n;
+            };
+
+            // Transform: a horizontal line through the centre turned 90 degrees about it runs top to bottom: (0.5, 0.1) first.
+            auto* turned = modify("draw.transform", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(turned, "rotation", 90.0f);
+            check("Transform turns 90 degrees clockwise", at(drawingOf(turned), 0, 0, 0.5f, 0.1f) && at(drawingOf(turned), 0, 1, 0.5f, 0.9f));
+
+            // Repeat Around: a spoke (0.5, 0.5) -> (0.7, 0.5), 4 copies: copy 1 ends at (0.5, 0.7), copy 2 at (0.3, 0.5).
+            auto* around = modify("draw.repeat.radial", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(around, "count", std::int64_t { 4 });
+            const auto spokes = drawingOf(around);
+            check("Repeat Around: 4 spokes, a quarter turn apart",
+                  spokes != nullptr && spokes->paths.size() == 4 && at(spokes, 1, 1, 0.5f, 0.7f) && at(spokes, 2, 1, 0.3f, 0.5f));
+
+            // Repeat in a Line: 3 copies 0.1 apart -> the third starts at x 0.7.
+            auto* row = modify("draw.repeat.linear", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(row, "count", std::int64_t { 3 });
+            const auto rowDrawing = drawingOf(row);
+            check("Repeat in a Line: 3 copies, the third 0.2 along", rowDrawing != nullptr && rowDrawing->paths.size() == 3 && at(rowDrawing, 2, 0, 0.7f, 0.5f));
+
+            // Repeat in a Grid: 2 columns x 3 rows, 0.25 apart -> 6 copies, the last moved (0.25, 0.5).
+            auto* grid = modify("draw.repeat.grid", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            set(grid, "columns", std::int64_t { 2 });
+            set(grid, "rows", std::int64_t { 3 });
+            const auto gridDrawing = drawingOf(grid);
+            check("Repeat in a Grid: 6 copies, the last at (0.75, 1.0)", gridDrawing != nullptr && gridDrawing->paths.size() == 6 && at(gridDrawing, 5, 0, 0.75f, 1.0f));
+
+            // Mirror left-right about x 0.5, keeping the original: the copy of (0.5..0.7) ends at x 0.3.
+            auto* mirror = modify("draw.mirror", lineFrom(0.5f, 0.5f, 0.7f, 0.5f));
+            const auto mirrorDrawing = drawingOf(mirror);
+            check("Mirror keeps the original and adds the flipped copy",
+                  mirrorDrawing != nullptr && mirrorDrawing->paths.size() == 2 && at(mirrorDrawing, 1, 1, 0.3f, 0.5f));
+
+            // Merge: two lines -> one drawing of two paths.
+            auto* merge = add("draw.merge");
+            connect(graph, lineFrom(0.0f, 0.0f, 1.0f, 1.0f), "drawing", merge, "a");
+            connect(graph, lineFrom(1.0f, 0.0f, 0.0f, 1.0f), "drawing", merge, "c");
+            check("Merge puts two drawings together", drawingOf(merge) != nullptr && drawingOf(merge)->paths.size() == 2);
+
+            // Scatter: 10 copies, every copy's centre inside the area; the same seed repeats, another changes it.
+            auto scatter = [&](std::int64_t seed) {
+                auto* n = modify("draw.scatter", lineFrom(0.45f, 0.5f, 0.55f, 0.5f));
+                set(n, "count", std::int64_t { 10 });
+                set(n, "x", 0.2f); set(n, "y", 0.2f); set(n, "width", 0.6f); set(n, "height", 0.6f);
+                set(n, "seed", seed);
+                return drawingOf(n);
+            };
+            const auto s1 = scatter(1), s1again = scatter(1), s2 = scatter(2);
+            bool inside = s1 != nullptr && s1->paths.size() == 10;
+            for (size_t i = 0; inside && i < s1->paths.size(); ++i)
+            {
+                drawing::Drawing one;
+                one.paths.push_back(s1->paths[i]);
+                const auto c = drawing::bounds(one).centre();
+                inside = c.x >= 0.2f - 1.0e-4f && c.x <= 0.8f + 1.0e-4f && c.y >= 0.2f - 1.0e-4f && c.y <= 0.8f + 1.0e-4f;
+            }
+            auto samePoints = [](const drawing::DrawingPtr& a, const drawing::DrawingPtr& b) {
+                if (a == nullptr || b == nullptr || a->paths.size() != b->paths.size())
+                    return false;
+                for (size_t i = 0; i < a->paths.size(); ++i)
+                    for (size_t k = 0; k < a->paths[i].points.size(); ++k)
+                        if (a->paths[i].points[k].x != b->paths[i].points[k].x || a->paths[i].points[k].y != b->paths[i].points[k].y)
+                            return false;
+                return true;
+            };
+            check("Scatter: 10 copies, centres inside the area", inside);
+            check("Scatter repeats with its seed and changes with another", samePoints(s1, s1again) && ! samePoints(s1, s2));
+
+            // Jitter 0.1: every point within 0.1 of where it was.
+            auto* jitter = modify("draw.jitter", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(jitter, "amount", 0.1f);
+            const auto jittered = drawingOf(jitter);
+            check("Jitter stays within its amount", jittered != nullptr && std::abs(jittered->paths[0].points[0].x - 0.1f) <= 0.1f
+                                                        && std::abs(jittered->paths[0].points[1].y - 0.5f) <= 0.1f
+                                                        && ! at(jittered, 0, 0, 0.1f, 0.5f));
+
+            // Wobble a line 0.1 -> 0.9 along y 0.5, amount 0.02, wavelength 0.1: points every 0.0125 -> 64 + the end = 65,
+            // only pushed sideways (y within 0.48..0.52), starting at x 0.1 and ending at x 0.9.
+            auto* wobble = modify("draw.wobble", lineFrom(0.1f, 0.5f, 0.9f, 0.5f));
+            set(wobble, "amount", 0.02f);
+            set(wobble, "wavelength", 0.1f);
+            const auto wobbled = drawingOf(wobble);
+            bool sideways = wobbled != nullptr && wobbled->paths.size() == 1 && wobbled->paths[0].points.size() == 65;
+            for (size_t i = 0; sideways && i < wobbled->paths[0].points.size(); ++i)
+                sideways = std::abs(wobbled->paths[0].points[i].y - 0.5f) <= 0.02f + 1.0e-5f;
+            check("Wobble: 65 points, pushed only sideways, within its amount",
+                  sideways && std::abs(wobbled->paths[0].points.front().x - 0.1f) < 1.0e-5f && std::abs(wobbled->paths[0].points.back().x - 0.9f) < 1.0e-5f);
+
+            // Star 5 points: 10 corners, the first straight up at (0.5, 0.5 - 0.3).
+            const auto starDrawing = drawingOf(add("draw.star"));
+            check("Star: 10 corners, a point straight up", starDrawing != nullptr && starDrawing->paths[0].points.size() == 10 && at(starDrawing, 0, 0, 0.5f, 0.2f));
+            // Arc from 0 through 90 degrees, radius 0.25: (0.75, 0.5) round to (0.5, 0.75).
+            auto* quarter = add("draw.arc");
+            set(quarter, "sweep", 90.0f);
+            check("Arc: a quarter from right to bottom", at(drawingOf(quarter), 0, 0, 0.75f, 0.5f) && at(drawingOf(quarter), 0, SIZE_MAX, 0.5f, 0.75f));
+            // Spiral 1 turn from the centre out to 0.2: ends at (0.7, 0.5).
+            auto* coil = add("draw.spiral");
+            set(coil, "outerRadius", 0.2f);
+            set(coil, "turns", 1.0f);
+            check("Spiral: from the centre to (0.7, 0.5)", at(drawingOf(coil), 0, 0, 0.5f, 0.5f) && at(drawingOf(coil), 0, SIZE_MAX, 0.7f, 0.5f));
+            // Curve: from (0.1, 0.7) to (0.9, 0.3) exactly.
+            auto* curve = add("draw.bezier");
+            check("Curve: starts and ends on its end points", at(drawingOf(curve), 0, 0, 0.1f, 0.7f) && at(drawingOf(curve), 0, SIZE_MAX, 0.9f, 0.3f));
+        }
+
         // Paint with nothing wired to draw reports it.
         auto* empty = add("draw.paint");
         juce::String paintError;

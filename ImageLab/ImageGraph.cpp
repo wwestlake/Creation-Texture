@@ -910,6 +910,118 @@ Library::Library()
                                     c.number("rotation", 0.0f));
         }));
 
+    definitions.push_back(shapeNode("draw.star", "Star", "A star with a point straight up at rotation 0.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("outerRadius", 0.3f), floatIn("innerRadius", 0.12f), intIn("points", 5),
+          floatIn("rotation", 0.0f) },
+        [](Context& c) {
+            return drawing::star({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("outerRadius", 0.3f), c.number("innerRadius", 0.12f),
+                                 juce::jlimit(2, 1000, c.integer("points", 5)), c.number("rotation", 0.0f));
+        }));
+    definitions.push_back(shapeNode("draw.arc", "Arc", "Part of a circle: from the start angle, through the sweep (degrees, clockwise, 0 pointing right).",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("radius", 0.25f), floatIn("start", 0.0f), floatIn("sweep", 180.0f) },
+        [](Context& c) {
+            return drawing::arc({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("radius", 0.25f), c.number("start", 0.0f), c.number("sweep", 180.0f));
+        }));
+    definitions.push_back(shapeNode("draw.bezier", "Curve", "A smooth curve from (x1, y1) to (x2, y2), pulled towards two control points.",
+        { floatIn("x1", 0.1f), floatIn("y1", 0.7f), floatIn("cx1", 0.3f), floatIn("cy1", 0.1f), floatIn("cx2", 0.7f), floatIn("cy2", 0.9f),
+          floatIn("x2", 0.9f), floatIn("y2", 0.3f) },
+        [](Context& c) {
+            return drawing::bezier({ c.number("x1", 0.1f), c.number("y1", 0.7f) }, { c.number("cx1", 0.3f), c.number("cy1", 0.1f) },
+                                   { c.number("cx2", 0.7f), c.number("cy2", 0.9f) }, { c.number("x2", 0.9f), c.number("y2", 0.3f) });
+        }));
+    definitions.push_back(shapeNode("draw.spiral", "Spiral", "A spiral out from the inner radius to the outer one, starting to the right.",
+        { floatIn("x", 0.5f), floatIn("y", 0.5f), floatIn("innerRadius", 0.0f), floatIn("outerRadius", 0.4f), floatIn("turns", 4.0f) },
+        [](Context& c) {
+            return drawing::spiral({ c.number("x", 0.5f), c.number("y", 0.5f) }, c.number("innerRadius", 0.0f), c.number("outerRadius", 0.4f),
+                                   c.number("turns", 4.0f));
+        }));
+
+    // Modifiers: a Drawing in, a new Drawing out.
+    auto modifierNode = [](std::string type, std::string name, std::string description, std::vector<ns::PinSignature> settings,
+                           std::function<drawing::Drawing(Context&, const drawing::Drawing&)> change) {
+        std::vector<ns::PinSignature> inputs { drawingIn("drawing") };
+        inputs.insert(inputs.end(), settings.begin(), settings.end());
+        return define(std::move(type), std::move(name), "Draw", std::move(description), std::move(inputs), { drawingOut("drawing") },
+            [change](Context& c, auto&, juce::String& error) {
+                auto wired = c.drawings.find("drawing");
+                if (wired == c.drawings.end() || wired->second == nullptr)
+                {
+                    error = "Needs a drawing wired in.";
+                    return false;
+                }
+                c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(change(c, *wired->second));
+                return true;
+            });
+    };
+    definitions.push_back(define("draw.merge", "Merge", "Draw", "Puts up to four drawings together into one.",
+        { drawingIn("a"), drawingIn("b"), drawingIn("c"), drawingIn("d") }, { drawingOut("drawing") },
+        [](Context& c, auto&, juce::String&) {
+            auto result = std::make_shared<drawing::Drawing>();
+            for (const char* pin : { "a", "b", "c", "d" })
+            {
+                auto wired = c.drawings.find(pin);
+                if (wired != c.drawings.end() && wired->second != nullptr)
+                    result->paths.insert(result->paths.end(), wired->second->paths.begin(), wired->second->paths.end());
+            }
+            c.drawingOutputs["drawing"] = result;
+            return true;
+        }));
+    definitions.push_back(modifierNode("draw.transform", "Transform",
+        "Scales and turns the drawing about the pivot (rotation in degrees, clockwise), then moves it.",
+        { floatIn("moveX", 0.0f), floatIn("moveY", 0.0f), floatIn("rotation", 0.0f), floatIn("scaleX", 1.0f), floatIn("scaleY", 1.0f),
+          floatIn("pivotX", 0.5f), floatIn("pivotY", 0.5f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::transformed(d, c.number("moveX", 0.0f), c.number("moveY", 0.0f), c.number("rotation", 0.0f), c.number("scaleX", 1.0f),
+                                        c.number("scaleY", 1.0f), { c.number("pivotX", 0.5f), c.number("pivotY", 0.5f) });
+        }));
+    definitions.push_back(modifierNode("draw.repeat.linear", "Repeat in a Line",
+        "Copies in a row: copy i is moved i x (dx, dy), turned i x rotateStep degrees and scaled scaleStep^i about its centre.",
+        { intIn("count", 5), floatIn("dx", 0.1f), floatIn("dy", 0.0f), floatIn("rotateStep", 0.0f), floatIn("scaleStep", 1.0f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatLinear(d, juce::jlimit(0, 10000, c.integer("count", 5)), c.number("dx", 0.1f), c.number("dy", 0.0f),
+                                         c.number("rotateStep", 0.0f), c.number("scaleStep", 1.0f));
+        }));
+    definitions.push_back(modifierNode("draw.repeat.radial", "Repeat Around",
+        "Copies turned around a centre, evenly through the sweep (degrees; 360 is all the way round).",
+        { intIn("count", 8), floatIn("centerX", 0.5f), floatIn("centerY", 0.5f), floatIn("sweep", 360.0f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatRadial(d, juce::jlimit(0, 10000, c.integer("count", 8)), { c.number("centerX", 0.5f), c.number("centerY", 0.5f) },
+                                         c.number("sweep", 360.0f));
+        }));
+    definitions.push_back(modifierNode("draw.repeat.grid", "Repeat in a Grid", "Copies in columns and rows, (dx, dy) apart.",
+        { intIn("columns", 4), intIn("rows", 4), floatIn("dx", 0.25f), floatIn("dy", 0.25f) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::repeatGrid(d, juce::jlimit(0, 1000, c.integer("columns", 4)), juce::jlimit(0, 1000, c.integer("rows", 4)),
+                                       c.number("dx", 0.25f), c.number("dy", 0.25f));
+        }));
+    definitions.push_back(modifierNode("draw.scatter", "Scatter",
+        "Copies placed at random in an area (x, y, width, height), each turned up to +- maxRotation degrees and scaled "
+        "between scaleMin and scaleMax. The seed picks the arrangement.",
+        { intIn("count", 50), floatIn("x", 0.0f), floatIn("y", 0.0f), floatIn("width", 1.0f), floatIn("height", 1.0f),
+          floatIn("maxRotation", 180.0f), floatIn("scaleMin", 0.5f), floatIn("scaleMax", 1.0f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) {
+            const float x = c.number("x", 0.0f), y = c.number("y", 0.0f);
+            return drawing::scattered(d, juce::jlimit(0, 100000, c.integer("count", 50)),
+                                      { x, y, x + c.number("width", 1.0f), y + c.number("height", 1.0f) }, c.number("maxRotation", 180.0f),
+                                      c.number("scaleMin", 0.5f), c.number("scaleMax", 1.0f), c.integer("seed", 1));
+        }));
+    definitions.push_back(modifierNode("draw.jitter", "Jitter", "Moves every point at random by up to the amount.",
+        { floatIn("amount", 0.01f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) { return drawing::jittered(d, c.number("amount", 0.01f), c.integer("seed", 1)); }));
+    definitions.push_back(modifierNode("draw.wobble", "Wobble",
+        "Makes lines look hand-drawn: pushes them sideways by up to the amount, with smooth noise that changes over the wavelength.",
+        { floatIn("amount", 0.01f), floatIn("wavelength", 0.1f), intIn("seed", 1) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::wobbled(d, c.number("amount", 0.01f), c.number("wavelength", 0.1f), c.integer("seed", 1));
+        }));
+    definitions.push_back(modifierNode("draw.mirror", "Mirror",
+        "A mirror image: Horizontal flips left to right about x = position, Vertical flips top to bottom about y = position. "
+        "Keep Original keeps the drawing as well.",
+        { enumIn("axis", "Axis", 0), floatIn("position", 0.5f), boolIn("keepOriginal", true) },
+        [](Context& c, const drawing::Drawing& d) {
+            return drawing::mirrored(d, c.integer("axis", 0) == 0, c.number("position", 0.5f), c.flag("keepOriginal", true));
+        }));
+
     definitions.push_back(define("draw.brush", "Brush", "Draw",
         "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "
         "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre. Angle is in degrees. "

@@ -76,8 +76,41 @@ struct Stamp
 std::vector<Stamp> placeStamps(const Path& path, const Brush& brush, int width, int height, int pathIndex);
 
 // Shapes. Closed shapes are polygons; curves are made of enough straight segments to look smooth at 4096 pixels.
+// Angles are degrees, clockwise on screen (y runs down), 0 pointing right - except where a shape says otherwise.
 Path line(Point a, Point b);
 Path rectangle(float x, float y, float width, float height);
 Path ellipse(Point centre, float radiusX, float radiusY, int segments = 128);
-Path polygon(Point centre, float radius, int sides, float rotationDegrees);
+Path polygon(Point centre, float radius, int sides, float rotationDegrees); // rotation 0: a corner straight up
+Path star(Point centre, float outerRadius, float innerRadius, int points, float rotationDegrees); // a point straight up
+Path arc(Point centre, float radius, float startDegrees, float sweepDegrees);
+Path bezier(Point start, Point control1, Point control2, Point end, int segments = 64);
+Path spiral(Point centre, float innerRadius, float outerRadius, float turns); // from inner, starting to the right
+
+// Modifiers: each makes a new Drawing from one. Positions are canvas fractions, as everywhere.
+struct Bounds
+{
+    float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+    Point centre() const { return { (left + right) * 0.5f, (top + bottom) * 0.5f }; }
+};
+Bounds bounds(const Drawing& drawing); // all zero for an empty drawing
+
+// Scale (about the pivot), then rotate (about the pivot), then move.
+Drawing transformed(const Drawing& drawing, float moveX, float moveY, float rotationDegrees, float scaleX, float scaleY, Point pivot);
+// count copies; copy i is moved i * (dx, dy), turned i * rotateStep and scaled scaleStep^i about the drawing's centre.
+Drawing repeatLinear(const Drawing& drawing, int count, float dx, float dy, float rotateStep, float scaleStep);
+// count copies turned evenly through sweepDegrees about a centre (360: all the way round).
+Drawing repeatRadial(const Drawing& drawing, int count, Point centre, float sweepDegrees);
+// columns x rows copies, (dx, dy) apart.
+Drawing repeatGrid(const Drawing& drawing, int columns, int rows, float dx, float dy);
+// count copies with their centres at random points in the area, each turned up to +-maxRotation and scaled
+// between scaleMin and scaleMax. Repeatable by seed.
+Drawing scattered(const Drawing& drawing, int count, Bounds area, float maxRotationDegrees, float scaleMin, float scaleMax, int seed);
+// Every point moved at random by up to `amount` in x and y.
+Drawing jittered(const Drawing& drawing, float amount, int seed);
+// Lines made hand-drawn: points every wavelength / 8 along each path, pushed sideways by up to `amount` with smooth
+// noise that changes over `wavelength`.
+Drawing wobbled(const Drawing& drawing, float amount, float wavelength, int seed);
+// A mirror image across a line: horizontal flips left-right about x = position, vertical flips top-bottom about
+// y = position. keepOriginal keeps the drawing and adds the mirror image.
+Drawing mirrored(const Drawing& drawing, bool horizontal, float position, bool keepOriginal);
 } // namespace drawing
