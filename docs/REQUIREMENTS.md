@@ -62,6 +62,15 @@ choice - so adjustments can be made later. A tool's output (an image, a texture 
 - Image Graph: the graph document (nodes, wires, symbols, settings) - File > Open Image Graph. The Layers and
   Draw views are views of it, so they need no document of their own.
 
+### One node system: the graph's type picks the nodes (decided 2026-10-01)
+
+Everything node-based in Texture is one node system (shared/NodeSystem/GRAPH_TYPES.md). A graph has a **type** -
+what it makes: **Image** or **Material** - and the type picks its node list, its engine and its preview. There is
+one **Graph** editor for both (File > New Image Graph / New Material, Open lists both). A graph has an interface
+(params and inputs in, outputs out), so a **graph can be used as a node** in another graph - the hierarchy that
+builds complexity in an organised way - and later across types (an image graph as a material's texture source).
+Whatever a graph makes shows in its own form: images as pictures, materials lit in 3D, drawings as lines.
+
 ### Work areas own the whole layout (decided 2026-09-27)
 
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own

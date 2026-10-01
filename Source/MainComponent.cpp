@@ -49,14 +49,6 @@ MainComponent::MainComponent()
 
     // Work areas are chosen from the Layout menu; each swaps in its own whole layout.
     using Zone = CreationDock::DockTargetZone;
-    materialsDock = std::make_unique<CreationDock::DockManager>(*this);
-    materialsDock->registerPanel("Nodes", "Nodes", std::make_unique<NonOwningPanelHost>(nodeGraphPanel.getPalette()), Zone::Left);
-    materialsDock->registerPanel("NodeGraph", "Node Graph", std::make_unique<NonOwningPanelHost>(nodeGraphPanel), Zone::CenterTab);
-    materialsDock->registerPanel("Viewer", "3D Preview", std::make_unique<NonOwningPanelHost>(viewerPanel), Zone::Right);
-    materialsDock->registerPanel("Properties", "Properties", std::make_unique<NonOwningPanelHost>(propertiesPanel), Zone::Right);
-    materialsDock->activatePanel("Viewer");
-    addChildComponent(materialsDock.get());
-
     imageLabDock = std::make_unique<CreationDock::DockManager>(*this);
     imageLabDock->registerPanel("Canvas", "Canvas", std::make_unique<NonOwningPanelHost>(imageLab.getCanvas()), Zone::CenterTab);
     imageLabDock->registerPanel("Layers", "Layers", std::make_unique<NonOwningPanelHost>(imageLab.getLayersPanel()), Zone::Right);
@@ -76,25 +68,26 @@ MainComponent::MainComponent()
         sharedHosts.push_back({ area, host.get() });
         return host;
     };
-    imageGraphDock = std::make_unique<CreationDock::DockManager>(*this);
-    imageGraphDock->registerPanel("GraphNodes", "Nodes", shared(WorkArea::imageGraph, imageGraph.getPalette()), Zone::Left);
-    imageGraphDock->registerPanel("GraphVariables", "Variables", shared(WorkArea::imageGraph, imageGraph.getVariablesPanel()), Zone::Left);
-    imageGraphDock->registerPanel("ImageGraph", "Image Graph", shared(WorkArea::imageGraph, imageGraph.getGraphView()), Zone::CenterTab);
-    imageGraphDock->registerPanel("GraphPreview", "2D Preview", std::make_unique<NonOwningPanelHost>(imageGraph.getPreview()), Zone::Right);
-    imageGraphDock->registerPanel("GraphProperties", "Properties", shared(WorkArea::imageGraph, imageGraph.getPropertiesPanel()), Zone::Right);
-    imageGraphDock->activatePanel("GraphPreview");
-    imageGraphDock->activatePanel("GraphNodes");
-    addChildComponent(imageGraphDock.get());
+    graphDock = std::make_unique<CreationDock::DockManager>(*this);
+    graphDock->registerPanel("GraphNodes", "Nodes", shared(WorkArea::graph, graphEditor.getPalette()), Zone::Left);
+    graphDock->registerPanel("GraphVariables", "Variables", shared(WorkArea::graph, graphEditor.getVariablesPanel()), Zone::Left);
+    graphDock->registerPanel("ImageGraph", "Image Graph", shared(WorkArea::graph, graphEditor.getGraphView()), Zone::CenterTab);
+    graphDock->registerPanel("GraphPreview", "2D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getPreview()), Zone::Right);
+    graphDock->registerPanel("GraphMaterialPreview", "3D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getMaterialPreview()), Zone::Right);
+    graphDock->registerPanel("GraphProperties", "Properties", shared(WorkArea::graph, graphEditor.getPropertiesPanel()), Zone::Right);
+    graphDock->activatePanel("GraphPreview");
+    graphDock->activatePanel("GraphNodes");
+    addChildComponent(graphDock.get());
 
     // Draw (requirements section 5): laid out like the other tools - the graph in the centre, the canvas as the
     // preview on the right with Properties, the script with Nodes and Variables on the left.
     drawDock = std::make_unique<CreationDock::DockManager>(*this);
-    drawDock->registerPanel("DrawScript", "Script", std::make_unique<NonOwningPanelHost>(imageGraph.getScriptPanel()), Zone::Left);
-    drawDock->registerPanel("DrawNodes", "Nodes", shared(WorkArea::draw, imageGraph.getPalette()), Zone::Left);
-    drawDock->registerPanel("DrawVariables", "Variables", shared(WorkArea::draw, imageGraph.getVariablesPanel()), Zone::Left);
-    drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, imageGraph.getGraphView()), Zone::CenterTab);
-    drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(imageGraph.getDrawCanvas()), Zone::Right);
-    drawDock->registerPanel("DrawProperties", "Properties", shared(WorkArea::draw, imageGraph.getPropertiesPanel()), Zone::Right);
+    drawDock->registerPanel("DrawScript", "Script", std::make_unique<NonOwningPanelHost>(graphEditor.getScriptPanel()), Zone::Left);
+    drawDock->registerPanel("DrawNodes", "Nodes", shared(WorkArea::draw, graphEditor.getPalette()), Zone::Left);
+    drawDock->registerPanel("DrawVariables", "Variables", shared(WorkArea::draw, graphEditor.getVariablesPanel()), Zone::Left);
+    drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, graphEditor.getGraphView()), Zone::CenterTab);
+    drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(graphEditor.getDrawCanvas()), Zone::Right);
+    drawDock->registerPanel("DrawProperties", "Properties", shared(WorkArea::draw, graphEditor.getPropertiesPanel()), Zone::Right);
     drawDock->activatePanel("DrawScript");
     drawDock->activatePanel("DrawCanvas");
     addChildComponent(drawDock.get());
@@ -104,37 +97,31 @@ MainComponent::MainComponent()
 
     setSize(1600, 1000);
 
-    nodeGraphPanel.setProjectSession(&projectSession);
-    nodeGraphPanel.onSaveRequested = [this]() { saveMaterial(); };
-
-    NodePropertiesPanel::Host propertiesHost;
-    propertiesHost.graph = &nodeGraphPanel.getGraph();
-    propertiesHost.registry = &nodeGraphPanel.getRegistry();
-    propertiesHost.projectImages = nodeGraphPanel.projectImageSource();
-    propertiesHost.onValueEdited = [this]() { nodeGraphPanel.applyPropertyEdit(); };
-    propertiesPanel.setHost(std::move(propertiesHost));
+    projectImages.setProjectSession(&projectSession);
 
     imageLab.setProjectSession(&projectSession);
-    imageLab.setImageSource(nodeGraphPanel.projectImageSource());
+    imageLab.setImageSource(projectImages.source());
     imageLab.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
 
     surfaceMap.setProjectSession(&projectSession);
-    surfaceMap.setImageSource(nodeGraphPanel.projectImageSource());
+    surfaceMap.setImageSource(projectImages.source());
     surfaceMap.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
 
-    imageGraph.setProjectSession(&projectSession);
-    imageGraph.setImageSource(nodeGraphPanel.projectImageSource());
-    imageGraph.onStatus = [this](const juce::String& text) { headerBar.setStatusText(text); };
-    nodeGraphPanel.onSelectionChanged = [this](ce::node_system::NodeId id) { propertiesPanel.showNode(id); };
-    nodeGraphPanel.onGraphStructureChanged = [this]() { propertiesPanel.refresh(); };
-    nodeGraphPanel.onGraphEdited = [this]() {
-        materialDocument.markEdited();
+    graphEditor.setProjectSession(&projectSession);
+    graphEditor.setImageSource(projectImages.source());
+    graphEditor.onStatus = [this](const juce::String& text) {
+        headerBar.setStatusText(text);
+        refreshTitle();
+    };
+    // A material shows on the 3D Preview, an image graph on the 2D Preview.
+    graphEditor.onTypeChanged = [this]() {
+        graphDock->activatePanel(graphEditor.isMaterial() ? "GraphMaterialPreview" : "GraphPreview");
+        menuItemsChanged();
         refreshTitle();
     };
 
     juce::String error;
     ensureProjectSessionActive(error);
-    nodeGraphPanel.addViewer(viewerPanel.getViewer());
     refreshTitle();
 }
 
@@ -142,10 +129,9 @@ MainComponent::~MainComponent()
 {
     saveLayouts();
     menuBar.reset();
-    materialsDock.reset();
     imageLabDock.reset();
     surfaceMapDock.reset();
-    imageGraphDock.reset();
+    graphDock.reset();
     drawDock.reset();
 }
 
@@ -159,8 +145,8 @@ void MainComponent::openProject(const juce::String& projectId)
         return;
     }
     
-    materialDocument.reset();
-    nodeGraphPanel.clearGraph();
+    projectImages.clear();
+    graphEditor.newGraph(image_graph::kImageDiagram);
     refreshTitle();
 }
 
@@ -174,10 +160,9 @@ void MainComponent::resized()
     auto bounds = getLocalBounds();
     headerBar.setBounds(bounds.removeFromTop(96));
     menuBar->setBounds(bounds.removeFromTop(juce::LookAndFeel::getDefaultLookAndFeel().getDefaultMenuBarHeight()));
-    materialsDock->setBounds(bounds);
     imageLabDock->setBounds(bounds);
     surfaceMapDock->setBounds(bounds);
-    imageGraphDock->setBounds(bounds);
+    graphDock->setBounds(bounds);
     drawDock->setBounds(bounds);
 }
 
@@ -185,7 +170,7 @@ juce::StringArray MainComponent::getMenuBarNames()
 {
     if (currentArea == WorkArea::imageLab)
         return { "File", "Edit", "Layer", "View", "Layout", "Help" };
-    if (currentArea == WorkArea::surfaceMap || currentArea == WorkArea::imageGraph || currentArea == WorkArea::draw)
+    if (currentArea == WorkArea::surfaceMap || currentArea == WorkArea::graph || currentArea == WorkArea::draw)
         return { "File", "View", "Layout", "Help" };
     return { "File", "View", "Layout", "Help" };
 }
@@ -197,19 +182,21 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
     const bool imageLabArea = currentArea == WorkArea::imageLab;
     const bool surfaceArea = currentArea == WorkArea::surfaceMap;
     const bool drawArea = currentArea == WorkArea::draw;
-    const bool graphArea = currentArea == WorkArea::imageGraph || drawArea; // Draw is a view of the Image Graph
+    const bool graphArea = currentArea == WorkArea::graph || drawArea; // Draw is a view of the graph being edited
+    const bool imageGraphOpen = ! graphEditor.isMaterial();
     auto& layers = imageLab.getDocument();
 
     if (menuName == "File" && graphArea)
     {
         menu.addItem(70, "New Image Graph");
-        menu.addItem(71, "Open Image Graph...", imageGraph.hasProject());
+        menu.addItem(69, "New Material");
+        menu.addItem(71, "Open...", graphEditor.hasProject());
         menu.addSeparator();
-        menu.addItem(72, "Save Image Graph", imageGraph.hasProject());
-        menu.addItem(73, "Save Image Graph As...", imageGraph.hasProject());
+        menu.addItem(72, "Save", graphEditor.hasProject());
+        menu.addItem(73, "Save As...", graphEditor.hasProject());
         menu.addSeparator();
-        menu.addItem(79, "Render Outputs", imageGraph.hasProject());
-        menu.addItem(74, "Save Previewed Output as Image...", imageGraph.canSaveOutput());
+        menu.addItem(79, "Render Outputs", graphEditor.hasProject() && imageGraphOpen);
+        menu.addItem(74, "Save Previewed Output as Image...", imageGraphOpen && graphEditor.canSaveOutput());
     }
     else if (menuName == "File" && surfaceArea)
     {
@@ -217,14 +204,6 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
         menu.addItem(7, "Open Surface Map...", surfaceMap.canOpen());
         menu.addSeparator();
         menu.addItem(6, "Save Surface Map...", surfaceMap.canSave());
-    }
-    else if (menuName == "File" && ! imageLabArea)
-    {
-        menu.addItem(1, "New Material");
-        menu.addItem(2, "Open Material...", project);
-        menu.addSeparator();
-        menu.addItem(3, "Save Material", project);
-        menu.addItem(4, "Save Material As...", project);
     }
     else if (menuName == "File")
     {
@@ -257,8 +236,9 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
         else if (graphArea)
         {
             menu.addItem(75, "Nodes");
-            menu.addItem(76, "Image Graph");
+            menu.addItem(76, "Graph");
             menu.addItem(77, "2D Preview");
+            menu.addItem(81, "3D Preview");
             menu.addItem(78, "Properties");
             menu.addItem(80, "Variables");
         }
@@ -274,20 +254,12 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
             menu.addItem(26, "Layers");
             menu.addItem(27, "History");
         }
-        else
-        {
-            menu.addItem(20, "Nodes");
-            menu.addItem(21, "Node Graph");
-            menu.addItem(22, "3D Preview");
-            menu.addItem(23, "Properties");
-        }
     }
     else if (menuName == "Layout")
     {
-        menu.addItem(50, "Materials", true, currentArea == WorkArea::materials);
         menu.addItem(51, "Image Lab", true, imageLabArea);
         menu.addItem(52, "Surface Map", true, surfaceArea);
-        menu.addItem(53, "Image Graph", true, currentArea == WorkArea::imageGraph);
+        menu.addItem(53, "Graph", true, currentArea == WorkArea::graph);
         menu.addItem(54, "Draw", true, drawArea);
         menu.addSeparator();
         menu.addItem(29, "Reset Layout");
@@ -304,16 +276,12 @@ void MainComponent::menuItemSelected(int menuItemID, int)
     auto& dock = dockFor(currentArea);
     switch (menuItemID)
     {
-        case 1: confirmDiscardingEdits([this]() { newMaterial(); }); break;
-        case 2: confirmDiscardingEdits([this]() { showOpenMaterialMenu(); }); break;
-        case 3: saveMaterial(); break;
-        case 4: saveMaterialAs(); break;
         case 5: imageLab.saveImage(); break;
         case 6: surfaceMap.saveSurfaceMap(); break;
         case 7: surfaceMap.openSurfaceMap(); break;
         case 8: surfaceMap.newSurfaceMap(); break;
         case 52: showWorkArea(WorkArea::surfaceMap); break;
-        case 53: showWorkArea(WorkArea::imageGraph); break;
+        case 53: showWorkArea(WorkArea::graph); break;
         case 54: showWorkArea(WorkArea::draw); break;
         case 90: dock.activatePanel("DrawCanvas"); break;
         case 91: dock.activatePanel("DrawScript"); break;
@@ -321,12 +289,14 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 93: dock.activatePanel("DrawVariables"); break;
         case 94: dock.activatePanel("DrawGraph"); break;
         case 95: dock.activatePanel("DrawProperties"); break;
-        case 70: imageGraph.newGraph(); break;
-        case 71: imageGraph.openGraph(); break;
-        case 72: imageGraph.saveGraph(); break;
-        case 73: imageGraph.saveGraphAs(); break;
-        case 74: imageGraph.saveOutputAsImage(); break;
-        case 79: imageGraph.renderOutputs(); break;
+        case 69: confirmDiscardingEdits([this]() { graphEditor.newGraph(ce::material::kMaterialDiagram); }); break;
+        case 70: confirmDiscardingEdits([this]() { graphEditor.newGraph(image_graph::kImageDiagram); }); break;
+        case 71: confirmDiscardingEdits([this]() { graphEditor.openGraph(); }); break;
+        case 81: dock.activatePanel("GraphMaterialPreview"); break;
+        case 72: graphEditor.saveGraph(); break;
+        case 73: graphEditor.saveGraphAs(); break;
+        case 74: graphEditor.saveOutputAsImage(); break;
+        case 79: graphEditor.renderOutputs(); break;
         case 75: dock.activatePanel("GraphNodes"); break;
         case 76: dock.activatePanel("ImageGraph"); break;
         case 77: dock.activatePanel("GraphPreview"); break;
@@ -337,10 +307,6 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 62: dock.activatePanel("SurfacePreview"); break;
         case 10: imageLab.undo(); break;
         case 11: imageLab.redo(); break;
-        case 20: dock.activatePanel("Nodes"); break;
-        case 21: dock.activatePanel("NodeGraph"); break;
-        case 22: dock.activatePanel("Viewer"); break;
-        case 23: dock.activatePanel("Properties"); break;
         case 25: dock.activatePanel("Canvas"); break;
         case 26: dock.activatePanel("Layers"); break;
         case 27: dock.activatePanel("History"); break;
@@ -349,7 +315,6 @@ void MainComponent::menuItemSelected(int menuItemID, int)
             if (auto* app = dynamic_cast<creation::ui::SuiteJUCEApplication*>(juce::JUCEApplication::getInstance()))
                 app->showAboutBox();
             break;
-        case 50: showWorkArea(WorkArea::materials); break;
         case 51: showWorkArea(WorkArea::imageLab); break;
         case 40: imageLab.addImageLayer(); break;
         case 41: imageLab.getDocument().duplicateActive(); break;
@@ -362,20 +327,19 @@ CreationDock::DockManager& MainComponent::dockFor(WorkArea area)
 {
     if (area == WorkArea::surfaceMap)
         return *surfaceMapDock;
-    if (area == WorkArea::imageGraph)
-        return *imageGraphDock;
+    if (area == WorkArea::graph)
+        return *graphDock;
     if (area == WorkArea::draw)
         return *drawDock;
-    return area == WorkArea::imageLab ? *imageLabDock : *materialsDock;
+    return *imageLabDock;
 }
 
 void MainComponent::showWorkArea(WorkArea area)
 {
     currentArea = area;
-    materialsDock->setVisible(area == WorkArea::materials);
     imageLabDock->setVisible(area == WorkArea::imageLab);
     surfaceMapDock->setVisible(area == WorkArea::surfaceMap);
-    imageGraphDock->setVisible(area == WorkArea::imageGraph);
+    graphDock->setVisible(area == WorkArea::graph);
     drawDock->setVisible(area == WorkArea::draw);
     for (auto& [hostArea, host] : sharedHosts)
         if (hostArea == area)
@@ -397,38 +361,33 @@ void MainComponent::loadLayouts()
     if (! stored.isObject())
         return;
 
-    if (stored["materials"].isObject())
-        materialsDock->applyLayout(stored["materials"]);
     if (stored["imageLab"].isObject())
         imageLabDock->applyLayout(stored["imageLab"]);
     if (stored["surfaceMap"].isObject())
         surfaceMapDock->applyLayout(stored["surfaceMap"]);
-    if (stored["imageGraph"].isObject())
-        imageGraphDock->applyLayout(stored["imageGraph"]);
+    if (stored["graph"].isObject())
+        graphDock->applyLayout(stored["graph"]);
     if (stored["draw"].isObject())
         drawDock->applyLayout(stored["draw"]);
     const auto area = stored["workArea"].toString();
     currentArea = area == "imageLab" ? WorkArea::imageLab
                 : area == "surfaceMap" ? WorkArea::surfaceMap
-                : area == "imageGraph" ? WorkArea::imageGraph
                 : area == "draw" ? WorkArea::draw
-                : WorkArea::materials;
+                : WorkArea::graph;
 }
 
 void MainComponent::saveLayouts()
 {
-    if (materialsDock == nullptr || imageLabDock == nullptr || surfaceMapDock == nullptr || imageGraphDock == nullptr || drawDock == nullptr)
+    if (imageLabDock == nullptr || surfaceMapDock == nullptr || graphDock == nullptr || drawDock == nullptr)
         return;
 
     auto* state = new juce::DynamicObject();
     state->setProperty("workArea", currentArea == WorkArea::imageLab ? "imageLab"
                                      : currentArea == WorkArea::surfaceMap ? "surfaceMap"
-                                     : currentArea == WorkArea::imageGraph ? "imageGraph"
-                                     : currentArea == WorkArea::draw ? "draw" : "materials");
-    state->setProperty("materials", materialsDock->captureLayout());
+                                     : currentArea == WorkArea::draw ? "draw" : "graph");
     state->setProperty("imageLab", imageLabDock->captureLayout());
     state->setProperty("surfaceMap", surfaceMapDock->captureLayout());
-    state->setProperty("imageGraph", imageGraphDock->captureLayout());
+    state->setProperty("graph", graphDock->captureLayout());
     state->setProperty("draw", drawDock->captureLayout());
     juce::String error;
     creation::services::SuiteVfsJsonStore::saveJson(layoutStorePath, juce::var(state), error);
@@ -463,98 +422,15 @@ bool MainComponent::ensureProjectSessionActive(juce::String& errorMessage)
     return false;
 }
 
-void MainComponent::newMaterial()
-{
-    materialDocument.reset();
-    nodeGraphPanel.clearGraph();
-    refreshTitle();
-}
-
-void MainComponent::showOpenMaterialMenu()
-{
-    const auto materials = materialDocument.listMaterials();
-
-    juce::PopupMenu menu;
-    menu.addSectionHeader("Materials in this project");
-    if (materials.isEmpty())
-        menu.addItem(1, "No saved materials yet", false);
-    for (int i = 0; i < materials.size(); ++i)
-        menu.addItem(100 + i, materials.getReference(i).displayName);
-
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(menuBar.get()),
-                       [this, materials](int result) {
-                           const int index = result - 100;
-                           if (index >= 0 && index < materials.size())
-                               openMaterial(materials.getReference(index));
-                       });
-}
-
-void MainComponent::openMaterial(const creation::assets::AssetDescriptor& asset)
-{
-    juce::String graphText, error;
-    if (! materialDocument.open(asset, graphText, error) || ! nodeGraphPanel.loadGraphText(graphText, error))
-    {
-        headerBar.setStatusText("Could not open material: " + error);
-        materialDocument.reset();
-        refreshTitle();
-        return;
-    }
-
-    headerBar.setStatusText("Opened " + asset.displayName + ".");
-    refreshTitle();
-}
-
-void MainComponent::saveMaterial()
-{
-    if (! materialDocument.hasName())
-    {
-        saveMaterialAs();
-        return;
-    }
-
-    juce::String error;
-    if (materialDocument.save(nodeGraphPanel.getGraphText(), error))
-        headerBar.setStatusText("Saved " + materialDocument.getName() + ".");
-    else
-        headerBar.setStatusText("Could not save material: " + error);
-    refreshTitle();
-}
-
-void MainComponent::saveMaterialAs()
-{
-    if (! projectSession.isValid())
-    {
-        headerBar.setStatusText("No project is open. Open or create a project first.");
-        return;
-    }
-
-    auto* prompt = new juce::AlertWindow("Save Material", "Name this material:", juce::MessageBoxIconType::NoIcon, this);
-    prompt->addTextEditor("name", materialDocument.getName());
-    prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
-    prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
-    prompt->enterModalState(true, juce::ModalCallbackFunction::create([this, prompt](int result) {
-        if (result != 1)
-            return;
-
-        juce::String error;
-        const auto name = prompt->getTextEditorContents("name");
-        if (materialDocument.saveAs(name, nodeGraphPanel.getGraphText(), error))
-            headerBar.setStatusText("Saved " + materialDocument.getName() + ".");
-        else
-            headerBar.setStatusText("Could not save material: " + error);
-        refreshTitle();
-    }), true);
-}
-
 void MainComponent::confirmDiscardingEdits(std::function<void()> proceed)
 {
-    if (! materialDocument.hasUnsavedEdits())
+    if (! graphEditor.hasUnsavedEdits())
     {
         proceed();
         return;
     }
 
-    const auto materialName = materialDocument.hasName() ? materialDocument.getName() : juce::String("This material");
+    const auto materialName = graphEditor.getTitle().trimCharactersAtEnd(" *");
     juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
                                        "Unsaved changes",
                                        materialName + " has changes that are not saved. Discard them?",
@@ -569,5 +445,5 @@ void MainComponent::refreshTitle()
 {
     const auto projectName = projectSession.isValid() ? projectSession.getManifest().projectName
                                                       : juce::String("No project open");
-    headerBar.setProjectLabel("Project: " + projectName + "  |  " + materialDocument.getTitle());
+    headerBar.setProjectLabel("Project: " + projectName + "  |  " + graphEditor.getTitle());
 }

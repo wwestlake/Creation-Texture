@@ -1,9 +1,10 @@
-#include "ImageGraphPanel.h"
+#include "GraphWorkspace.h"
 
 #include <TextureSet.h>
 #include <creation/assets/ProjectAssetService.h>
 #include <creation/assets/ProjectManifest.h>
 #include <node_system/frgraph_serialization.h>
+#include <creation/material/material_compiler.h>
 
 namespace ns = ce::node_system;
 
@@ -86,7 +87,7 @@ juce::String slugFor(const juce::String& name)
 //==============================================================================
 // Evaluates on a background thread from a copy of the graph (serialised text - node ids round-trip exactly).
 // Only the latest request matters.
-class ImageGraphWorkspace::Worker final : public juce::Thread, public juce::ChangeBroadcaster
+class GraphWorkspace::Worker final : public juce::Thread, public juce::ChangeBroadcaster
 {
 public:
     struct Result
@@ -266,7 +267,7 @@ private:
 //==============================================================================
 // The chosen node's chosen output, large: fit to the panel over a checkerboard. Pin keeps showing that node while
 // other nodes are selected.
-class ImageGraphWorkspace::PreviewPanel final : public juce::Component
+class GraphWorkspace::PreviewPanel final : public juce::Component
 {
 public:
     std::function<void()> onTargetChanged;
@@ -355,13 +356,15 @@ namespace
 {
 ns::NodeTypeRegistry makeRegistry(const image_graph::Library& library)
 {
+    // One registry for every kind of graph; each graph's type picks the nodes that belong in it (GRAPH_TYPES.md).
     ns::NodeTypeRegistry registry;
     library.registerTypes(registry);
+    ce::material::RegisterMaterialNodes(registry);
     return registry;
 }
 }
 
-ImageGraphWorkspace::ImageGraphWorkspace()
+GraphWorkspace::GraphWorkspace()
     : registry(makeRegistry(library)),
       palette(registry),
       preview(std::make_unique<PreviewPanel>()),
@@ -380,6 +383,8 @@ ImageGraphWorkspace::ImageGraphWorkspace()
         const auto* node = graph.FindNode(id);
         if (node == nullptr || node->Outputs().empty())
             return 0.0f;
+        if (node->TypeName() == "material.texture.sample2d")
+            return thumbnailHeight; // shows the image it samples
         const auto type = node->Outputs().front().type.dataType;
         return type == ns::DataType::Texture || type == ns::DataType::Drawing ? thumbnailHeight : 0.0f;
     };
@@ -396,6 +401,11 @@ ImageGraphWorkspace::ImageGraphWorkspace()
             return;
         }
         auto thumb = thumbnails.find(id);
+        if (thumb == thumbnails.end() && images.thumbnail)
+            if (const auto* node = graph.FindNode(id); node != nullptr && node->TypeName() == "material.texture.sample2d")
+                for (const auto& pin : node->Inputs())
+                    if (const auto* path = std::get_if<std::string>(&pin.defaultValue); pin.name == "texture" && path != nullptr && ! path->empty())
+                        thumb = thumbnails.emplace(id, images.thumbnail(juce::String(*path))).first;
         if (thumb != thumbnails.end() && thumb->second.isValid())
         {
             const auto fitted = juce::RectanglePlacement(juce::RectanglePlacement::centred)
@@ -413,6 +423,10 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     properties.setHost(std::move(host));
 
     preview->onTargetChanged = [this]() { requestEvaluation(); };
+
+    // A material graph recompiles on edits; its preview can ask for it, and save.
+    materialPreview.getViewer()->onCompileRequested = [this]() { compileMaterial(); };
+    materialPreview.getViewer()->onSaveRequested = [this]() { saveGraph(); };
 
     // Params, constants and variables (shared/NodeSystem/SYMBOLS.md): drag one onto the graph for a Get node.
     // The Draw view's script editor writes into the selected Draw Script node.
@@ -435,20 +449,20 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     worker->addChangeListener(this);
 }
 
-ImageGraphWorkspace::~ImageGraphWorkspace()
+GraphWorkspace::~GraphWorkspace()
 {
     worker->removeChangeListener(this);
     worker.reset();
 }
 
-juce::Component& ImageGraphWorkspace::getPreview() noexcept { return *preview; }
+juce::Component& GraphWorkspace::getPreview() noexcept { return *preview; }
 
-void ImageGraphWorkspace::setProjectSession(creation::assets::ProjectSession* session)
+void GraphWorkspace::setProjectSession(creation::assets::ProjectSession* session)
 {
     projectSession = session;
 }
 
-void ImageGraphWorkspace::setImageSource(project_images::Source source)
+void GraphWorkspace::setImageSource(project_images::Source source)
 {
     images = std::move(source);
     auto host = NodePropertiesPanel::Host {};
@@ -460,18 +474,18 @@ void ImageGraphWorkspace::setImageSource(project_images::Source source)
     properties.setHost(std::move(host));
 }
 
-void ImageGraphWorkspace::status(const juce::String& text)
+void GraphWorkspace::status(const juce::String& text)
 {
     if (onStatus)
         onStatus(text);
 }
 
-juce::String ImageGraphWorkspace::getTitle() const
+juce::String GraphWorkspace::getTitle() const
 {
-    return (graphName.isNotEmpty() ? graphName : juce::String("Untitled image graph")) + (edited ? " *" : "");
+    return (graphName.isNotEmpty() ? graphName : juce::String(isMaterial() ? "Untitled material" : "Untitled image graph")) + (edited ? " *" : "");
 }
 
-void ImageGraphWorkspace::graphEdited()
+void GraphWorkspace::graphEdited()
 {
     edited = true;
     graphView.repaint();
@@ -492,7 +506,7 @@ void ImageGraphWorkspace::graphEdited()
     requestEvaluation();
 }
 
-std::string ImageGraphWorkspace::scriptText(ns::NodeId id) const
+std::string GraphWorkspace::scriptText(ns::NodeId id) const
 {
     if (const auto* node = graph.FindNode(id))
         for (const auto& pin : node->Inputs())
@@ -502,7 +516,7 @@ std::string ImageGraphWorkspace::scriptText(ns::NodeId id) const
     return {};
 }
 
-void ImageGraphWorkspace::forgetDrawTargets()
+void GraphWorkspace::forgetDrawTargets()
 {
     overlayNode = 0;
     scriptNode = 0;
@@ -511,7 +525,7 @@ void ImageGraphWorkspace::forgetDrawTargets()
     scriptPanel.showScript({}, {});
 }
 
-void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
+void GraphWorkspace::selectionChanged(ns::NodeId id)
 {
     selectedNode = id;
     properties.showNode(id);
@@ -569,12 +583,17 @@ void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
     requestEvaluation();
 }
 
-void ImageGraphWorkspace::requestEvaluation()
+void GraphWorkspace::requestEvaluation()
 {
+    if (isMaterial())
+    {
+        compileMaterial(); // a material is compiled, not evaluated
+        return;
+    }
     worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode);
 }
 
-void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
+void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
 {
     Worker::Result result;
     if (! worker->takeResult(result))
@@ -609,8 +628,36 @@ void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
     }
 }
 
+// A material graph becomes a shader for the 3D Preview; its texture samples read the project's images.
+void GraphWorkspace::compileMaterial()
+{
+    auto* viewer = materialPreview.getViewer();
+    const auto result = ce::material::CompileMaterialGraph(graph, registry);
+    if (! result.ok)
+    {
+        juce::StringArray problems;
+        for (const auto& error : result.errors)
+            problems.add(juce::String(error));
+        viewer->setGraphProblem("The material cannot be previewed yet: " + problems.joinIntoString(" "));
+        return;
+    }
+    viewer->setGraphProblem({});
+    auto snapshot = std::make_shared<TextureFrameSnapshot>();
+    snapshot->generatedGlsl = result.source.declarations + "\n" + result.source.evaluateFunction;
+    for (const auto& texture : result.source.textures)
+    {
+        TextureFrameImageSlot slot;
+        slot.uniformName = texture.uniformName;
+        if (images.image)
+            slot.image = images.image(juce::String(texture.path));
+        snapshot->imageSlots.push_back(slot);
+    }
+    snapshot->debugColour = juce::Colour(0xff121212);
+    viewer->setSnapshot(snapshot);
+}
+
 // Node-specific editors in Properties.
-std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& node, const ns::Pin& pin, int& height)
+std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, const ns::Pin& pin, int& height)
 {
     const auto type = node.TypeName();
 
@@ -713,7 +760,7 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     }
 
     // Image inputs other than Load Image's own are wired in, not picked.
-    if (pin.type.dataType == ns::DataType::Texture && type != "image.load")
+    if (! isMaterial() && pin.type.dataType == ns::DataType::Texture && type != "image.load")
     {
         auto label = std::make_unique<juce::Label>();
         const bool sizeOnly = type == "image.noise" || type == "image.cells" || type == "image.checker" || type == "image.gradient";
@@ -725,7 +772,7 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     return nullptr;
 }
 
-image_graph::Host::LoadedGraph ImageGraphWorkspace::readProjectGraph(const juce::String& path) const
+image_graph::Host::LoadedGraph GraphWorkspace::readProjectGraph(const juce::String& path) const
 {
     juce::MemoryBlock bytes;
     if (! hasProject() || ! projectSession->readEntry(path, bytes))
@@ -733,14 +780,14 @@ image_graph::Host::LoadedGraph ImageGraphWorkspace::readProjectGraph(const juce:
     return image_graph::readGraphDocument(bytes.toString());
 }
 
-juce::String ImageGraphWorkspace::ownGraphPath() const
+juce::String GraphWorkspace::ownGraphPath() const
 {
     return graphName.isEmpty() ? juce::String()
                                : juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(graphName) + ".imggraph.json";
 }
 
 // Every Graph node's pins follow the graph it uses as it is saved now (it may have changed since).
-void ImageGraphWorkspace::syncGraphNodes()
+void GraphWorkspace::syncGraphNodes()
 {
     for (const auto& [id, node] : graph.Nodes())
     {
@@ -755,7 +802,7 @@ void ImageGraphWorkspace::syncGraphNodes()
     }
 }
 
-void ImageGraphWorkspace::chooseGraphFor(ns::NodeId id)
+void GraphWorkspace::chooseGraphFor(ns::NodeId id)
 {
     if (! hasProject())
     {
@@ -802,7 +849,7 @@ void ImageGraphWorkspace::chooseGraphFor(ns::NodeId id)
     options.launchAsync();
 }
 
-void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
+void GraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
 {
     if (! hasProject())
     {
@@ -856,23 +903,46 @@ void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
 
 //==============================================================================
 // Documents: the graph saves as a JSON document that reopens it exactly.
-void ImageGraphWorkspace::newGraph()
+void GraphWorkspace::newGraph(const std::string& diagramType)
 {
-    graph = ns::Graph("Image Graph", ns::GraphTarget::Dataflow);
-    graph.SetDiagramType(image_graph::kImageDiagram);
-    graphView.GraphReplaced();
-    graphName.clear();
+    const bool material = diagramType == ce::material::kMaterialDiagram;
+    ns::Graph fresh(material ? "Material" : "Image Graph", material ? ns::GraphTarget::Material : ns::GraphTarget::Dataflow);
+    fresh.SetDiagramType(diagramType);
+    // A new material starts with its Material Output in place - a material without one does not compile.
+    if (material)
+        if (auto* output = ns::AddRegisteredNode(fresh, registry, "material.surface.output"))
+            output->SetEditorPosition(400.0f, 150.0f);
+    adoptGraph(std::move(fresh), {});
+    status(material ? "New material." : "New image graph.");
+}
+
+void GraphWorkspace::adoptGraph(ns::Graph newGraph, const juce::String& name)
+{
+    const bool material = newGraph.DiagramType() == ce::material::kMaterialDiagram;
+    graph = std::move(newGraph);
+    graph.SetTarget(material ? ns::GraphTarget::Material : ns::GraphTarget::Dataflow);
+    graphName = name;
     edited = false;
+    palette.SetDiagramType(graph.DiagramType());
+    // Material Variables become shader uniforms or literals: numbers and colours.
+    symbols.setAllowedTypes(material ? std::vector<ns::DataType> { ns::DataType::Float, ns::DataType::Color }
+                                     : std::vector<ns::DataType> { ns::DataType::Float, ns::DataType::Int, ns::DataType::Bool,
+                                                                   ns::DataType::Color, ns::DataType::String });
+    if (! material)
+        syncGraphNodes(); // graphs it uses may have changed since it was saved
+    graphView.GraphReplaced();
     thumbnails.clear();
     errors.clear();
     preview->showNode(0, {}, {});
     properties.showNode(0);
     symbols.refresh();
     forgetDrawTargets();
-    status("New image graph.");
+    if (onTypeChanged)
+        onTypeChanged();
+    requestEvaluation();
 }
 
-void ImageGraphWorkspace::writeGraph(const juce::String& name)
+void GraphWorkspace::writeGraph(const juce::String& name)
 {
     auto* doc = new juce::DynamicObject();
     doc->setProperty("format", documentFormat);
@@ -906,7 +976,34 @@ void ImageGraphWorkspace::writeGraph(const juce::String& name)
     status("Saved image graph " + name + ".");
 }
 
-void ImageGraphWorkspace::saveGraph()
+// A material saves as a material asset - its graph as .frgraph text - the form other apps read.
+void GraphWorkspace::writeMaterial(const juce::String& name)
+{
+    const auto text = juce::String(ns::SerializeGraph(graph));
+    creation::assets::ProjectAssetService::ImportOptions options;
+    options.kind = creation::assets::AssetKind::material;
+    options.displayName = name;
+    options.logicalPath = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(name) + ".frgraph";
+    options.mediaType = "application/x-creation-node-graph";
+    options.sourceApp = "Djehuti Texture";
+    options.sourceTool = "Material Graph";
+    options.description = "Material node graph.";
+
+    creation::assets::AssetDescriptor saved;
+    juce::String error;
+    if (! creation::assets::ProjectAssetService::saveGeneratedAsset(*projectSession, juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8()),
+                                                                    options, saved, error)
+        || ! projectSession->commit(error))
+    {
+        status("Could not save the material: " + error);
+        return;
+    }
+    graphName = name;
+    edited = false;
+    status("Saved material " + name + ".");
+}
+
+void GraphWorkspace::saveGraph()
 {
     if (! hasProject())
     {
@@ -915,29 +1012,37 @@ void ImageGraphWorkspace::saveGraph()
     }
     if (graphName.isEmpty())
         saveGraphAs();
+    else if (isMaterial())
+        writeMaterial(graphName);
     else
         writeGraph(graphName);
 }
 
-void ImageGraphWorkspace::saveGraphAs()
+void GraphWorkspace::saveGraphAs()
 {
     if (! hasProject())
     {
         status("Open a project first.");
         return;
     }
-    auto* prompt = new juce::AlertWindow("Save Image Graph", "Name this image graph:", juce::MessageBoxIconType::NoIcon, &graphView);
+    auto* prompt = new juce::AlertWindow(isMaterial() ? "Save Material" : "Save Image Graph",
+                                         isMaterial() ? "Name this material:" : "Name this image graph:", juce::MessageBoxIconType::NoIcon, &graphView);
     prompt->addTextEditor("name", graphName);
     prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
     prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     prompt->enterModalState(true, juce::ModalCallbackFunction::create([this, prompt](int result) {
         const auto name = prompt->getTextEditorContents("name").trim();
         if (result == 1 && name.isNotEmpty())
-            writeGraph(name);
+        {
+            if (isMaterial())
+                writeMaterial(name);
+            else
+                writeGraph(name);
+        }
     }), true);
 }
 
-void ImageGraphWorkspace::openGraph()
+void GraphWorkspace::openGraph()
 {
     if (! hasProject())
     {
@@ -945,48 +1050,58 @@ void ImageGraphWorkspace::openGraph()
         return;
     }
     project_images::Source graphs;
-    graphs.noun = "image graph";
+    graphs.noun = "graph";
     graphs.list = [this]() {
         juce::Array<project_images::Entry> entries;
         for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+        {
             if (asset.logicalPath.endsWith(".imggraph.json"))
-                entries.add({ asset.displayName, asset.logicalPath });
+                entries.add({ asset.displayName + "  (image graph)", asset.logicalPath });
+            else if (asset.kind == creation::assets::AssetKind::material && asset.logicalPath.endsWith(".frgraph"))
+                entries.add({ asset.displayName + "  (material)", asset.logicalPath });
+        }
         return entries;
     };
 
     juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Open Image Graph";
+    options.dialogTitle = "Open Graph";
     options.content.setOwned(new ProjectImagePicker(graphs, {}, [this](const juce::String& path) {
         juce::MemoryBlock bytes;
         if (path.isEmpty() || ! projectSession->readEntry(path, bytes))
             return;
-        const auto doc = juce::JSON::parse(bytes.toString());
-        if (doc["format"].toString() != documentFormat)
+        juce::String name;
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath == path)
+                name = asset.displayName;
+
+        if (path.endsWith(".frgraph"))
         {
-            status(path + " is not an image graph.");
+            // A material asset: its graph as .frgraph text.
+            std::string parseError;
+            auto loaded = ns::DeserializeGraph(bytes.toString().toStdString(), parseError);
+            if (loaded == nullptr)
+            {
+                status("Could not read the material: " + juce::String(parseError));
+                return;
+            }
+            loaded->SetDiagramType(ce::material::kMaterialDiagram); // a material, whether or not the file says so
+            adoptGraph(std::move(*loaded), name);
+            status("Opened material " + name + ".");
+            return;
+        }
+        const auto doc = juce::JSON::parse(bytes.toString());
+        const auto loaded = image_graph::readGraphDocument(bytes.toString());
+        if (loaded.graph == nullptr)
+        {
+            status("Could not read the graph: " + loaded.error);
             return;
         }
         std::string parseError;
-        auto loaded = ns::DeserializeGraph(doc["graph"].toString().toStdString(), parseError);
-        if (loaded == nullptr)
-        {
-            status("Could not read the graph: " + juce::String(parseError));
+        auto editable = ns::DeserializeGraph(loaded.text, parseError); // graphs are not copied: read the text again
+        if (editable == nullptr)
             return;
-        }
-        graph = std::move(*loaded);
-        graph.SetTarget(ns::GraphTarget::Dataflow);
-        graph.SetDiagramType(image_graph::kImageDiagram); // an image graph, whether or not the file says so
-        graphName = doc["name"].toString();
-        syncGraphNodes(); // graphs it uses may have changed since it was saved
-        graphView.GraphReplaced();
-        edited = false;
-        thumbnails.clear();
-        errors.clear();
-        preview->showNode(0, {}, {});
-        properties.showNode(0);
-        symbols.refresh();
-        forgetDrawTargets();
-        requestEvaluation();
+        editable->SetDiagramType(image_graph::kImageDiagram);
+        adoptGraph(std::move(*editable), doc["name"].toString());
         status("Opened image graph " + graphName + ".");
     }));
     options.componentToCentreAround = graphView.getTopLevelComponent();
@@ -997,13 +1112,13 @@ void ImageGraphWorkspace::openGraph()
     options.launchAsync();
 }
 
-bool ImageGraphWorkspace::canSaveOutput() const noexcept
+bool GraphWorkspace::canSaveOutput() const noexcept
 {
     return hasProject() && lastPreview != nullptr;
 }
 
 // Saves the previewed output as a PNG image asset in the project.
-void ImageGraphWorkspace::saveOutputAsImage()
+void GraphWorkspace::saveOutputAsImage()
 {
     if (! canSaveOutput())
     {
@@ -1052,7 +1167,7 @@ void ImageGraphWorkspace::saveOutputAsImage()
 //==============================================================================
 // Render Outputs: evaluates every Output node on its own thread (with a progress window), encodes them, then
 // saves each on the message thread.
-class ImageGraphWorkspace::RenderJob final : public juce::ThreadWithProgressWindow
+class GraphWorkspace::RenderJob final : public juce::ThreadWithProgressWindow
 {
 public:
     struct Rendered
@@ -1147,7 +1262,7 @@ private:
     juce::String error;
 };
 
-void ImageGraphWorkspace::renderOutputs()
+void GraphWorkspace::renderOutputs()
 {
     if (! hasProject())
     {
