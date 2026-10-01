@@ -6,6 +6,7 @@
 #include "DrawScript.h"
 
 #include <creation/frust/PluginRuntime.h>
+#include <node_system/frgraph_serialization.h>
 
 #include <algorithm>
 #include <cmath>
@@ -895,6 +896,27 @@ Library::Library()
         }));
 
     // --- Output --- File > Render Outputs saves each Output node's image as a project image named by `name`.
+    {
+        auto input = define("image.input", "Graph Input", "Output",
+            "An image this graph takes in when another graph uses it as a node (a Graph node): the image wired into the Graph "
+            "node's input called `name`. On its own, the graph uses the image wired or chosen here instead.",
+            { textIn("name"), imageIn("image") }, { imageOut("image") },
+            [needInput](Context& c, auto& out, juce::String& error) {
+                auto given = c.host.graphInputs.find(c.text("name").replaceCharacter(' ', '_').toStdString());
+                if (given != c.host.graphInputs.end() && given->second != nullptr)
+                {
+                    out["image"] = given->second;
+                    return true;
+                }
+                auto own = needInput(c, "image", error);
+                if (own == nullptr) return false;
+                out["image"] = own;
+                return true;
+            });
+        input.descriptor.graphPort = ns::GraphPort::input;
+        input.readsGraphInputs = true;
+        definitions.push_back(std::move(input));
+    }
     definitions.push_back(define("image.output", "Output", "Output",
         "A result of this graph. File > Render Outputs saves it as a project image called `name` (colour as 8-bit PNG, data such as "
         "height as 16-bit grey). Rendering again under the same name makes a new version.",
@@ -905,6 +927,7 @@ Library::Library()
             out["image"] = input;
             return true;
         }));
+    definitions.back().descriptor.graphPort = ns::GraphPort::output; // an output of the graph when it is used as a node
 
     // --- Draw --- (section 5) shapes make a Drawing; Brush says how it is painted; Paint makes the image.
     // Positions are 0..1 across the canvas, (0, 0) top-left.
@@ -1353,6 +1376,7 @@ void Library::registerTypes(ns::NodeTypeRegistry& registry) const
     for (const auto& d : definitions)
         registry.Register(d.descriptor);
     ns::RegisterSymbolGetNodes(registry); // params / constants / variables (shared/NodeSystem/SYMBOLS.md)
+    ns::RegisterGraphNode(registry, { kImageDiagram }); // another image graph used as a node (GRAPH_TYPES.md)
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -1365,8 +1389,36 @@ const Definition* Library::find(const std::string& typeName) const
 
 //==============================================================================
 Evaluator::Evaluator(const Library& lib, Host h)
-    : library(lib), host(std::move(h)), routines(std::make_unique<Routines>()), surfaceMaps(std::make_unique<surface_maps::Engine>())
+    : library(lib), host(std::move(h)), routines(std::make_shared<Routines>()), surfaceMaps(std::make_shared<surface_maps::Engine>())
 {
+}
+
+Evaluator::Evaluator(const Library& lib, Host h, std::shared_ptr<Routines> sharedRoutines, std::shared_ptr<surface_maps::Engine> sharedMaps)
+    : library(lib), host(std::move(h)), routines(std::move(sharedRoutines)), surfaceMaps(std::move(sharedMaps))
+{
+}
+
+Host::LoadedGraph readGraphDocument(const juce::String& json)
+{
+    Host::LoadedGraph result;
+    const auto doc = juce::JSON::parse(json);
+    if (doc["format"].toString() != kGraphDocumentFormat)
+    {
+        result.error = "not an image graph";
+        return result;
+    }
+    result.text = doc["graph"].toString().toStdString();
+    std::string parseError;
+    auto graph = ns::DeserializeGraph(result.text, parseError);
+    if (graph == nullptr)
+    {
+        result.error = juce::String(parseError);
+        return result;
+    }
+    graph->SetTarget(ns::GraphTarget::Dataflow);
+    graph->SetDiagramType(kImageDiagram);
+    result.graph = std::shared_ptr<const ns::Graph>(std::move(graph));
+    return result;
 }
 
 Evaluator::~Evaluator() = default;
@@ -1405,6 +1457,77 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
         return nullptr;
     }
     return found->second;
+}
+
+bool Evaluator::evaluateGraphNode(const ns::Node& node, const Host::LoadedGraph& usedGraph, Context& context,
+                                  std::map<std::string, ImagePtr>& outputs, juce::String& error)
+{
+    if (host.depth >= 16)
+    {
+        error = "graphs use each other too deeply - does a graph use itself?";
+        return false;
+    }
+    const auto path = ns::GraphNodePath(node);
+    auto& entry = used[path];
+    if (entry.evaluator == nullptr || entry.text != usedGraph.text)
+    {
+        Host child;
+        child.loadImage = host.loadImage;
+        child.loadGraph = host.loadGraph;
+        child.depth = host.depth + 1;
+        entry.evaluator.reset(new Evaluator(library, std::move(child), routines, surfaceMaps));
+        entry.text = usedGraph.text;
+    }
+    auto& childHost = entry.evaluator->host;
+    childHost.paramOverrides.clear();
+    childHost.graphInputs.clear();
+    childHost.graphInputKeys.clear();
+    for (const auto& pin : node.Inputs())
+    {
+        if (pin.name == ns::kGraphPathPin)
+            continue;
+        if (pin.type.dataType == ns::DataType::Texture)
+        {
+            auto image = context.inputs.find(pin.name);
+            if (image != context.inputs.end() && image->second != nullptr)
+            {
+                childHost.graphInputs[pin.name] = image->second;
+                // A computed image is never changed in place, so its address names it.
+                childHost.graphInputKeys[pin.name] = std::to_string(reinterpret_cast<std::uintptr_t>(image->second.get()));
+            }
+        }
+        else if (const auto* symbol = usedGraph.graph->FindSymbol(pin.name); symbol != nullptr && symbol->kind == ns::SymbolKind::Param)
+        {
+            if (const auto* value = context.setting(pin.name); value != nullptr && ! std::holds_alternative<std::monostate>(*value))
+                childHost.paramOverrides[pin.name] = *value;
+        }
+    }
+
+    for (const auto& wanted : context.wantedOutputs)
+    {
+        const ns::Node* outputNode = nullptr;
+        for (const auto& [id, candidate] : usedGraph.graph->Nodes())
+        {
+            const auto* descriptor = library.find(candidate->TypeName());
+            if (descriptor != nullptr && descriptor->descriptor.graphPort == ns::GraphPort::output
+                && ns::GraphPortName(*candidate, ns::GraphPort::output) == wanted)
+                outputNode = candidate.get();
+        }
+        if (outputNode == nullptr || outputNode->Outputs().empty())
+        {
+            error = "the graph has no output called " + juce::String(wanted) + " any more.";
+            return false;
+        }
+        juce::String inner;
+        auto image = entry.evaluator->evaluate(*usedGraph.graph, outputNode->Id(), outputNode->Outputs().front().name, inner);
+        if (image == nullptr)
+        {
+            error = juce::String(path) + ": " + inner;
+            return false;
+        }
+        outputs[wanted] = image;
+    }
+    return true;
 }
 
 drawing::DrawingPtr Evaluator::evaluateDrawing(const ns::Graph& graph, ns::NodeId node, const std::string& output, juce::String& error)
@@ -1487,8 +1610,9 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         return true;
     }
 
-    const auto* definition = library.find(node->TypeName());
-    if (definition == nullptr)
+    const bool graphNode = ns::IsGraphNode(*node);
+    const auto* definition = graphNode ? nullptr : library.find(node->TypeName());
+    if (! graphNode && definition == nullptr)
     {
         error = "Unknown node type " + juce::String(node->TypeName()) + ".";
         return false;
@@ -1498,9 +1622,35 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     Context context { *node, host, *routines, *surfaceMaps, {}, {}, {}, {} };
     context.graph = &graph;
     std::string signature = node->TypeName();
-    if (definition->readsVariables)
+    if (definition != nullptr && definition->readsVariables)
         for (const auto& [name, value] : context.numericVariables())
             signature += "|$" + name + "=" + std::to_string(value);
+    if (definition != nullptr && definition->readsGraphInputs)
+        for (const auto& [name, key] : host.graphInputKeys)
+            signature += "|@" + name + "=" + key;
+    // A Graph node depends on the graph it uses, too.
+    Host::LoadedGraph usedGraph;
+    if (graphNode)
+    {
+        const auto path = ns::GraphNodePath(*node);
+        if (path.empty())
+        {
+            error = "A Graph node needs a graph - choose one in its Properties.";
+            return false;
+        }
+        if (! host.loadGraph)
+        {
+            error = "Graph nodes cannot be used here.";
+            return false;
+        }
+        usedGraph = host.loadGraph(juce::String(path));
+        if (usedGraph.graph == nullptr)
+        {
+            error = "The graph " + juce::String(path) + " cannot be read" + (usedGraph.error.isNotEmpty() ? ": " + usedGraph.error : juce::String(".")) ;
+            return false;
+        }
+        signature += "|graph=" + std::to_string(std::hash<std::string> {}(usedGraph.text));
+    }
     for (const auto& pin : node->Inputs())
     {
         const ns::Connection* wire = nullptr;
@@ -1511,6 +1661,10 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         if (wire == nullptr)
         {
             signature += "|" + pin.name + "=" + valueText(pin.defaultValue);
+            // A Graph node's image input may name a project image instead of being wired.
+            if (graphNode && pin.type.dataType == ns::DataType::Texture && host.loadImage)
+                if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty())
+                    context.inputs[pin.name] = host.loadImage(juce::String(*path));
             continue;
         }
 
@@ -1551,9 +1705,11 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     context.wantedOutputs.assign(needed.begin(), needed.end());
     std::map<std::string, ImagePtr> outputs;
     juce::String nodeError;
-    if (! definition->evaluate(context, outputs, nodeError))
+    const bool evaluated = graphNode ? evaluateGraphNode(*node, usedGraph, context, outputs, nodeError)
+                                     : definition->evaluate(context, outputs, nodeError);
+    if (! evaluated)
     {
-        error = juce::String(definition->descriptor.displayName) + ": " + nodeError;
+        error = (graphNode ? juce::String("Graph") : juce::String(definition->descriptor.displayName)) + ": " + nodeError;
         cached = {};
         return false;
     }

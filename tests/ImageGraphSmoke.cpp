@@ -5,6 +5,7 @@
 
 #include <ImageGraph.h>
 #include <DrawScript.h>
+#include <node_system/frgraph_serialization.h>
 
 #include <cmath>
 #include <iostream>
@@ -810,6 +811,96 @@ int main()
         }
         else
             std::cout << "ok   Paint without a drawing says so\n";
+    }
+
+    // Graphs as nodes (shared/NodeSystem/GRAPH_TYPES.md phase 2): an image graph used inside another.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        // The used graph: Graph Input "src" -> Invert -> Output "inverted"; and a param "shade" (colour, default red) ->
+        // Create Image 2 x 2 -> Output "swatch".
+        ns::Graph inner("Inner", ns::GraphTarget::Dataflow);
+        inner.SetDiagramType(image_graph::kImageDiagram);
+        inner.AddSymbol({ "shade", "Shade", ns::SymbolKind::Param, ns::DataType::Color, ns::Vec3Default { 1.0f, 0.0f, 0.0f }, "public", false, "" });
+        auto innerAdd = [&](const char* type) { return ns::AddRegisteredNode(inner, registry, type); };
+        auto* src = innerAdd("image.input");
+        set(src, "name", std::string("src"));
+        auto* flip = innerAdd("image.invert");
+        connect(inner, src, "image", flip, "image");
+        auto* inverted = innerAdd("image.output");
+        set(inverted, "name", std::string("inverted"));
+        connect(inner, flip, "image", inverted, "image");
+        auto* swatchImage = innerAdd("image.create");
+        set(swatchImage, "width", std::int64_t { 2 });
+        set(swatchImage, "height", std::int64_t { 2 });
+        const auto* shade = inner.FindSymbol("shade");
+        connect(inner, ns::AddSymbolGetNode(inner, registry, *shade), "value", swatchImage, "color");
+        auto* swatch = innerAdd("image.output");
+        set(swatch, "name", std::string("swatch"));
+        connect(inner, swatchImage, "image", swatch, "image");
+
+        std::map<std::string, std::string> saved { { "Assets/inner.imggraph.json", ns::SerializeGraph(inner) } };
+        evaluator.getHost().loadGraph = [&saved](const juce::String& path) {
+            image_graph::Host::LoadedGraph loaded;
+            auto found = saved.find(path.toStdString());
+            if (found == saved.end())
+                return loaded;
+            std::string parseError;
+            loaded.text = found->second;
+            loaded.graph = std::shared_ptr<const ns::Graph>(ns::DeserializeGraph(found->second, parseError));
+            return loaded;
+        };
+
+        // The interface: inputs shade (param) and src (Graph Input), outputs inverted and swatch.
+        const auto face = ns::InterfaceOf(inner, registry);
+        check("Graph interface: shade and src in, inverted and swatch out",
+              face.inputs.size() == 2 && face.inputs[0].name == "shade" && face.inputs[1].name == "src" && face.outputs.size() == 2
+                  && face.outputs[0].name == "inverted" && face.outputs[1].name == "swatch");
+
+        // The using graph: Create (0.2, 0.4, 0.6) -> Graph node's src -> inverted = (0.8, 0.6, 0.4).
+        auto* used = add(ns::kGraphNodeType);
+        set(used, "graph", std::string("Assets/inner.imggraph.json"));
+        ns::SyncGraphNodePins(graph, used->Id(), face);
+        auto* colour = add("image.create");
+        set(colour, "width", std::int64_t { 2 });
+        set(colour, "height", std::int64_t { 2 });
+        set(colour, "color", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        connect(graph, colour, "image", used, "src");
+        expectPixel("A used graph's output: the wired image inverted", evaluator.evaluate(graph, used->Id(), "inverted", error), 0, 0, { 0.8f, 0.6f, 0.4f });
+        // Its param: the Graph node's shade input starts at the param's default (red), then set to green.
+        expectPixel("A used graph's param at its default", evaluator.evaluate(graph, used->Id(), "swatch", error), 1, 1, { 1.0f, 0.0f, 0.0f });
+        set(used, "shade", ns::Vec3Default { 0.0f, 1.0f, 0.0f });
+        expectPixel("A used graph's param set on the Graph node", evaluator.evaluate(graph, used->Id(), "swatch", error), 1, 1, { 0.0f, 1.0f, 0.0f });
+
+        // Editing the used graph changes the result: its Invert replaced by a straight wire -> (0.2, 0.4, 0.6).
+        inner.RemoveNode(flip->Id());
+        connect(inner, src, "image", inverted, "image");
+        saved["Assets/inner.imggraph.json"] = ns::SerializeGraph(inner);
+        expectPixel("An edited used graph is picked up", evaluator.evaluate(graph, used->Id(), "inverted", error), 0, 0, { 0.2f, 0.4f, 0.6f });
+
+        // A graph that uses itself stops with an error instead of running forever.
+        ns::Graph loop("Loop", ns::GraphTarget::Dataflow);
+        auto* self = ns::AddRegisteredNode(loop, registry, ns::kGraphNodeType);
+        set(self, "graph", std::string("Assets/loop.imggraph.json"));
+        auto* loopOut = ns::AddRegisteredNode(loop, registry, "image.output");
+        set(loopOut, "name", std::string("out"));
+        saved["Assets/loop.imggraph.json"] = ns::SerializeGraph(loop);
+        ns::SyncGraphNodePins(loop, self->Id(), ns::InterfaceOf(loop, registry));
+        connect(loop, self, "out", loopOut, "image");
+        saved["Assets/loop.imggraph.json"] = ns::SerializeGraph(loop);
+        auto* outer = add(ns::kGraphNodeType);
+        set(outer, "graph", std::string("Assets/loop.imggraph.json"));
+        ns::SyncGraphNodePins(graph, outer->Id(), ns::InterfaceOf(loop, registry));
+        juce::String loopError;
+        check("A graph that uses itself stops with an error",
+              evaluator.evaluate(graph, outer->Id(), "out", loopError) == nullptr && loopError.contains("too deeply"));
     }
 
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a

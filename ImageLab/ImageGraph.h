@@ -4,6 +4,7 @@
 #include <node_system/graph.h>
 #include <node_system/type_registry.h>
 #include <node_system/symbol_nodes.h>
+#include <node_system/graph_nodes.h>
 
 #include "SurfaceMaps.h"
 #include "Drawing.h"
@@ -40,7 +41,27 @@ struct Host
     // Values for the graph's params, by symbol id, set from outside (an Automation, the LLM). They win over the
     // param's own default (shared/NodeSystem/SYMBOLS.md).
     std::map<std::string, ce::node_system::PinDefaultValue> paramOverrides;
+
+    // A saved image graph by project path, for Graph nodes (shared/NodeSystem/GRAPH_TYPES.md): the graph, and its
+    // saved text so a change to it is noticed. A null graph if it cannot be read.
+    struct LoadedGraph
+    {
+        std::shared_ptr<const ce::node_system::Graph> graph;
+        std::string text;
+        juce::String error;
+    };
+    std::function<LoadedGraph(const juce::String& logicalPath)> loadGraph;
+
+    // Set when this evaluator runs a graph that a Graph node uses: the images wired into the Graph node, by the name of
+    // the Graph Input node they feed, and keys that change when those images do.
+    std::map<std::string, ImagePtr> graphInputs;
+    std::map<std::string, std::string> graphInputKeys;
+    int depth = 0; // graphs used inside graphs, to stop a graph that uses itself
 };
+
+// An image graph document (.imggraph.json): its format name, and reading one into a graph typed as an image graph.
+inline constexpr const char* kGraphDocumentFormat = "djehuti-image-graph";
+Host::LoadedGraph readGraphDocument(const juce::String& json);
 
 class Routines; // the compiled FRust routines
 
@@ -85,6 +106,8 @@ struct Definition
     std::function<bool(Context&, std::map<std::string, ImagePtr>& outputs, juce::String& error)> evaluate;
     // Reads the graph's Variables, so its cached result depends on them too.
     bool readsVariables = false;
+    // Reads the images a Graph node passes in (Graph Input), so its cached result depends on them too.
+    bool readsGraphInputs = false;
 };
 
 // The Image Graph's graph type (shared/NodeSystem/GRAPH_TYPES.md): every node in this library belongs in it.
@@ -110,6 +133,8 @@ class Evaluator final
 public:
     Evaluator(const Library& library, Host host);
     ~Evaluator();
+    Evaluator(const Evaluator&) = delete;
+    Evaluator& operator=(const Evaluator&) = delete;
 
     bool isReady() const noexcept;
     juce::String getError() const;
@@ -139,12 +164,25 @@ private:
 
     bool evaluateNode(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::vector<std::string>& wanted,
                       std::string& signatureOut, juce::String& error, int depth);
+    // A Graph node: runs the graph it uses, with its params and Graph Inputs set from the node's inputs.
+    bool evaluateGraphNode(const ce::node_system::Node& node, const Host::LoadedGraph& used, Context& context,
+                           std::map<std::string, ImagePtr>& outputs, juce::String& error);
+
+    // An evaluator for a graph used by a Graph node, sharing the compiled FRust (compiling it again would take seconds).
+    Evaluator(const Library& library, Host host, std::shared_ptr<Routines> routines, std::shared_ptr<surface_maps::Engine> surfaceMaps);
+
+    struct Used
+    {
+        std::string text;
+        std::unique_ptr<Evaluator> evaluator;
+    };
 
     const Library& library;
     Host host;
-    std::unique_ptr<Routines> routines;
-    std::unique_ptr<surface_maps::Engine> surfaceMaps;
+    std::shared_ptr<Routines> routines;
+    std::shared_ptr<surface_maps::Engine> surfaceMaps;
     std::map<ce::node_system::NodeId, Cached> cache;
+    std::map<std::string, Used> used; // by path
 };
 
 // Display helpers.

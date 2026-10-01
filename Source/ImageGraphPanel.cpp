@@ -156,6 +156,13 @@ public:
             {
                 image_graph::Host host;
                 host.loadImage = [this](const juce::String& path) { return loadProjectImage(path); };
+                host.loadGraph = [this](const juce::String& path) {
+                    juce::MemoryBlock bytes;
+                    auto* session = projectSession();
+                    if (session == nullptr || ! session->isValid() || ! session->readEntry(path, bytes))
+                        return image_graph::Host::LoadedGraph {};
+                    return image_graph::readGraphDocument(bytes.toString());
+                };
                 evaluator = std::make_unique<image_graph::Evaluator>(library, host);
             }
 
@@ -682,6 +689,19 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     }
 
     // Surface Map: load settings from a saved surface map.
+    // A Graph node: which saved image graph it uses.
+    if (ns::IsGraphNode(node) && pin.name == ns::kGraphPathPin)
+    {
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String();
+        auto button = std::make_unique<juce::TextButton>(current.isNotEmpty()
+                                                             ? "Uses " + current.fromLastOccurrenceOf("/", false, false).upToFirstOccurrenceOf(".imggraph", false, false)
+                                                             : juce::String("Choose the graph it uses..."));
+        button->setTooltip("Its params and Graph Inputs become this node's inputs, its Outputs this node's outputs.");
+        button->onClick = [this, id = node.Id()]() { chooseGraphFor(id); };
+        height = 28;
+        return button;
+    }
+
     if (type == "image.surfacemap" && pin.name == "surfaceMap")
     {
         const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String();
@@ -703,6 +723,83 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
         return label;
     }
     return nullptr;
+}
+
+image_graph::Host::LoadedGraph ImageGraphWorkspace::readProjectGraph(const juce::String& path) const
+{
+    juce::MemoryBlock bytes;
+    if (! hasProject() || ! projectSession->readEntry(path, bytes))
+        return {};
+    return image_graph::readGraphDocument(bytes.toString());
+}
+
+juce::String ImageGraphWorkspace::ownGraphPath() const
+{
+    return graphName.isEmpty() ? juce::String()
+                               : juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(graphName) + ".imggraph.json";
+}
+
+// Every Graph node's pins follow the graph it uses as it is saved now (it may have changed since).
+void ImageGraphWorkspace::syncGraphNodes()
+{
+    for (const auto& [id, node] : graph.Nodes())
+    {
+        if (! ns::IsGraphNode(*node))
+            continue;
+        const auto path = ns::GraphNodePath(*node);
+        if (path.empty())
+            continue;
+        const auto used = readProjectGraph(juce::String(path));
+        if (used.graph != nullptr)
+            ns::SyncGraphNodePins(graph, id, ns::InterfaceOf(*used.graph, registry));
+    }
+}
+
+void ImageGraphWorkspace::chooseGraphFor(ns::NodeId id)
+{
+    if (! hasProject())
+    {
+        status("Open a project first.");
+        return;
+    }
+    project_images::Source graphs;
+    graphs.noun = "image graph";
+    graphs.list = [this]() {
+        juce::Array<project_images::Entry> entries;
+        const auto own = ownGraphPath();
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath.endsWith(".imggraph.json") && asset.logicalPath != own) // a graph cannot use itself
+                entries.add({ asset.displayName, asset.logicalPath });
+        return entries;
+    };
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "The graph this node uses";
+    options.content.setOwned(new ProjectImagePicker(graphs, {}, [this, id](const juce::String& path) {
+        auto* node = graph.FindNode(id);
+        if (node == nullptr || path.isEmpty())
+            return;
+        const auto used = readProjectGraph(path);
+        if (used.graph == nullptr)
+        {
+            status("Could not read " + path + (used.error.isNotEmpty() ? ": " + used.error : juce::String()));
+            return;
+        }
+        for (const auto& pin : node->Inputs())
+            if (pin.name == ns::kGraphPathPin)
+                node->FindPin(pin.id)->defaultValue = path.toStdString();
+        ns::SyncGraphNodePins(graph, id, ns::InterfaceOf(*used.graph, registry));
+        graphView.repaint();
+        properties.refresh();
+        graphEdited();
+        status("This node now uses " + path.fromLastOccurrenceOf("/", false, false) + ".");
+    }));
+    options.componentToCentreAround = graphView.getTopLevelComponent();
+    options.dialogBackgroundColour = juce::Colour(0xff161a1f);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = true;
+    options.launchAsync();
 }
 
 void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
@@ -879,8 +976,9 @@ void ImageGraphWorkspace::openGraph()
         graph = std::move(*loaded);
         graph.SetTarget(ns::GraphTarget::Dataflow);
         graph.SetDiagramType(image_graph::kImageDiagram); // an image graph, whether or not the file says so
-        graphView.GraphReplaced();
         graphName = doc["name"].toString();
+        syncGraphNodes(); // graphs it uses may have changed since it was saved
+        graphView.GraphReplaced();
         edited = false;
         thumbnails.clear();
         errors.clear();
@@ -977,6 +1075,12 @@ public:
             if (! project.readEntry(path, bytes))
                 return nullptr;
             return image_graph::fromDisplayImage(juce::ImageFileFormat::loadFrom(bytes.getData(), bytes.getSize()));
+        };
+        host.loadGraph = [this](const juce::String& path) {
+            juce::MemoryBlock bytes;
+            if (! project.readEntry(path, bytes))
+                return image_graph::Host::LoadedGraph {};
+            return image_graph::readGraphDocument(bytes.toString());
         };
         image_graph::Evaluator evaluator(library, host);
         std::string parseError;

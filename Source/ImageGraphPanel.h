@@ -58,6 +58,11 @@ private:
     std::string scriptText(ce::node_system::NodeId id) const;
     std::unique_ptr<juce::Component> customEditor(ce::node_system::Node& node, const ce::node_system::Pin& pin, int& height);
     void chooseSurfaceMapFor(ce::node_system::NodeId node);
+    // Graph nodes (shared/NodeSystem/GRAPH_TYPES.md): choose the graph one uses, and bring their pins up to date.
+    void chooseGraphFor(ce::node_system::NodeId node);
+    image_graph::Host::LoadedGraph readProjectGraph(const juce::String& path) const;
+    void syncGraphNodes();
+    juce::String ownGraphPath() const;
     void writeGraph(const juce::String& name);
     void status(const juce::String& text);
 
