@@ -1,5 +1,5 @@
 // Renders a swatch sheet of the Drawing brushes to a PNG, to look at by eye. Developer tool, no UI.
-//   DjehutiTextureDrawingSwatches.exe <out.png> [modifiers | script]
+//   DjehutiTextureDrawingSwatches.exe <out.png> [modifiers | script | images]
 // Brushes: one row per brush - a line and a circle outline painted with it, plus a filled polygon at the end.
 // "modifiers": drawings built with Scatter, Repeat, Wobble, Mirror and Jitter. "script": drawings from Draw Script.
 
@@ -40,7 +40,7 @@ int main(int argc, char** argv)
     disableCrashDialogs();
     if (argc < 2)
     {
-        std::cerr << "usage: DjehutiTextureDrawingSwatches <out.png> [modifiers | script]\n";
+        std::cerr << "usage: DjehutiTextureDrawingSwatches <out.png> [modifiers | script | images]\n";
         return 2;
     }
     image_graph::Library library;
@@ -88,7 +88,33 @@ int main(int argc, char** argv)
         return n;
     };
     const bool scriptSheet = argc > 2 && juce::String(argv[2]) == "script";
-    if (scriptSheet)
+    const bool imagesSheet = argc > 2 && juce::String(argv[2]) == "images";
+    if (imagesSheet)
+    {
+        // A topographic map: contour lines of a noise height map at five levels, darker to lighter.
+        auto* height = node("image.noise", { { "width", std::int64_t { 512 } }, { "height", std::int64_t { 512 } }, { "scale", std::int64_t { 4 } },
+                                             { "octaves", std::int64_t { 4 } }, { "seed", std::int64_t { 3 } } });
+        for (int k = 0; k < 5; ++k)
+        {
+            auto* lines = node("draw.contour", { { "level", 0.3f + 0.1f * static_cast<float>(k) } });
+            connect(graph, height, "image", lines, "image");
+            const float shade = 0.4f + 0.12f * static_cast<float>(k);
+            paintOn(lines, node("draw.brush", { { "size", 0.0025f }, { "hardness", 0.9f }, { "color", ns::Vec3Default { shade * 0.6f, shade, shade * 0.8f } } }), 0);
+        }
+        // Grass tufts where a second noise is bright.
+        auto* where = node("image.noise", { { "width", std::int64_t { 256 } }, { "height", std::int64_t { 256 } }, { "scale", std::int64_t { 3 } },
+                                            { "seed", std::int64_t { 9 } } });
+        auto* tuft = node("draw.script", { { "script", std::string(R"(repeat 5 {
+  move 0.5 0.5
+  heading 270 + (i - 2) * 14
+  arc 0.05 (i - 2) * 10
+})") } });
+        auto* tufts = node("draw.sample", { { "count", std::int64_t { 120 } }, { "maxRotation", 10.0f }, { "scaleMin", 0.4f }, { "scaleMax", 0.8f } });
+        connect(graph, where, "image", tufts, "image");
+        connect(graph, tuft, "drawing", tufts, "drawing");
+        paintOn(tufts, node("draw.brush", { { "size", 0.003f }, { "color", ns::Vec3Default { 0.95f, 0.85f, 0.4f } }, { "taperEnd", 0.6f } }), 0);
+    }
+    else if (scriptSheet)
     {
         // A fractal tree, a rosette of arcs and a field of stars, all from Draw Script.
         auto* tree = node("draw.script", { { "script", std::string(R"(def branch len depth {

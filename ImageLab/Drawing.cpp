@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <map>
+#include <utility>
 
 namespace drawing
 {
@@ -399,6 +401,86 @@ Drawing mirrored(const Drawing& drawing, bool horizontal, float position, bool k
             v = 2.0f * position - v;
         }
     append(result, flipped);
+    return result;
+}
+Drawing joinSegments(const std::vector<float>& segments, int width, int height, float minLength)
+{
+    Drawing result;
+    const size_t count = segments.size() / 4;
+    if (count == 0 || width <= 0 || height <= 0)
+        return result;
+    using Key = std::pair<long long, long long>;
+    auto key = [](float x, float y) { return Key { std::llround(x * 1024.0f), std::llround(y * 1024.0f) }; };
+    std::map<Key, std::vector<size_t>> ends;
+    for (size_t i = 0; i < count; ++i)
+    {
+        ends[key(segments[i * 4], segments[i * 4 + 1])].push_back(i);
+        ends[key(segments[i * 4 + 2], segments[i * 4 + 3])].push_back(i);
+    }
+    std::vector<bool> used(count, false);
+    // The unused segment touching (x, y), and the point at its other end.
+    auto nextFrom = [&](float x, float y, Point& other) {
+        auto found = ends.find(key(x, y));
+        if (found == ends.end())
+            return false;
+        for (size_t i : found->second)
+            if (! used[i])
+            {
+                used[i] = true;
+                const bool fromStart = key(segments[i * 4], segments[i * 4 + 1]) == key(x, y);
+                other = fromStart ? Point { segments[i * 4 + 2], segments[i * 4 + 3] } : Point { segments[i * 4], segments[i * 4 + 1] };
+                return true;
+            }
+        return false;
+    };
+
+    const float sx = 1.0f / static_cast<float>(width), sy = 1.0f / static_cast<float>(height);
+    for (size_t start = 0; start < count; ++start)
+    {
+        if (used[start])
+            continue;
+        used[start] = true;
+        std::vector<Point> forward { { segments[start * 4], segments[start * 4 + 1] }, { segments[start * 4 + 2], segments[start * 4 + 3] } };
+        Point other;
+        while (nextFrom(forward.back().x, forward.back().y, other))
+            forward.push_back(other);
+        std::vector<Point> backward;
+        Point head = forward.front();
+        while (nextFrom(head.x, head.y, other))
+        {
+            backward.push_back(other);
+            head = other;
+        }
+        Path path;
+        path.points.assign(backward.rbegin(), backward.rend());
+        path.points.insert(path.points.end(), forward.begin(), forward.end());
+        if (path.points.size() > 2 && key(path.points.front().x, path.points.front().y) == key(path.points.back().x, path.points.back().y))
+        {
+            path.points.pop_back();
+            path.closed = true;
+        }
+        float length = 0.0f;
+        for (auto& p : path.points)
+            p = { p.x * sx, p.y * sy };
+        for (size_t i = 1; i < path.points.size(); ++i)
+            length += std::hypot(path.points[i].x - path.points[i - 1].x, path.points[i].y - path.points[i - 1].y);
+        if (length >= minLength)
+            result.paths.push_back(std::move(path));
+    }
+    return result;
+}
+
+Drawing placedAt(const Drawing& drawing, const std::vector<Point>& points, float maxRotationDegrees, float scaleMin, float scaleMax, int seed)
+{
+    Drawing result;
+    const auto centre = bounds(drawing).centre();
+    for (size_t k = 0; k < points.size(); ++k)
+    {
+        const auto i = static_cast<std::int64_t>(k);
+        const float rotation = (random01(i, 41, seed) * 2.0f - 1.0f) * maxRotationDegrees;
+        const float scale = scaleMin + (scaleMax - scaleMin) * random01(i, 42, seed);
+        append(result, transformed(drawing, points[k].x - centre.x, points[k].y - centre.y, rotation, scale, scale, centre));
+    }
     return result;
 }
 } // namespace drawing

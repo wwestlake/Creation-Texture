@@ -365,6 +365,154 @@ pub fn dr_fill(mask: raw* f32, w: i64, h: i64, edges: raw* f32, m: i64, xs: raw*
     1
 }
 
+// ---------------------------------------------------------------- from images to drawings
+
+fn lum_at(rgba: raw* f32, index: i64) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let o: i64 = index * 4;
+    kr * getf(rgba, o) + kg * getf(rgba, o + 1) + kb * getf(rgba, o + 2)
+}
+
+// Where the level crosses between two samples, as a fraction 0..1 from the first.
+fn crossing(a: f32, b: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    if (a == b) { half } else { clamp01((level - a) / (b - a)) }
+}
+
+// A point on one edge of the cell whose top-left sample is at pixel centre (x + 0.5, y + 0.5).
+// Edges: 0 top (a-b), 1 right (b-c), 2 bottom (d-c), 3 left (a-d), corners a top-left, b top-right, c bottom-right,
+// d bottom-left. ex gives its x, ey its y (pixels).
+fn ex(edge: i64, x: i64, a: f32, b: f32, c: f32, d: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let left: f32 = dr_host_i64_to_f32(x) + half;
+    if (edge == 0) { left + crossing(a, b, level) } else if (edge == 1) { left + one } else if (edge == 2) { left + crossing(d, c, level) } else { left }
+}
+
+fn ey(edge: i64, y: i64, a: f32, b: f32, c: f32, d: f32, level: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let top: f32 = dr_host_i64_to_f32(y) + half;
+    if (edge == 0) { top } else if (edge == 1) { top + crossing(b, c, level) } else if (edge == 2) { top + one } else { top + crossing(a, d, level) }
+}
+
+fn emit(segs: raw* f32, n: i64, maxSegs: i64, x0: f32, y0: f32, x1: f32, y1: f32) -> i64 = {
+    if (n < maxSegs) {
+        setf(segs, n * 4, x0);
+        setf(segs, n * 4 + 1, y0);
+        setf(segs, n * 4 + 2, x1);
+        setf(segs, n * 4 + 3, y1);
+    };
+    n + 1
+}
+
+// Marching squares: the line where the image's luminance crosses `level`, as separate segments (x0, y0, x1, y1 in
+// pixels) between neighbouring pixel centres. Writes at most maxSegs; returns how many there are in all.
+pub fn dr_contour(rgba: raw* f32, w: i64, h: i64, level: f32, segs: raw* f32, maxSegs: i64) -> i64 = {
+    let quarter: f32 = 0.25;
+    let mut n: i64 = 0;
+    let mut y: i64 = 0;
+    let mut x: i64 = 0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut code: i64 = 0;
+    let mut e0: i64 = 0;
+    let mut e1: i64 = 0;
+    let mut e2: i64 = 0;
+    let mut e3: i64 = 0;
+    let mut centre: f32 = 0.0;
+    while (y < h - 1) {
+        x = 0;
+        while (x < w - 1) {
+            a = lum_at(rgba, y * w + x);
+            b = lum_at(rgba, y * w + x + 1);
+            c = lum_at(rgba, (y + 1) * w + x + 1);
+            d = lum_at(rgba, (y + 1) * w + x);
+            code = 0;
+            if (a >= level) { code = code + 1; };
+            if (b >= level) { code = code + 2; };
+            if (c >= level) { code = code + 4; };
+            if (d >= level) { code = code + 8; };
+            e0 = 9; // 9: no segment
+            e2 = 9;
+            if (code == 1) { e0 = 3; e1 = 0; };
+            if (code == 14) { e0 = 3; e1 = 0; };
+            if (code == 2) { e0 = 0; e1 = 1; };
+            if (code == 13) { e0 = 0; e1 = 1; };
+            if (code == 3) { e0 = 3; e1 = 1; };
+            if (code == 12) { e0 = 3; e1 = 1; };
+            if (code == 4) { e0 = 1; e1 = 2; };
+            if (code == 11) { e0 = 1; e1 = 2; };
+            if (code == 6) { e0 = 0; e1 = 2; };
+            if (code == 9) { e0 = 0; e1 = 2; };
+            if (code == 7) { e0 = 3; e1 = 2; };
+            if (code == 8) { e0 = 3; e1 = 2; };
+            // Saddles: the average in the middle decides which corners join.
+            if (code == 5) {
+                centre = (a + b + c + d) * quarter;
+                if (centre >= level) { e0 = 3; e1 = 2; e2 = 0; e3 = 1; } else { e0 = 3; e1 = 0; e2 = 1; e3 = 2; };
+            };
+            if (code == 10) {
+                centre = (a + b + c + d) * quarter;
+                if (centre >= level) { e0 = 3; e1 = 0; e2 = 1; e3 = 2; } else { e0 = 3; e1 = 2; e2 = 0; e3 = 1; };
+            };
+            if (e0 < 4) {
+                n = emit(segs, n, maxSegs, ex(e0, x, a, b, c, d, level), ey(e0, y, a, b, c, d, level),
+                         ex(e1, x, a, b, c, d, level), ey(e1, y, a, b, c, d, level));
+            };
+            if (e2 < 4) {
+                n = emit(segs, n, maxSegs, ex(e2, x, a, b, c, d, level), ey(e2, y, a, b, c, d, level),
+                         ex(e3, x, a, b, c, d, level), ey(e3, y, a, b, c, d, level));
+            };
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    n
+}
+
+// Random points where the image is bright: each try picks a point and keeps it with a chance equal to the pixel's
+// luminance times its alpha (or one minus that, inverted). Writes up to `count` points (x, y as canvas fractions)
+// and returns how many it placed; gives up after maxTries.
+pub fn dr_sample(rgba: raw* f32, w: i64, h: i64, count: i64, seed: i64, invert: i64, points: raw* f32, maxTries: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let mut placed: i64 = 0;
+    let mut tries: i64 = 0;
+    let mut rx: f32 = 0.0;
+    let mut ry: f32 = 0.0;
+    let mut px: i64 = 0;
+    let mut py: i64 = 0;
+    let mut density: f32 = 0.0;
+    let mut index: i64 = 0;
+    let mut going: i64 = 1;
+    while (going != 0) {
+        if (placed >= count) {
+            going = 0;
+        } else if (tries >= maxTries) {
+            going = 0;
+        } else {
+            rx = dr_host_hash(tries, 101, seed);
+            ry = dr_host_hash(tries, 102, seed);
+            px = imin(w - 1, floori(rx * dr_host_i64_to_f32(w)));
+            py = imin(h - 1, floori(ry * dr_host_i64_to_f32(h)));
+            index = py * w + px;
+            density = clamp01(lum_at(rgba, index)) * clamp01(getf(rgba, index * 4 + 3));
+            if (invert != 0) { density = one - density; };
+            if (dr_host_hash(tries, 103, seed) < density) {
+                setf(points, placed * 2, rx);
+                setf(points, placed * 2 + 1, ry);
+                placed = placed + 1;
+            };
+            tries = tries + 1;
+        };
+    };
+    placed
+}
+
 // ---------------------------------------------------------------- compositing
 
 // Lays the mask over the canvas in colour (r, g, b) at `opacity`: source-over with straight alpha.

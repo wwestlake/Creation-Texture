@@ -131,7 +131,9 @@ public:
         stamps = reinterpret_cast<decltype(stamps)>(runtime.getFunction(drawKey, "dr_stamps"));
         fillShapes = reinterpret_cast<decltype(fillShapes)>(runtime.getFunction(drawKey, "dr_fill"));
         composite = reinterpret_cast<decltype(composite)>(runtime.getFunction(drawKey, "dr_composite"));
-        if (! (stamps && fillShapes && composite))
+        contour = reinterpret_cast<decltype(contour)>(runtime.getFunction(drawKey, "dr_contour"));
+        sample = reinterpret_cast<decltype(sample)>(runtime.getFunction(drawKey, "dr_sample"));
+        if (! (stamps && fillShapes && composite && contour && sample))
         {
             error = "Drawing FRust routines are incomplete.";
             return;
@@ -178,6 +180,8 @@ public:
                            std::int64_t, std::int64_t) = nullptr;
     std::int64_t (*fillShapes)(float*, std::int64_t, std::int64_t, const float*, std::int64_t, float*, float*) = nullptr;
     std::int64_t (*composite)(float*, const float*, std::int64_t, float, float, float, float) = nullptr;
+    std::int64_t (*contour)(const float*, std::int64_t, std::int64_t, float, float*, std::int64_t) = nullptr;
+    std::int64_t (*sample)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t) = nullptr;
     image_lab::Compositor compositor;
     juce::String error;
 };
@@ -1064,6 +1068,53 @@ Library::Library()
         script.readsVariables = true;
         definitions.push_back(std::move(script));
     }
+
+    // From images: the image decides the drawing.
+    definitions.push_back(define("draw.contour", "Contour", "Draw",
+        "Traces the lines where the image's brightness crosses the level - outlines of shapes, edges of a pattern, "
+        "contour lines of a height map. Lines shorter than minLength (a fraction of the canvas) are left out.",
+        { imageIn("image"), floatIn("level", 0.5f), floatIn("minLength", 0.01f) }, { drawingOut("drawing") },
+        [needInput](Context& c, auto&, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto level = c.number("level", 0.5f);
+            // Count first, then trace into a buffer of exactly that size.
+            const auto total = c.routines.contour(input->rgba.data(), input->width, input->height, level, nullptr, 0);
+            std::vector<float> segments(static_cast<size_t>(juce::jmax<std::int64_t>(0, total)) * 4);
+            if (total > 0)
+                c.routines.contour(input->rgba.data(), input->width, input->height, level, segments.data(), total);
+            c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(
+                drawing::joinSegments(segments, input->width, input->height, juce::jmax(0.0f, c.number("minLength", 0.01f))));
+            return true;
+        }));
+    definitions.push_back(define("draw.sample", "Sample", "Draw",
+        "Random points where the image is bright (or dark, inverted): the brighter, the more likely. With a drawing wired "
+        "in, a copy of it is placed on each point, turned up to +- maxRotation degrees and scaled between scaleMin and "
+        "scaleMax; without one, each point is a dot for Paint to stamp.",
+        { imageIn("image"), drawingIn("drawing"), intIn("count", 200), intIn("seed", 1), boolIn("invert", false),
+          floatIn("maxRotation", 180.0f), floatIn("scaleMin", 0.5f), floatIn("scaleMax", 1.0f) },
+        { drawingOut("drawing") },
+        [needInput](Context& c, auto&, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto count = juce::jlimit(0, 1000000, c.integer("count", 200));
+            std::vector<float> xy(static_cast<size_t>(count) * 2);
+            const auto placed = count == 0 ? 0 : c.routines.sample(input->rgba.data(), input->width, input->height, count, c.integer("seed", 1),
+                                                                    c.flag("invert", false) ? 1 : 0, xy.data(), static_cast<std::int64_t>(count) * 50);
+            std::vector<drawing::Point> points;
+            for (std::int64_t i = 0; i < placed; ++i)
+                points.push_back({ xy[static_cast<size_t>(i) * 2], xy[static_cast<size_t>(i) * 2 + 1] });
+            auto result = std::make_shared<drawing::Drawing>();
+            auto wired = c.drawings.find("drawing");
+            if (wired != c.drawings.end() && wired->second != nullptr)
+                *result = drawing::placedAt(*wired->second, points, c.number("maxRotation", 180.0f), c.number("scaleMin", 0.5f),
+                                            c.number("scaleMax", 1.0f), c.integer("seed", 1));
+            else
+                for (const auto& p : points)
+                    result->paths.push_back({ { p }, false });
+            c.drawingOutputs["drawing"] = result;
+            return true;
+        }));
 
     definitions.push_back(define("draw.brush", "Brush", "Draw",
         "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "

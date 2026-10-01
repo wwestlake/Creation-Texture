@@ -113,4 +113,13 @@ Drawing wobbled(const Drawing& drawing, float amount, float wavelength, int seed
 // A mirror image across a line: horizontal flips left-right about x = position, vertical flips top-bottom about
 // y = position. keepOriginal keeps the drawing and adds the mirror image.
 Drawing mirrored(const Drawing& drawing, bool horizontal, float position, bool keepOriginal);
+
+// From images (the pixel reading itself is FRust - drawing.frust):
+// Joins line segments (x0, y0, x1, y1 in pixels of a width x height image) that share end points into paths, closed
+// where a chain comes back to its start, as canvas fractions. Paths shorter than minLength (a canvas fraction) are
+// left out.
+Drawing joinSegments(const std::vector<float>& segments, int width, int height, float minLength);
+// Copies of a drawing centred on each point, turned up to +-maxRotation and scaled between scaleMin and scaleMax at
+// random (repeatable by seed).
+Drawing placedAt(const Drawing& drawing, const std::vector<Point>& points, float maxRotationDegrees, float scaleMin, float scaleMax, int seed);
 } // namespace drawing

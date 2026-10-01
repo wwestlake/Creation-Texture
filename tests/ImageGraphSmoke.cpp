@@ -735,6 +735,71 @@ int main()
                       && closeTo(overridden->paths[0].points[0], 0.6f, 0.5f));
         }
 
+        // From images (milestone 5).
+        {
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            // Contour of an 11 x 11 left-to-right gradient (pixel i = i / 10) at level 0.55: it crosses halfway between
+            // pixel centres 5.5 (0.5) and 6.5 (0.6), at x = 6 px, straight down from y 0.5 to 10.5 px.
+            // One path of 11 points, x = 6 / 11 = 0.545455, y from 0.5 / 11 = 0.045455 to 10.5 / 11 = 0.954545.
+            auto* ramp = add("image.gradient");
+            set(ramp, "width", std::int64_t { 11 });
+            set(ramp, "height", std::int64_t { 11 });
+            auto* contour = add("draw.contour");
+            connect(graph, ramp, "image", contour, "image");
+            set(contour, "level", 0.55f);
+            const auto lines = evaluator.evaluateDrawing(graph, contour->Id(), "drawing", error);
+            bool straight = lines != nullptr && lines->paths.size() == 1 && lines->paths[0].points.size() == 11 && ! lines->paths[0].closed;
+            float top = 1.0f, bottom = 0.0f;
+            for (size_t i = 0; straight && i < lines->paths[0].points.size(); ++i)
+            {
+                const auto& p = lines->paths[0].points[i];
+                straight = std::abs(p.x - 0.545455f) < 1.0e-4f;
+                top = std::min(top, p.y);
+                bottom = std::max(bottom, p.y);
+            }
+            check("Contour of a gradient is one straight line at the level",
+                  straight && std::abs(top - 0.045455f) < 1.0e-4f && std::abs(bottom - 0.954545f) < 1.0e-4f);
+
+            // Sample: on white every try keeps its point -> all 20, inside the canvas; on black none; black inverted -> 20.
+            auto plain = [&](float v) {
+                auto* n = add("image.create");
+                set(n, "width", std::int64_t { 4 });
+                set(n, "height", std::int64_t { 4 });
+                set(n, "color", ns::Vec3Default { v, v, v });
+                return n;
+            };
+            auto sampled = [&](ns::Node* image, bool invert, ns::Node* shape) {
+                auto* n = add("draw.sample");
+                connect(graph, image, "image", n, "image");
+                if (shape != nullptr) connect(graph, shape, "drawing", n, "drawing");
+                set(n, "count", std::int64_t { 20 });
+                set(n, "invert", invert);
+                return evaluator.evaluateDrawing(graph, n->Id(), "drawing", error);
+            };
+            const auto onWhite = sampled(plain(1.0f), false, nullptr);
+            bool inCanvas = onWhite != nullptr && onWhite->paths.size() == 20;
+            for (size_t i = 0; inCanvas && i < onWhite->paths.size(); ++i)
+                inCanvas = onWhite->paths[i].points.size() == 1 && onWhite->paths[i].points[0].x >= 0.0f && onWhite->paths[i].points[0].x <= 1.0f
+                           && onWhite->paths[i].points[0].y >= 0.0f && onWhite->paths[i].points[0].y <= 1.0f;
+            check("Sample on white: 20 dots inside the canvas", inCanvas);
+            const auto onBlack = sampled(plain(0.0f), false, nullptr);
+            check("Sample on black: no points", onBlack != nullptr && onBlack->paths.empty());
+            const auto inverted = sampled(plain(0.0f), true, nullptr);
+            check("Sample on black, inverted: 20 points", inverted != nullptr && inverted->paths.size() == 20);
+            auto* tick = add("draw.line");
+            set(tick, "x1", 0.45f); set(tick, "y1", 0.5f); set(tick, "x2", 0.55f); set(tick, "y2", 0.5f);
+            const auto copies = sampled(plain(1.0f), false, tick);
+            check("Sample with a drawing: a copy on each point", copies != nullptr && copies->paths.size() == 20 && copies->paths[0].points.size() == 2);
+        }
+
         // Paint with nothing wired to draw reports it.
         auto* empty = add("draw.paint");
         juce::String paintError;
