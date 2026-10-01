@@ -87,6 +87,9 @@ struct Definition
     bool readsVariables = false;
 };
 
+// The Image Graph's graph type (shared/NodeSystem/GRAPH_TYPES.md): every node in this library belongs in it.
+inline constexpr const char* kImageDiagram = "image";
+
 class Library final
 {
 public:

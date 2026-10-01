@@ -262,6 +262,7 @@ Definition define(std::string type, std::string name, std::string category, std:
     d.descriptor.displayName = std::move(name);
     d.descriptor.category = std::move(category);
     d.descriptor.description = std::move(description);
+    d.descriptor.diagramTypes = { kImageDiagram };
     d.evaluate = std::move(evaluate);
     return d;
 }
@@ -1346,6 +1347,7 @@ Library::Library()
 
 void Library::registerTypes(ns::NodeTypeRegistry& registry) const
 {
+    registry.RegisterDiagramType({ kImageDiagram, "Image", "Makes an image: generators, effects, drawing and surface maps." });
     for (const auto& e : enums)
         registry.RegisterEnum(e);
     for (const auto& d : definitions)

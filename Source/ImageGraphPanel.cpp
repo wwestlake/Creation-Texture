@@ -360,6 +360,10 @@ ImageGraphWorkspace::ImageGraphWorkspace()
       preview(std::make_unique<PreviewPanel>()),
       worker(std::make_unique<Worker>(library, [this]() { return projectSession; }))
 {
+    // An image graph: the palette lists the nodes that belong in one (shared/NodeSystem/GRAPH_TYPES.md).
+    graph.SetDiagramType(image_graph::kImageDiagram);
+    palette.SetDiagramType(image_graph::kImageDiagram);
+
     graphView.onGraphChanged = [this]() {
         properties.refresh(); // wiring changed: which inputs are editable changed
         graphEdited();
@@ -758,6 +762,7 @@ void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
 void ImageGraphWorkspace::newGraph()
 {
     graph = ns::Graph("Image Graph", ns::GraphTarget::Dataflow);
+    graph.SetDiagramType(image_graph::kImageDiagram);
     graphView.GraphReplaced();
     graphName.clear();
     edited = false;
@@ -873,6 +878,7 @@ void ImageGraphWorkspace::openGraph()
         }
         graph = std::move(*loaded);
         graph.SetTarget(ns::GraphTarget::Dataflow);
+        graph.SetDiagramType(image_graph::kImageDiagram); // an image graph, whether or not the file says so
         graphView.GraphReplaced();
         graphName = doc["name"].toString();
         edited = false;
