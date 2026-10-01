@@ -18,6 +18,9 @@ public:
         project_images::Source projectImages;
         // A value was changed in the panel: the graph needs repainting, recompiling, and marking edited.
         std::function<void()> onValueEdited;
+        // Optional: a layout's own editor for a particular unwired input (null = the standard editor for its type).
+        // The editor writes the pin itself and then calls onValueEdited. `height` is set to the row height wanted.
+        std::function<std::unique_ptr<juce::Component>(ce::node_system::Node&, const ce::node_system::Pin&, int& height)> customEditor;
     };
 
     NodePropertiesPanel();

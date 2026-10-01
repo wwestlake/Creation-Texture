@@ -6,10 +6,12 @@
 #include "ViewerPanel.h"
 #include "MaterialDocument.h"
 #include "NodePropertiesPanel.h"
+#include "ImageLabPanel.h"
+#include "SurfaceMapPanel.h"
+#include "ImageGraphPanel.h"
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
-#include <creation/ui/FrustyComponent.h>
 
 class MainComponent final : public juce::Component, public juce::DragAndDropContainer,
                             public juce::MenuBarModel
@@ -38,6 +40,13 @@ private:
     void confirmDiscardingEdits(std::function<void()> proceed);
     void refreshTitle();
 
+    // Work areas: each has its own dock layout, panels and menus (docs/REQUIREMENTS.md section 4).
+    enum class WorkArea { materials, imageLab, surfaceMap, imageGraph };
+    void showWorkArea(WorkArea area);
+    CreationDock::DockManager& dockFor(WorkArea area);
+    void loadLayouts();
+    void saveLayouts();
+
     class NonOwningPanelHost : public juce::Component
     {
     public:
@@ -60,13 +69,20 @@ private:
     creation::assets::ProjectSession projectSession;
     MaterialDocument materialDocument { projectSession };
 
-    std::unique_ptr<juce::MenuBarComponent> menuBar;
-    std::unique_ptr<CreationDock::DockManager> dockManager;
-
     NodeGraphPanel nodeGraphPanel;
     ViewerPanel viewerPanel;
     NodePropertiesPanel propertiesPanel;
-    creation::ui::FrustyComponent frustyPanel;
+    ImageLabWorkspace imageLab;
+    SurfaceMapWorkspace surfaceMap;
+    ImageGraphWorkspace imageGraph;
+
+    // Declared after the panels they host, so they are destroyed first.
+    std::unique_ptr<juce::MenuBarComponent> menuBar;
+    std::unique_ptr<CreationDock::DockManager> materialsDock;
+    std::unique_ptr<CreationDock::DockManager> imageLabDock;
+    std::unique_ptr<CreationDock::DockManager> surfaceMapDock;
+    std::unique_ptr<CreationDock::DockManager> imageGraphDock;
+    WorkArea currentArea = WorkArea::materials;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

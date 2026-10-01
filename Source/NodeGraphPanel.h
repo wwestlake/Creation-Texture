@@ -44,6 +44,8 @@ public:
 
     ce::node_system::Graph& getGraph() noexcept { return graph; }
     const ce::node_system::NodeTypeRegistry& getRegistry() const noexcept { return registry; }
+    // The node palette, docked as its own "Nodes" panel.
+    juce::Component& getPalette() noexcept { return paletteComponent; }
     // The project's images, for an image input's slot and picker.
     project_images::Source projectImageSource();
     // A value was changed in the Properties panel.

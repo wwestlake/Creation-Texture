@@ -1,0 +1,439 @@
+manifest "{\"name\":\"surface_maps\",\"version\":\"0.1.0\",\"description\":\"Surface map maths: blur, luminance, height from a photo in detail bands, normal from height, occlusion, de-lighting, specular. 32-bit float buffers.\",\"entryPoints\":[\"sm_luminance\",\"sm_box_blur_h\",\"sm_box_blur_v\",\"sm_add_band\",\"sm_unsharp\",\"sm_min_max\",\"sm_normalize\",\"sm_invert\",\"sm_normal_from_height\",\"sm_occlusion_step\",\"sm_fill\",\"sm_delight\",\"sm_specular\"],\"requiredHostFunctions\":[{\"name\":\"sm_host_sqrt\"},{\"name\":\"sm_host_i64_to_f32\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Surface map maths for Djehuti Texture's Surface Map mode (CrazyBump-style maps from one photo).
+// General routines on 32-bit float buffers: a "gray" buffer holds one float per pixel, an "rgba" buffer four.
+// Sampling wraps around the edges, so the maps tile. Every routine returns 1 on success, 0 on a bad argument.
+//
+// Written with no Texture-specific code so it can move into a Frate pod (frust_surface_maps).
+// FRust today only dereferences a named raw* variable, so each routine points named pointers at a pixel
+// (`p = base + offset`) and reads/writes through `*p`.
+
+extern fn sm_host_sqrt(v: f32) -> f32;
+extern fn sm_host_i64_to_f32(v: i64) -> f32;
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+fn wrap_index(i: i64, n: i64) -> i64 = {
+    if (i < 0) { i + n } else if (i >= n) { i - n } else { i }
+}
+
+// gray = 0.2126 r + 0.7152 g + 0.0722 b (linear light).
+pub fn sm_luminance(rgba: raw* f32, gray: raw* f32, count: i64) -> i64 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let mut i: i64 = 0;
+    let mut src: raw* f32 = rgba;
+    let mut gsrc: raw* f32 = rgba;
+    let mut bsrc: raw* f32 = rgba;
+    let mut dst: raw* f32 = gray;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    while (i < count) {
+        src = rgba + i * 4;
+        gsrc = src + 1;
+        bsrc = src + 2;
+        dst = gray + i;
+        r = *src;
+        g = *gsrc;
+        b = *bsrc;
+        *dst = kr * r + kg * g + kb * b;
+        i = i + 1;
+    };
+    1
+}
+
+// Horizontal box blur of a gray buffer, radius r (window 2r+1), wrapping. Needs 0 <= r and 2r+1 <= w.
+pub fn sm_box_blur_h(src: raw* f32, dst: raw* f32, w: i64, h: i64, r: i64) -> i64 = {
+    let window: i64 = r + r + 1;
+    if (r < 0) {
+        0
+    } else if (window > w) {
+        0
+    } else {
+        let one: f32 = 1.0;
+        let scale: f32 = one / sm_host_i64_to_f32(window);
+        let mut y: i64 = 0;
+        let mut idx: i64 = 0;
+        let mut x: i64 = 0;
+        let mut k: i64 = 0;
+        let mut sum: f32 = 0.0;
+        let mut p: raw* f32 = src;
+        let mut q: raw* f32 = src;
+        let mut outp: raw* f32 = dst;
+        let mut va: f32 = 0.0;
+        let mut vb: f32 = 0.0;
+        let zero: f32 = 0.0;
+        while (y < h) {
+            sum = zero;
+            k = 0 - r;
+            while (k <= r) {
+                idx = y * w + wrap_index(k, w);
+                p = src + idx;
+                va = *p;
+                sum = sum + va;
+                k = k + 1;
+            };
+            x = 0;
+            while (x < w) {
+                idx = y * w + x;
+                outp = dst + idx;
+                *outp = sum * scale;
+                idx = y * w + wrap_index(x + r + 1, w);
+                p = src + idx;
+                idx = y * w + wrap_index(x - r, w);
+                q = src + idx;
+                va = *p;
+                vb = *q;
+                sum = sum + va - vb;
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// Vertical box blur of a gray buffer, radius r, wrapping. Needs 0 <= r and 2r+1 <= h.
+pub fn sm_box_blur_v(src: raw* f32, dst: raw* f32, w: i64, h: i64, r: i64) -> i64 = {
+    let window: i64 = r + r + 1;
+    if (r < 0) {
+        0
+    } else if (window > h) {
+        0
+    } else {
+        let one: f32 = 1.0;
+        let scale: f32 = one / sm_host_i64_to_f32(window);
+        let mut y: i64 = 0;
+        let mut idx: i64 = 0;
+        let mut x: i64 = 0;
+        let mut k: i64 = 0;
+        let mut sum: f32 = 0.0;
+        let mut p: raw* f32 = src;
+        let mut q: raw* f32 = src;
+        let mut outp: raw* f32 = dst;
+        let mut va: f32 = 0.0;
+        let mut vb: f32 = 0.0;
+        let zero: f32 = 0.0;
+        while (x < w) {
+            sum = zero;
+            k = 0 - r;
+            while (k <= r) {
+                idx = wrap_index(k, h) * w + x;
+                p = src + idx;
+                va = *p;
+                sum = sum + va;
+                k = k + 1;
+            };
+            y = 0;
+            while (y < h) {
+                idx = y * w + x;
+                outp = dst + idx;
+                *outp = sum * scale;
+                idx = wrap_index(y + r + 1, h) * w + x;
+                p = src + idx;
+                idx = wrap_index(y - r, h) * w + x;
+                q = src + idx;
+                va = *p;
+                vb = *q;
+                sum = sum + va - vb;
+                y = y + 1;
+            };
+            x = x + 1;
+        };
+        1
+    }
+}
+
+// acc += weight * (a - b): adds one detail band (the difference between two blur levels).
+pub fn sm_add_band(acc: raw* f32, a: raw* f32, b: raw* f32, count: i64, weight: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut pa: raw* f32 = a;
+    let mut pb: raw* f32 = b;
+    let mut pacc: raw* f32 = acc;
+    let mut va: f32 = 0.0;
+    let mut vb: f32 = 0.0;
+    let mut vacc: f32 = 0.0;
+    while (i < count) {
+        pa = a + i;
+        pb = b + i;
+        pacc = acc + i;
+        va = *pa;
+        vb = *pb;
+        vacc = *pacc;
+        *pacc = vacc + weight * (va - vb);
+        i = i + 1;
+    };
+    1
+}
+
+// dst = src + amount * (src - blurred)   (unsharp mask; dst may be src)
+pub fn sm_unsharp(src: raw* f32, blurred: raw* f32, dst: raw* f32, count: i64, amount: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut ps: raw* f32 = src;
+    let mut pb: raw* f32 = blurred;
+    let mut pd: raw* f32 = dst;
+    let mut v: f32 = 0.0;
+    let mut vb: f32 = 0.0;
+    while (i < count) {
+        ps = src + i;
+        pb = blurred + i;
+        pd = dst + i;
+        v = *ps;
+        vb = *pb;
+        *pd = v + amount * (v - vb);
+        i = i + 1;
+    };
+    1
+}
+
+// outp[0] = minimum, outp[1] = maximum of a gray buffer.
+pub fn sm_min_max(gray: raw* f32, count: i64, outp: raw* f32) -> i64 = {
+    if (count < 1) {
+        0
+    } else {
+        let mut i: i64 = 1;
+        let mut p: raw* f32 = gray;
+        let mut lo: f32 = *p;
+        let mut hi: f32 = *p;
+        let mut v: f32 = 0.0;
+        while (i < count) {
+            p = gray + i;
+            v = *p;
+            if (v < lo) { lo = v; };
+            if (v > hi) { hi = v; };
+            i = i + 1;
+        };
+        let mut o: raw* f32 = outp;
+        *o = lo;
+        o = outp + 1;
+        *o = hi;
+        1
+    }
+}
+
+// Maps [lo, hi] to [0, 1]; a flat buffer (hi <= lo) becomes 0.5.
+pub fn sm_normalize(gray: raw* f32, count: i64, lo: f32, hi: f32) -> i64 = {
+    let half: f32 = 0.5;
+    let range: f32 = hi - lo;
+    let zero: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut p: raw* f32 = gray;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        p = gray + i;
+        v = *p;
+        if (range > zero) { *p = (v - lo) / range; } else { *p = half; };
+        i = i + 1;
+    };
+    1
+}
+
+// v = 1 - v   (raised <-> sunken)
+pub fn sm_invert(gray: raw* f32, count: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut p: raw* f32 = gray;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        p = gray + i;
+        v = *p;
+        *p = one - v;
+        i = i + 1;
+    };
+    1
+}
+
+// Tangent-space normal map from a height map, Sobel gradient, wrapping. Output rgba, encoded 0.5 + 0.5 n.
+// OpenGL convention (green = up) unless flip_green is 1 (DirectX). A rise to the right faces left (red < 0.5).
+pub fn sm_normal_from_height(height: raw* f32, rgba: raw* f32, w: i64, h: i64, strength: f32, flip_green: i64) -> i64 = {
+    if (w < 3) {
+        0
+    } else if (h < 3) {
+        0
+    } else {
+        let one: f32 = 1.0;
+        let two: f32 = 2.0;
+        let half: f32 = 0.5;
+        let eighth: f32 = 0.125;
+        let zero: f32 = 0.0;
+        let mut x: i64 = 0;
+        let mut idx: i64 = 0;
+        let mut y: i64 = 0;
+        let mut xm: i64 = 0;
+        let mut xp: i64 = 0;
+        let mut ym: i64 = 0;
+        let mut yp: i64 = 0;
+        let mut p: raw* f32 = height;
+        let mut outp: raw* f32 = rgba;
+        let mut tl: f32 = 0.0;
+        let mut tc: f32 = 0.0;
+        let mut tr: f32 = 0.0;
+        let mut ml: f32 = 0.0;
+        let mut mr: f32 = 0.0;
+        let mut bl: f32 = 0.0;
+        let mut bc: f32 = 0.0;
+        let mut br: f32 = 0.0;
+        let mut gx: f32 = 0.0;
+        let mut gy: f32 = 0.0;
+        let mut nx: f32 = 0.0;
+        let mut ny: f32 = 0.0;
+        let mut len: f32 = 0.0;
+        while (y < h) {
+            ym = wrap_index(y - 1, h);
+            yp = wrap_index(y + 1, h);
+            x = 0;
+            while (x < w) {
+                xm = wrap_index(x - 1, w);
+                xp = wrap_index(x + 1, w);
+                idx = ym * w + xm;
+                p = height + idx;
+                tl = *p;
+                idx = ym * w + x;
+                p = height + idx;
+                tc = *p;
+                idx = ym * w + xp;
+                p = height + idx;
+                tr = *p;
+                idx = y * w + xm;
+                p = height + idx;
+                ml = *p;
+                idx = y * w + xp;
+                p = height + idx;
+                mr = *p;
+                idx = yp * w + xm;
+                p = height + idx;
+                bl = *p;
+                idx = yp * w + x;
+                p = height + idx;
+                bc = *p;
+                idx = yp * w + xp;
+                p = height + idx;
+                br = *p;
+                // Slope per pixel: Sobel sums divided by 8.
+                gx = ((tr + two * mr + br) - (tl + two * ml + bl)) * eighth;
+                gy = ((bl + two * bc + br) - (tl + two * tc + tr)) * eighth;   // image y points down
+                nx = (zero - gx) * strength;
+                ny = gy * strength;                                             // up = -image y
+                if (flip_green == 1) { ny = zero - ny; };
+                len = sm_host_sqrt(nx * nx + ny * ny + one);
+                idx = (y * w + x) * 4;
+                outp = rgba + idx;
+                *outp = half + half * nx / len;
+                outp = outp + 1;
+                *outp = half + half * ny / len;
+                outp = outp + 1;
+                *outp = half + half / len;
+                outp = outp + 1;
+                *outp = one;
+                x = x + 1;
+            };
+            y = y + 1;
+        };
+        1
+    }
+}
+
+// One occlusion scale: ao *= clamp01(1 - strength * max(0, blurred - height)). Where the surroundings are higher
+// than the point, the point is in a crevice and gets darker.
+pub fn sm_occlusion_step(ao: raw* f32, height: raw* f32, blurred: raw* f32, count: i64, strength: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let mut i: i64 = 0;
+    let mut pa: raw* f32 = ao;
+    let mut ph: raw* f32 = height;
+    let mut pb: raw* f32 = blurred;
+    let mut d: f32 = 0.0;
+    let mut va: f32 = 0.0;
+    let mut vb: f32 = 0.0;
+    let mut vh: f32 = 0.0;
+    while (i < count) {
+        pa = ao + i;
+        ph = height + i;
+        pb = blurred + i;
+        vb = *pb;
+        vh = *ph;
+        va = *pa;
+        d = vb - vh;
+        if (d < zero) { d = zero; };
+        *pa = va * clamp01(one - strength * d);
+        i = i + 1;
+    };
+    1
+}
+
+pub fn sm_fill(gray: raw* f32, count: i64, value: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut p: raw* f32 = gray;
+    while (i < count) {
+        p = gray + i;
+        *p = value;
+        i = i + 1;
+    };
+    1
+}
+
+// Removes large-scale lighting from a photo: rgb *= lerp(1, mean / lighting, amount), where `lighting` is a heavily
+// blurred luminance. Alpha is kept.
+pub fn sm_delight(rgba_in: raw* f32, lighting: raw* f32, rgba_out: raw* f32, count: i64, mean: f32, amount: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let tiny: f32 = 0.0001;
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut c: i64 = 0;
+    let mut pl: raw* f32 = lighting;
+    let mut pi: raw* f32 = rgba_in;
+    let mut po: raw* f32 = rgba_out;
+    let mut light: f32 = 0.0;
+    let mut gain: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        pl = lighting + i;
+        light = *pl;
+        if (light < tiny) { light = tiny; };
+        gain = one + amount * (mean / light - one);
+        c = 0;
+        while (c < 3) {
+            idx = i * 4 + c;
+            pi = rgba_in + idx;
+            idx = i * 4 + c;
+            po = rgba_out + idx;
+            v = *pi;
+            *po = v * gain;
+            c = c + 1;
+        };
+        idx = i * 4 + 3;
+        pi = rgba_in + idx;
+        idx = i * 4 + 3;
+        po = rgba_out + idx;
+        v = *pi;
+        *po = v;
+        i = i + 1;
+    };
+    1
+}
+
+// Specular estimate from fine detail: spec = clamp01(level + contrast * (gray - blurred)).
+pub fn sm_specular(gray: raw* f32, blurred: raw* f32, outp: raw* f32, count: i64, level: f32, contrast: f32) -> i64 = {
+    let mut i: i64 = 0;
+    let mut pg: raw* f32 = gray;
+    let mut pb: raw* f32 = blurred;
+    let mut po: raw* f32 = outp;
+    let mut vg: f32 = 0.0;
+    let mut vb: f32 = 0.0;
+    while (i < count) {
+        pg = gray + i;
+        pb = blurred + i;
+        po = outp + i;
+        vg = *pg;
+        vb = *pb;
+        *po = clamp01(level + contrast * (vg - vb));
+        i = i + 1;
+    };
+    1
+}

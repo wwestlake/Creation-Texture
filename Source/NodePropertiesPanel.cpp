@@ -240,6 +240,16 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
         return;
     }
 
+    if (host.customEditor)
+    {
+        int height = 26;
+        if (auto editor = host.customEditor(node, pin, height))
+        {
+            addRow(labelText, std::move(editor), height);
+            return;
+        }
+    }
+
     auto* graph = host.graph;
     const auto id = node.Id();
     const auto pinId = pin.id;
@@ -305,6 +315,23 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
         addRow(labelText, std::move(toggle), 26);
         return;
     }
+
+    // An enum setting: a dropdown of its named choices (shared/NodeSystem/enums.h).
+    if (const auto* integer = std::get_if<std::int64_t>(&pin.defaultValue);
+        integer != nullptr && host.registry != nullptr)
+        if (const auto* def = ns::PinEnum(*host.registry, node, pin))
+        {
+            auto box = std::make_unique<juce::ComboBox>();
+            for (size_t i = 0; i < def->variants.size(); ++i)
+                box->addItem(def->variants[i], static_cast<int>(i) + 1);
+            box->setSelectedId(static_cast<int>(*integer) + 1, juce::dontSendNotification);
+            box->onChange = [this, graph, id, pinId, b = box.get()]() {
+                setPinValue(graph, id, pinId, static_cast<std::int64_t>(b->getSelectedId() - 1));
+                valueEdited();
+            };
+            addRow(labelText, std::move(box), 26);
+            return;
+        }
 
     if (const auto* integer = std::get_if<std::int64_t>(&pin.defaultValue))
     {

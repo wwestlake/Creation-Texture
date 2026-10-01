@@ -18,7 +18,6 @@ NodeGraphPanel::NodeGraphPanel()
       graphComponent(graph, registry),
       paletteComponent(registry)
 {
-    addAndMakeVisible(paletteComponent);
     addAndMakeVisible(graphComponent);
 
     graphComponent.onGraphChanged = [this]() {
@@ -85,7 +84,6 @@ void NodeGraphPanel::paint(juce::Graphics& g)
 void NodeGraphPanel::resized()
 {
     auto bounds = getLocalBounds();
-    paletteComponent.setBounds(bounds.removeFromLeft(200));
     graphComponent.setBounds(bounds);
 }
 

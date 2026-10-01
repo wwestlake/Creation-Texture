@@ -1,0 +1,105 @@
+manifest "{\"name\":\"image_lab_core\",\"version\":\"0.1.0\",\"description\":\"Image Lab core pixel routines: layer compositing with blend modes, on 32-bit float linear RGBA.\",\"entryPoints\":[\"image_lab_composite\"],\"requiredHostFunctions\":[],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Image Lab core pixel routines, compiled into Djehuti Texture and loaded from memory.
+//
+// Pixels are 32-bit float, linear light, straight (not premultiplied) RGBA, laid out r,g,b,a per pixel.
+// `count` is the number of pixels. Returns 1 on success, 0 on a bad argument.
+//
+// FRust today only dereferences a named raw* variable, so each routine points named pointers at the pixel
+// (`p = base + offset`) and reads/writes through `*p`.
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+// The blend-mode colour for one channel (W3C compositing: B(backdrop, source)).
+// 0 Normal, 1 Multiply, 2 Screen, 3 Overlay, 4 Add, 5 Subtract, 6 Darken, 7 Lighten, 8 Difference.
+fn blend_channel(mode: i64, b: f32, s: f32) -> f32 = {
+    let half: f32 = 0.5;
+    let one: f32 = 1.0;
+    let two: f32 = 2.0;
+    if (mode == 1) {
+        b * s
+    } else if (mode == 2) {
+        b + s - b * s
+    } else if (mode == 3) {
+        if (b <= half) { two * b * s } else { one - two * (one - b) * (one - s) }
+    } else if (mode == 4) {
+        clamp01(b + s)
+    } else if (mode == 5) {
+        clamp01(b - s)
+    } else if (mode == 6) {
+        if (b < s) { b } else { s }
+    } else if (mode == 7) {
+        if (b > s) { b } else { s }
+    } else if (mode == 8) {
+        if (b > s) { b - s } else { s - b }
+    } else {
+        s
+    }
+}
+
+// One colour channel of the composite. alpha_o must be > 0.
+fn composite_channel(mode: i64, cb: f32, cs: f32, alpha_b: f32, alpha_s: f32, alpha_o: f32) -> f32 = {
+    let one: f32 = 1.0;
+    let mixed: f32 = (one - alpha_b) * cs + alpha_b * blend_channel(mode, cb, cs);
+    (alpha_s * mixed + alpha_b * cb * (one - alpha_s)) / alpha_o
+}
+
+// Composites `layer` over `canvas`, in place in `canvas`, with the layer's blend mode and opacity.
+pub fn image_lab_composite(canvas: raw* f32, layer: raw* f32, count: i64, mode: i64, opacity: f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let layerOpacity: f32 = clamp01(opacity);
+    let mut i: i64 = 0;
+    let mut offset: i64 = 0;
+    let mut cr: raw* f32 = canvas;
+    let mut cg: raw* f32 = canvas;
+    let mut cbp: raw* f32 = canvas;
+    let mut ca: raw* f32 = canvas;
+    let mut lr: raw* f32 = layer;
+    let mut lg: raw* f32 = layer;
+    let mut lb: raw* f32 = layer;
+    let mut la: raw* f32 = layer;
+    let mut alpha_b: f32 = 0.0;
+    let mut alpha_s: f32 = 0.0;
+    let mut alpha_o: f32 = 0.0;
+    let mut red: f32 = 0.0;
+    let mut green: f32 = 0.0;
+    let mut blue: f32 = 0.0;
+
+    while (i < count) {
+        offset = i * 4;
+        cr = canvas + offset;
+        cg = cr + 1;
+        cbp = cr + 2;
+        ca = cr + 3;
+        lr = layer + offset;
+        lg = lr + 1;
+        lb = lr + 2;
+        la = lr + 3;
+
+        alpha_b = *ca;
+        alpha_s = *la * layerOpacity;
+        alpha_o = alpha_s + alpha_b * (one - alpha_s);
+
+        if (alpha_o > zero) {
+            red = composite_channel(mode, *cr, *lr, alpha_b, alpha_s, alpha_o);
+            green = composite_channel(mode, *cg, *lg, alpha_b, alpha_s, alpha_o);
+            blue = composite_channel(mode, *cbp, *lb, alpha_b, alpha_s, alpha_o);
+        } else {
+            red = zero;
+            green = zero;
+            blue = zero;
+        };
+
+        *cr = red;
+        *cg = green;
+        *cbp = blue;
+        *ca = alpha_o;
+        i = i + 1;
+    };
+    1
+}
