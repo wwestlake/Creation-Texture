@@ -1,7 +1,7 @@
 // Renders a swatch sheet of the Drawing brushes to a PNG, to look at by eye. Developer tool, no UI.
-//   DjehutiTextureDrawingSwatches.exe <out.png> [modifiers]
+//   DjehutiTextureDrawingSwatches.exe <out.png> [modifiers | script]
 // Brushes: one row per brush - a line and a circle outline painted with it, plus a filled polygon at the end.
-// "modifiers": drawings built with Scatter, Repeat, Wobble, Mirror and Jitter.
+// "modifiers": drawings built with Scatter, Repeat, Wobble, Mirror and Jitter. "script": drawings from Draw Script.
 
 #include "NoCrashDialogs.h"
 
@@ -40,7 +40,7 @@ int main(int argc, char** argv)
     disableCrashDialogs();
     if (argc < 2)
     {
-        std::cerr << "usage: DjehutiTextureDrawingSwatches <out.png> [modifiers]\n";
+        std::cerr << "usage: DjehutiTextureDrawingSwatches <out.png> [modifiers | script]\n";
         return 2;
     }
     image_graph::Library library;
@@ -87,7 +87,36 @@ int main(int argc, char** argv)
         connect(graph, input, "drawing", n, "drawing");
         return n;
     };
-    if (modifiersSheet)
+    const bool scriptSheet = argc > 2 && juce::String(argv[2]) == "script";
+    if (scriptSheet)
+    {
+        // A fractal tree, a rosette of arcs and a field of stars, all from Draw Script.
+        auto* tree = node("draw.script", { { "script", std::string(R"(def branch len depth {
+  forward len
+  if depth > 0 {
+    push; turn -24 + random(-6, 6); branch len * 0.72, depth - 1; pop
+    push; turn 22 + random(-6, 6); branch len * 0.68, depth - 1; pop
+  }
+}
+move 0.3 0.97
+heading 270
+branch 0.2 10)") } });
+        paintOn(tree, node("draw.brush", { { "size", 0.004f }, { "hardness", 0.8f }, { "color", ns::Vec3Default { 0.85f, 0.7f, 0.5f } } }), 0);
+
+        auto* rosette = node("draw.script", { { "script", std::string(R"(repeat 18 {
+  move 0.75 0.3
+  heading i * 20
+  arc 0.08 120
+  arc 0.08 120
+})") } });
+        paintOn(rosette, node("draw.brush", { { "size", 0.003f }, { "color", ns::Vec3Default { 0.4f, 0.8f, 1.0f } } }), 0);
+
+        auto* stars = node("draw.script", { { "script", std::string(R"(repeat 60 {
+  star random(0.55, 0.98), random(0.55, 0.98), random(0.01, 0.025), random(0.004, 0.01), 5, random(0, 72)
+})") } });
+        paintOn(stars, node("draw.brush", { { "size", 0.002f }, { "color", ns::Vec3Default { 1.0f, 0.9f, 0.4f } } }), 2);
+    }
+    else if (modifiersSheet)
     {
         // Grass: one curved blade scattered 400 times over the bottom, painted with a tapered bristle brush.
         auto* blade = node("draw.bezier", { { "x1", 0.5f }, { "y1", 0.5f }, { "cx1", 0.5f }, { "cy1", 0.45f }, { "cx2", 0.51f },

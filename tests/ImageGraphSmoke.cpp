@@ -4,6 +4,7 @@
 #include "NoCrashDialogs.h"
 
 #include <ImageGraph.h>
+#include <DrawScript.h>
 
 #include <cmath>
 #include <iostream>
@@ -638,6 +639,100 @@ int main()
             // Curve: from (0.1, 0.7) to (0.9, 0.3) exactly.
             auto* curve = add("draw.bezier");
             check("Curve: starts and ends on its end points", at(drawingOf(curve), 0, 0, 0.1f, 0.7f) && at(drawingOf(curve), 0, SIZE_MAX, 0.9f, 0.3f));
+        }
+
+        // Draw Script (milestone 4). Heading 0 = right, turning clockwise; worked out by hand.
+        {
+            auto check = [&](const char* what, bool good) {
+                if (good)
+                    std::cout << "ok   " << what << "\n";
+                else
+                {
+                    std::cerr << "FAIL " << what << "\n";
+                    ++failures;
+                }
+            };
+            auto closeTo = [](const drawing::Point& p, float x, float y) { return std::abs(p.x - x) < 1.0e-4f && std::abs(p.y - y) < 1.0e-4f; };
+            auto script = [&](const char* text) { return draw_script::run(text, {}, 1); };
+
+            const auto twoPoints = script("move 0.1 0.5\nline 0.9 0.5");
+            check("Script: move + line is one path of two points",
+                  twoPoints.error.empty() && twoPoints.drawing.paths.size() == 1 && twoPoints.drawing.paths[0].points.size() == 2
+                      && closeTo(twoPoints.drawing.paths[0].points[1], 0.9f, 0.5f));
+
+            // A square: start (0.25, 0.25), forward 0.5 then turn 90 four times -> right, down, left, up -> back to the start.
+            const auto square = script("move 0.25 0.25\nrepeat 4 {\n  forward 0.5\n  turn 90\n}");
+            check("Script: a turtle square closes on its start",
+                  square.error.empty() && square.drawing.paths.size() == 1 && square.drawing.paths[0].points.size() == 5
+                      && closeTo(square.drawing.paths[0].points[1], 0.75f, 0.25f) && closeTo(square.drawing.paths[0].points[2], 0.75f, 0.75f)
+                      && closeTo(square.drawing.paths[0].points[4], 0.25f, 0.25f));
+
+            // let and expressions: r = 0.2 -> a circle whose first point is (0.7, 0.5).
+            const auto circle = script("let r = 0.1 * 2\ncircle 0.5 0.5 r");
+            check("Script: let and expressions", circle.error.empty() && circle.drawing.paths.size() == 1 && closeTo(circle.drawing.paths[0].points[0], 0.7f, 0.5f));
+
+            // The loop index: circles at x 0.2, 0.5, 0.8 -> the third starts at (0.85, 0.5). "0.5 -0.1"-style arguments split.
+            const auto loop = script("repeat 3 { circle 0.2 + i * 0.3, 0.5, 0.05 }\ncircle 0.5 -0.1 0.05");
+            check("Script: the loop index, and a minus sign starting an argument",
+                  loop.error.empty() && loop.drawing.paths.size() == 4 && closeTo(loop.drawing.paths[2].points[0], 0.85f, 0.5f)
+                      && closeTo(loop.drawing.paths[3].points[0], 0.55f, -0.1f));
+
+            // push / pop: forward 0.2 then back to the saved pen, turn 90, forward 0.1 -> two paths, the second (0.5, 0.5) -> (0.5, 0.6).
+            const auto branch = script("move 0.5 0.5\npush\nforward 0.2\npop\nturn 90\nforward 0.1");
+            check("Script: push and pop", branch.error.empty() && branch.drawing.paths.size() == 2 && closeTo(branch.drawing.paths[0].points[1], 0.7f, 0.5f)
+                                              && closeTo(branch.drawing.paths[1].points[0], 0.5f, 0.5f) && closeTo(branch.drawing.paths[1].points[1], 0.5f, 0.6f));
+
+            // arc 0.1 90 from (0.5, 0.5) heading right: centre (0.5, 0.6), ends at (0.6, 0.6) heading down; forward 0.1 -> (0.6, 0.7).
+            const auto bend = script("move 0.5 0.5\narc 0.1 90\nforward 0.1");
+            check("Script: arc turns right around a centre beside the pen",
+                  bend.error.empty() && bend.drawing.paths.size() == 1 && closeTo(bend.drawing.paths[0].points.back(), 0.6f, 0.7f));
+
+            // if / else: a = 2 > 1 -> the radius 0.1 branch.
+            const auto choice = script("let a = 2\nif a > 1 {\n  circle 0.5 0.5 0.1\n} else {\n  circle 0.5 0.5 0.2\n}");
+            check("Script: if / else", choice.error.empty() && choice.drawing.paths.size() == 1 && closeTo(choice.drawing.paths[0].points[0], 0.6f, 0.5f));
+
+            // Errors name the line.
+            const auto typo = script("move 0.1 0.1\nforwrd 0.2");
+            check("Script: an unknown command names its line", typo.error.find("line 2") != std::string::npos && typo.error.find("forwrd") != std::string::npos);
+
+            // Procedures and recursion: a staircase of 3 steps (right 0.1, down 0.1) from (0.1, 0.1) ends at (0.4, 0.4), 7 points.
+            const auto stairs = script("def stair n {\n  if n > 0 {\n    forward 0.1\n    turn 90\n    forward 0.1\n    turn -90\n    stair n - 1\n  }\n}\n"
+                                       "move 0.1 0.1\nstair 3");
+            check("Script: a procedure calling itself",
+                  stairs.error.empty() && stairs.drawing.paths.size() == 1 && stairs.drawing.paths[0].points.size() == 7
+                      && closeTo(stairs.drawing.paths[0].points.back(), 0.4f, 0.4f));
+            // let is local to a procedure (x stays 1 -> radius 0.1 -> (0.6, 0.5)); set changes an outer variable (c = 3 -> (0.8, 0.5)).
+            const auto scoped = script("let x = 1\ndef f {\n  let x = 5\n}\nf\ncircle 0.5 0.5 x * 0.1\nlet c = 0\nrepeat 3 { set c = c + 1 }\ncircle 0.5 0.5 c * 0.1");
+            check("Script: let is local, set changes the outer variable",
+                  scoped.error.empty() && scoped.drawing.paths.size() == 2 && closeTo(scoped.drawing.paths[0].points[0], 0.6f, 0.5f)
+                      && closeTo(scoped.drawing.paths[1].points[0], 0.8f, 0.5f));
+            const auto endless = script("def f {\n  f\n}\nf");
+            check("Script: endless recursion stops with an error", endless.error.find("too deeply") != std::string::npos);
+
+            // random repeats with the seed.
+            const auto r1 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 7), r2 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 7),
+                       r3 = draw_script::run("circle random(0, 1) 0.5 0.1", {}, 8);
+            check("Script: random repeats with its seed",
+                  r1.error.empty() && r1.drawing.paths[0].points[0].x == r2.drawing.paths[0].points[0].x
+                      && r1.drawing.paths[0].points[0].x != r3.drawing.paths[0].points[0].x);
+
+            // The node reads the graph's Variables: a param "size" 0.3 -> first point (0.8, 0.5); overridden to 0.1 -> (0.6, 0.5).
+            ns::Symbol size;
+            size.id = "size";
+            size.name = "Size";
+            size.kind = ns::SymbolKind::Param;
+            size.type = ns::DataType::Float;
+            size.value = 0.3f;
+            graph.AddSymbol(size);
+            auto* node = add("draw.script");
+            set(node, "script", std::string("circle 0.5 0.5 size"));
+            const auto fromVariable = evaluator.evaluateDrawing(graph, node->Id(), "drawing", error);
+            evaluator.getHost().paramOverrides["size"] = 0.1f;
+            const auto overridden = evaluator.evaluateDrawing(graph, node->Id(), "drawing", error);
+            evaluator.getHost().paramOverrides.clear();
+            check("Draw Script node reads a graph Variable, and its outside value",
+                  fromVariable != nullptr && closeTo(fromVariable->paths[0].points[0], 0.8f, 0.5f) && overridden != nullptr
+                      && closeTo(overridden->paths[0].points[0], 0.6f, 0.5f));
         }
 
         // Paint with nothing wired to draw reports it.

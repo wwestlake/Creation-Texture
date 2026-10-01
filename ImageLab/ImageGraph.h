@@ -61,6 +61,11 @@ struct Context
     std::map<std::string, drawing::BrushPtr> brushes;
     std::map<std::string, drawing::DrawingPtr> drawingOutputs;
     std::map<std::string, drawing::BrushPtr> brushOutputs;
+    // The graph being evaluated, for nodes that read its Variables (Draw Script).
+    const ce::node_system::Graph* graph = nullptr;
+
+    // The graph's number, integer and toggle Variables by id, with params' outside values applied (toggles are 0 / 1).
+    std::map<std::string, double> numericVariables() const;
 
     // A setting: its wired value if one is wired in, else the value typed into the node.
     const ce::node_system::PinDefaultValue* setting(const std::string& pin) const;
@@ -78,6 +83,8 @@ struct Definition
 {
     ce::node_system::NodeTypeDescriptor descriptor;
     std::function<bool(Context&, std::map<std::string, ImagePtr>& outputs, juce::String& error)> evaluate;
+    // Reads the graph's Variables, so its cached result depends on them too.
+    bool readsVariables = false;
 };
 
 class Library final

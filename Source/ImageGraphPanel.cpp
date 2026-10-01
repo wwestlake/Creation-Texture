@@ -14,6 +14,31 @@ constexpr float thumbnailHeight = 100.0f;
 const juce::Colour panelBackground { 0xff1e2227 };
 
 // A small display thumbnail straight from the float image (nearest sample), without converting the whole image.
+// A Drawing's thumbnail: its paths as thin lines on a dark square (the canvas, 0..1 both ways).
+juce::Image drawingThumbnail(const drawing::Drawing& d, int size)
+{
+    juce::Image image(juce::Image::ARGB, size, size, true);
+    juce::Graphics g(image);
+    g.fillAll(juce::Colour(0xff101318));
+    g.setColour(juce::Colour(0xffe8edf2));
+    const float s = static_cast<float>(size);
+    size_t drawn = 0;
+    for (const auto& path : d.paths)
+    {
+        if (path.points.empty() || drawn > 200000)
+            continue;
+        juce::Path p;
+        p.startNewSubPath(path.points[0].x * s, path.points[0].y * s);
+        for (size_t i = 1; i < path.points.size(); ++i)
+            p.lineTo(path.points[i].x * s, path.points[i].y * s);
+        if (path.closed)
+            p.closeSubPath();
+        g.strokePath(p, juce::PathStrokeType(1.0f));
+        drawn += path.points.size();
+    }
+    return image;
+}
+
 juce::Image thumbnailOf(const image_graph::Image& image, int size)
 {
     if (image.width <= 0 || image.height <= 0)
@@ -141,9 +166,19 @@ public:
                 {
                     if (threadShouldExit() || pendingArrived())
                         break;
-                    if (node->Outputs().empty() || node->Outputs().front().type.dataType != ns::DataType::Texture)
-                        continue; // value nodes have no picture
+                    if (node->Outputs().empty())
+                        continue;
                     juce::String error;
+                    if (node->Outputs().front().type.dataType == ns::DataType::Drawing)
+                    {
+                        if (auto shapes = evaluator->evaluateDrawing(*copy, id, node->Outputs().front().name, error))
+                            out.thumbnails[id] = drawingThumbnail(*shapes, 96);
+                        else
+                            out.errors[id] = error;
+                        continue;
+                    }
+                    if (node->Outputs().front().type.dataType != ns::DataType::Texture)
+                        continue; // value and brush nodes have no picture
                     if (auto image = evaluator->evaluate(*copy, id, node->Outputs().front().name, error))
                         out.thumbnails[id] = thumbnailOf(*image, 96);
                     else
@@ -320,8 +355,10 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     graphView.onSelectionChanged = [this](ns::NodeId id) { selectionChanged(id); };
     graphView.onGetNodeExtraHeight = [this](ns::NodeId id) {
         const auto* node = graph.FindNode(id);
-        return node != nullptr && ! node->Outputs().empty() && node->Outputs().front().type.dataType == ns::DataType::Texture
-                 ? thumbnailHeight : 0.0f;
+        if (node == nullptr || node->Outputs().empty())
+            return 0.0f;
+        const auto type = node->Outputs().front().type.dataType;
+        return type == ns::DataType::Texture || type == ns::DataType::Drawing ? thumbnailHeight : 0.0f;
     };
     graphView.onPaintNode = [this](juce::Graphics& g, ns::NodeId id, juce::Rectangle<float> bounds) {
         // The thumbnail sits below the pin rows; the bounds are on screen, so scale its height by the zoom.
@@ -509,6 +546,29 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
         };
         height = 26;
         return box;
+    }
+
+    // Draw Script: a code editor, several lines high. The drawing updates as you type.
+    if (type == "draw.script" && pin.name == "script")
+    {
+        auto editor = std::make_unique<juce::TextEditor>();
+        editor->setMultiLine(true, false);
+        editor->setReturnKeyStartsNewLine(true);
+        editor->setTabKeyUsedAsCharacter(true);
+        editor->setScrollbarsShown(true);
+        editor->setFont(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 13.0f, juce::Font::plain));
+        editor->setText(std::holds_alternative<std::string>(pin.defaultValue) ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String(),
+                        juce::dontSendNotification);
+        editor->onTextChange = [this, nodeId = node.Id(), pinId = pin.id, e = editor.get()]() {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = e->getText().toStdString();
+                    graphEdited();
+                }
+        };
+        height = 260;
+        return editor;
     }
 
     // Surface Map: load settings from a saved surface map.

@@ -24,6 +24,8 @@ add_library(creation_texture_image_lab STATIC
     ImageGraph.h
     Drawing.cpp
     Drawing.h
+    DrawScript.cpp
+    DrawScript.h
     ImageDemoHost.cpp
     ImageDemoHost.h
 )

@@ -3,6 +3,7 @@
 #include "ImageLabFrustSources.h"
 #include "TextureSet.h"
 #include "ImageDemoHost.h"
+#include "DrawScript.h"
 
 #include <creation/frust/PluginRuntime.h>
 
@@ -321,6 +322,27 @@ const ns::PinDefaultValue* Context::setting(const std::string& pin) const
     if (wired != wiredValues.end())
         return &wired->second;
     return defaultOf(node, pin);
+}
+
+std::map<std::string, double> Context::numericVariables() const
+{
+    std::map<std::string, double> values;
+    if (graph == nullptr)
+        return values;
+    for (const auto& symbol : graph->Symbols())
+    {
+        auto value = symbol.value;
+        if (symbol.kind == ns::SymbolKind::Param)
+        {
+            auto overridden = host.paramOverrides.find(symbol.id);
+            if (overridden != host.paramOverrides.end())
+                value = overridden->second;
+        }
+        if (const auto* f = std::get_if<float>(&value)) values[symbol.id] = *f;
+        else if (const auto* i = std::get_if<std::int64_t>(&value)) values[symbol.id] = static_cast<double>(*i);
+        else if (const auto* b = std::get_if<bool>(&value)) values[symbol.id] = *b ? 1.0 : 0.0;
+    }
+    return values;
 }
 
 float Context::number(const std::string& pin, float fallback) const
@@ -1022,6 +1044,27 @@ Library::Library()
             return drawing::mirrored(d, c.integer("axis", 0) == 0, c.number("position", 0.5f), c.flag("keepOriginal", true));
         }));
 
+    {
+        auto script = define("draw.script", "Draw Script", "Draw",
+            "A drawing written as commands - the way the AI draws. A pen moves over the canvas ((0, 0) top-left, (1, 1) "
+            "bottom-right, heading 0 = right, clockwise): move, line, forward, turn, arc, curve, close; shapes circle, "
+            "ellipse, rect, polygon, star; repeat n { }, if / else, let, push / pop, scale, seed. The graph's Variables "
+            "can be used by id. See docs/DRAW_SCRIPT.md.",
+            { textIn("script"), intIn("seed", 1) }, { drawingOut("drawing") },
+            [](Context& c, auto&, juce::String& error) {
+                const auto result = draw_script::run(c.text("script").toStdString(), c.numericVariables(), c.integer("seed", 1));
+                if (! result.error.empty())
+                {
+                    error = juce::String(result.error);
+                    return false;
+                }
+                c.drawingOutputs["drawing"] = std::make_shared<drawing::Drawing>(result.drawing);
+                return true;
+            });
+        script.readsVariables = true;
+        definitions.push_back(std::move(script));
+    }
+
     definitions.push_back(define("draw.brush", "Brush", "Draw",
         "How a drawing is painted. Size is the stamp's width as a fraction of the canvas's shorter side; spacing is the gap "
         "between stamps as a fraction of the size; hardness 1 is a crisp edge, 0 soft from the centre. Angle is in degrees. "
@@ -1400,7 +1443,11 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
 
     // Wired image inputs first (each computes only the output it is asked for), building this node's signature.
     Context context { *node, host, *routines, *surfaceMaps, {}, {}, {}, {} };
+    context.graph = &graph;
     std::string signature = node->TypeName();
+    if (definition->readsVariables)
+        for (const auto& [name, value] : context.numericVariables())
+            signature += "|$" + name + "=" + std::to_string(value);
     for (const auto& pin : node->Inputs())
     {
         const ns::Connection* wire = nullptr;
