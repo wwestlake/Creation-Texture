@@ -194,6 +194,13 @@ ns::PinSignature intIn(const std::string& name, std::int64_t v) { return { name,
 ns::PinSignature floatIn(const std::string& name, float v) { return { name, { ns::PinKind::Data, ns::DataType::Float }, v }; }
 ns::PinSignature boolIn(const std::string& name, bool v) { return { name, { ns::PinKind::Data, ns::DataType::Bool }, v }; }
 ns::PinSignature colourIn(const std::string& name, float r, float g, float b) { return { name, { ns::PinKind::Data, ns::DataType::Color }, ns::Vec3Default { r, g, b } }; }
+// An integer setting whose values are named by one of the library's enums (a dropdown in Properties).
+ns::PinSignature enumIn(const std::string& name, const std::string& enumName, std::int64_t v)
+{
+    ns::PinSignature pin { name, { ns::PinKind::Data, ns::DataType::Int }, v };
+    pin.type.enumType = enumName;
+    return pin;
+}
 ns::PinSignature textIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::String }, std::string("") }; }
 
 Definition define(std::string type, std::string name, std::string category, std::string description,
@@ -266,9 +273,17 @@ const char* surfaceSettingNames[] = { "sunken", "intensity", "sharpen", "noiseRe
 }
 
 //==============================================================================
+const ns::PinDefaultValue* Context::setting(const std::string& pin) const
+{
+    auto wired = wiredValues.find(pin);
+    if (wired != wiredValues.end())
+        return &wired->second;
+    return defaultOf(node, pin);
+}
+
 float Context::number(const std::string& pin, float fallback) const
 {
-    const auto* v = defaultOf(node, pin);
+    const auto* v = setting(pin);
     if (v == nullptr) return fallback;
     if (const auto* f = std::get_if<float>(v)) return *f;
     if (const auto* i = std::get_if<std::int64_t>(v)) return static_cast<float>(*i);
@@ -277,7 +292,7 @@ float Context::number(const std::string& pin, float fallback) const
 
 int Context::integer(const std::string& pin, int fallback) const
 {
-    const auto* v = defaultOf(node, pin);
+    const auto* v = setting(pin);
     if (v == nullptr) return fallback;
     if (const auto* i = std::get_if<std::int64_t>(v)) return static_cast<int>(*i);
     if (const auto* f = std::get_if<float>(v)) return juce::roundToInt(*f);
@@ -286,14 +301,14 @@ int Context::integer(const std::string& pin, int fallback) const
 
 bool Context::flag(const std::string& pin, bool fallback) const
 {
-    const auto* v = defaultOf(node, pin);
+    const auto* v = setting(pin);
     if (const auto* b = v != nullptr ? std::get_if<bool>(v) : nullptr) return *b;
     return fallback;
 }
 
 ns::Vec3Default Context::colour(const std::string& pin, ns::Vec3Default fallback) const
 {
-    const auto* v = defaultOf(node, pin);
+    const auto* v = setting(pin);
     if (const auto* c = v != nullptr ? std::get_if<ns::Vec3Default>(v) : nullptr)
         return *c;
     return fallback;
@@ -301,7 +316,7 @@ ns::Vec3Default Context::colour(const std::string& pin, ns::Vec3Default fallback
 
 juce::String Context::text(const std::string& pin) const
 {
-    const auto* v = defaultOf(node, pin);
+    const auto* v = setting(pin);
     if (const auto* s = v != nullptr ? std::get_if<std::string>(v) : nullptr) return juce::String(*s);
     return {};
 }
@@ -338,6 +353,30 @@ Library::Library()
             out["image"] = image;
             return true;
         }));
+
+    // --- Enums --- the named choices integer settings use. Order is the value: variant i is i.
+    enums.push_back({ "BlendMode", "Blend Mode",
+                      { "Normal", "Multiply", "Screen", "Overlay", "Add", "Subtract", "Darken", "Lighten", "Difference" },
+                      "How a foreground image is combined with the background." });
+    enums.push_back({ "GradientDirection", "Gradient Direction", { "Left to Right", "Top to Bottom", "Radial" },
+                      "Which way a gradient runs." });
+    enums.push_back({ "Axis", "Axis", { "Horizontal", "Vertical" }, "A horizontal or vertical direction." });
+
+    // --- Values --- one value, typed in, wired into any setting of the same type.
+    auto valueNode = [](std::string type, std::string name, ns::PinSignature pin, std::string description) {
+        ns::PinSignature output { "value", pin.type, {} };
+        const auto pinName = pin.name;
+        return define(std::move(type), std::move(name), "Values", std::move(description), { pin }, { output },
+            [pinName](Context& c, auto&, juce::String&) {
+                if (const auto* v = c.setting(pinName))
+                    c.valueOutputs["value"] = *v;
+                return true;
+            });
+    };
+    definitions.push_back(valueNode("image.value.number", "Number", floatIn("value", 0.5f), "A number, wired into any number setting."));
+    definitions.push_back(valueNode("image.value.integer", "Integer", intIn("value", 1), "A whole number, wired into any integer setting."));
+    definitions.push_back(valueNode("image.value.toggle", "Toggle", boolIn("value", false), "On or off, wired into any toggle setting."));
+    definitions.push_back(valueNode("image.value.color", "Color", colourIn("value", 1.0f, 1.0f, 1.0f), "A colour, wired into any colour setting."));
 
     // --- Generate ---
     auto sizeInputs = [](std::vector<ns::PinSignature> extra) {
@@ -380,8 +419,8 @@ Library::Library()
             return true;
         }));
 
-    definitions.push_back(define("image.gradient", "Gradient", "Generate", "0 to 1. Direction: 0 left-right, 1 top-bottom, 2 radial.",
-        sizeInputs({ intIn("direction", 0) }), { imageOut("image") },
+    definitions.push_back(define("image.gradient", "Gradient", "Generate", "0 to 1, left to right, top to bottom, or out from the centre.",
+        sizeInputs({ enumIn("direction", "GradientDirection", 0) }), { imageOut("image") },
         [](Context& c, auto& out, juce::String& error) {
             auto image = generatorTarget(c);
             if (! ok(c.routines.gradient(image->rgba.data(), image->width, image->height, juce::jlimit(0, 2, c.integer("direction", 0))),
@@ -755,8 +794,8 @@ Library::Library()
             return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float, float)>("fx_swirl")(
                 in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("angle", 180.0f) * 0.0174532925f, c.number("radius", 1.0f));
         }));
-    definitions.push_back(sourceToDest("image.ripple", "Ripple", "Distort", "Sine-wave shift. Direction: 0 horizontal, 1 vertical.",
-        { floatIn("amplitude", 8.0f), floatIn("wavelength", 64.0f), intIn("direction", 0) }, [](Context& c, const Image& in, Image& out) {
+    definitions.push_back(sourceToDest("image.ripple", "Ripple", "Distort", "Sine-wave shift, horizontal or vertical.",
+        { floatIn("amplitude", 8.0f), floatIn("wavelength", 64.0f), enumIn("direction", "Axis", 0) }, [](Context& c, const Image& in, Image& out) {
             return c.routines.fx<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, float, float, std::int64_t)>("fx_ripple")(
                 in.rgba.data(), out.rgba.data(), in.width, in.height, c.number("amplitude", 8.0f), c.number("wavelength", 64.0f),
                 juce::jlimit(0, 1, c.integer("direction", 0)));
@@ -793,8 +832,8 @@ Library::Library()
 
     // --- Combine ---
     definitions.push_back(define("image.blend", "Blend", "Combine",
-        "Foreground over background. Mode: 0 Normal, 1 Multiply, 2 Screen, 3 Overlay, 4 Add, 5 Subtract, 6 Darken, 7 Lighten, 8 Difference.",
-        { imageIn("background"), imageIn("foreground"), intIn("mode", 0), floatIn("opacity", 1.0f) }, { imageOut("image") },
+        "Foreground over background, combined by the blend mode.",
+        { imageIn("background"), imageIn("foreground"), enumIn("mode", "BlendMode", 0), floatIn("opacity", 1.0f) }, { imageOut("image") },
         [needInput](Context& c, auto& out, juce::String& error) {
             auto back = needInput(c, "background", error);
             auto front = back != nullptr ? needInput(c, "foreground", error) : nullptr;
@@ -897,8 +936,11 @@ Library::Library()
 
 void Library::registerTypes(ns::NodeTypeRegistry& registry) const
 {
+    for (const auto& e : enums)
+        registry.RegisterEnum(e);
     for (const auto& d : definitions)
         registry.Register(d.descriptor);
+    ns::RegisterSymbolGetNodes(registry); // params / constants / variables (shared/NodeSystem/SYMBOLS.md)
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -953,6 +995,27 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
     return found->second;
 }
 
+bool Evaluator::evaluateValue(const ns::Graph& graph, ns::NodeId node, const std::string& output, ns::PinDefaultValue& value,
+                              juce::String& error)
+{
+    if (! isReady())
+    {
+        error = getError();
+        return false;
+    }
+    std::string signature;
+    if (! evaluateNode(graph, node, { output }, signature, error, 0))
+        return false;
+    auto found = cache[node].values.find(output);
+    if (found == cache[node].values.end())
+    {
+        error = "The node has no value output called " + juce::String(output) + ".";
+        return false;
+    }
+    value = found->second;
+    return true;
+}
+
 bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::vector<std::string>& wanted,
                              std::string& signatureOut, juce::String& error, int depth)
 {
@@ -967,6 +1030,30 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         error = "A node is missing from the graph.";
         return false;
     }
+    // A symbol Get node: the param's outside value if one is set, else the symbol's own value.
+    if (ns::IsSymbolGetNode(node->TypeName()))
+    {
+        const auto* symbol = ns::SymbolForGetNode(graph, *node);
+        if (symbol == nullptr)
+        {
+            error = "A Get node's symbol is missing - choose one in its Properties.";
+            return false;
+        }
+        auto value = symbol->value;
+        if (symbol->kind == ns::SymbolKind::Param)
+        {
+            auto overridden = host.paramOverrides.find(symbol->id);
+            if (overridden != host.paramOverrides.end())
+                value = overridden->second;
+        }
+        signatureOut = std::to_string(std::hash<std::string> {}(node->TypeName() + "|" + symbol->id + "=" + valueText(value)));
+        auto& cachedGet = cache[id];
+        cachedGet.signature = signatureOut;
+        cachedGet.outputs.clear();
+        cachedGet.values = { { ns::kSymbolValuePin, value } };
+        return true;
+    }
+
     const auto* definition = library.find(node->TypeName());
     if (definition == nullptr)
     {
@@ -975,7 +1062,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     }
 
     // Wired image inputs first (each computes only the output it is asked for), building this node's signature.
-    Context context { *node, host, *routines, *surfaceMaps, {}, {} };
+    Context context { *node, host, *routines, *surfaceMaps, {}, {}, {}, {} };
     std::string signature = node->TypeName();
     for (const auto& pin : node->Inputs())
     {
@@ -997,7 +1084,10 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         std::string upstream;
         if (! evaluateNode(graph, wire->fromNode, { fromPin->name }, upstream, error, depth + 1))
             return false;
-        context.inputs[pin.name] = cache[wire->fromNode].outputs[fromPin->name];
+        if (fromPin->type.dataType == ns::DataType::Texture)
+            context.inputs[pin.name] = cache[wire->fromNode].outputs[fromPin->name];
+        else
+            context.wiredValues[pin.name] = cache[wire->fromNode].values[fromPin->name];
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
     }
     signatureOut = std::to_string(std::hash<std::string> {}(signature));
@@ -1009,7 +1099,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     {
         bool complete = true;
         for (const auto& name : needed)
-            complete = complete && cached.outputs.count(name) > 0;
+            complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0);
         if (complete)
             return true;
         for (const auto& [name, image] : cached.outputs)
@@ -1027,6 +1117,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     }
     cached.signature = signatureOut;
     cached.outputs = std::move(outputs);
+    cached.values = std::move(context.valueOutputs);
     return true;
 }
 

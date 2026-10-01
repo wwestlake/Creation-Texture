@@ -3,6 +3,7 @@
 #include <juce_graphics/juce_graphics.h>
 #include <node_system/graph.h>
 #include <node_system/type_registry.h>
+#include <node_system/symbol_nodes.h>
 
 #include "SurfaceMaps.h"
 
@@ -35,6 +36,9 @@ struct Host
 {
     // A project image by logical path, as a linear-light image (null if it cannot be read).
     std::function<ImagePtr(const juce::String& logicalPath)> loadImage;
+    // Values for the graph's params, by symbol id, set from outside (an Automation, the LLM). They win over the
+    // param's own default (shared/NodeSystem/SYMBOLS.md).
+    std::map<std::string, ce::node_system::PinDefaultValue> paramOverrides;
 };
 
 class Routines; // the compiled FRust routines
@@ -47,6 +51,13 @@ struct Context
     surface_maps::Engine& surfaceMaps;
     std::map<std::string, ImagePtr> inputs;     // wired image inputs, by pin name (missing = not wired)
     std::vector<std::string> wantedOutputs;     // the outputs somebody asked for
+    // Settings wired from another node (a Get node, a Value node...): they replace the typed-in value.
+    std::map<std::string, ce::node_system::PinDefaultValue> wiredValues;
+    // Non-image outputs this node produces (Value nodes).
+    std::map<std::string, ce::node_system::PinDefaultValue> valueOutputs;
+
+    // A setting: its wired value if one is wired in, else the value typed into the node.
+    const ce::node_system::PinDefaultValue* setting(const std::string& pin) const;
 
     float number(const std::string& pin, float fallback) const;
     int integer(const std::string& pin, int fallback) const;
@@ -70,9 +81,12 @@ public:
     void registerTypes(ce::node_system::NodeTypeRegistry& registry) const;
     const Definition* find(const std::string& typeName) const;
     const std::vector<Definition>& all() const noexcept { return definitions; }
+    // The named choices the nodes' integer settings use (shared/NodeSystem/enums.h).
+    const std::vector<ce::node_system::EnumDef>& getEnums() const noexcept { return enums; }
 
 private:
     std::vector<Definition> definitions;
+    std::vector<ce::node_system::EnumDef> enums;
 };
 
 class Evaluator final
@@ -86,6 +100,10 @@ public:
 
     // The image on one output of one node, computing whatever it depends on. Null with an error if it cannot.
     ImagePtr evaluate(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::string& output, juce::String& error);
+    // A non-image output (a Get node's or a Value node's value).
+    bool evaluateValue(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::string& output,
+                       ce::node_system::PinDefaultValue& value, juce::String& error);
+    Host& getHost() noexcept { return host; }
 
     // Forget cached results (for example after the project's images change).
     void clearCache();
@@ -95,6 +113,7 @@ private:
     {
         std::string signature;
         std::map<std::string, ImagePtr> outputs;
+        std::map<std::string, ce::node_system::PinDefaultValue> values;
     };
 
     bool evaluateNode(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::vector<std::string>& wanted,

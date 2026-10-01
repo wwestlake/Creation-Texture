@@ -243,6 +243,113 @@ int main()
         expectPixel("Vignette leaves the centre alone", run(effect("image.vignette", source(3, 3, 0.8f, 0.8f, 0.8f))), 1, 1, { 0.8f, 0.8f, 0.8f });
     }
 
+    // Graph symbols and values (shared/NodeSystem/SYMBOLS.md): wired values replace typed-in settings.
+    {
+        ns::Symbol gamma;
+        gamma.id = "gamma";
+        gamma.name = "Gamma";
+        gamma.kind = ns::SymbolKind::Param;
+        gamma.type = ns::DataType::Float;
+        gamma.value = 2.0f;
+        graph.AddSymbol(gamma);
+
+        auto* grey4 = add("image.create");
+        set(grey4, "width", std::int64_t { 4 });
+        set(grey4, "height", std::int64_t { 4 });
+        set(grey4, "color", ns::Vec3Default { 0.4f, 0.4f, 0.4f });
+        auto* lv = add("image.levels");
+        connect(graph, grey4, "image", lv, "image");
+        set(lv, "inBlack", 0.2f);
+        set(lv, "inWhite", 0.6f);
+        auto* get = ns::AddSymbolGetNode(graph, registry, gamma);
+        connect(graph, get, "value", lv, "gamma");
+        // (0.4 - 0.2) / 0.4 = 0.5, gamma 2 -> 0.5^(1/2) = 0.707107.
+        expectPixel("A param wired into Levels gamma", evaluator.evaluate(graph, lv->Id(), "image", error), 0, 0, { 0.707107f });
+        evaluator.getHost().paramOverrides["gamma"] = 1.0f;
+        expectPixel("The param overridden from outside (gamma 1)", evaluator.evaluate(graph, lv->Id(), "image", error), 0, 0, { 0.5f });
+        evaluator.getHost().paramOverrides.clear();
+
+        // An Integer value node wired into Posterize levels: 2 levels, grey 0.6 -> 1.
+        auto* grey6 = add("image.create");
+        set(grey6, "width", std::int64_t { 2 });
+        set(grey6, "height", std::int64_t { 2 });
+        set(grey6, "color", ns::Vec3Default { 0.6f, 0.6f, 0.6f });
+        auto* post = add("image.posterize");
+        connect(graph, grey6, "image", post, "image");
+        auto* levelsValue = add("image.value.integer");
+        set(levelsValue, "value", std::int64_t { 2 });
+        connect(graph, levelsValue, "value", post, "levels");
+        expectPixel("An Integer value wired into Posterize levels", evaluator.evaluate(graph, post->Id(), "image", error), 0, 0, { 1.0f });
+
+        // A Get node whose symbol is gone reports it.
+        auto* lost = add("core.symbol.get.float");
+        set(lost, "symbol", std::string("no_such_symbol"));
+        ns::PinDefaultValue value;
+        juce::String lostError;
+        if (evaluator.evaluateValue(graph, lost->Id(), "value", value, lostError) || lostError.isEmpty())
+        {
+            std::cerr << "FAIL a Get node with a missing symbol did not report it\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   a missing symbol is reported\n";
+
+        // Enums (shared/NodeSystem/enums.h): Blend's mode is a Blend Mode choice; a Choice param drives it.
+        const auto* blendDescriptor = registry.Find("image.blend");
+        if (registry.FindEnum("BlendMode") == nullptr || blendDescriptor == nullptr || blendDescriptor->inputs[2].type.enumType != "BlendMode")
+        {
+            std::cerr << "FAIL Blend's mode is not a Blend Mode choice\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   Blend's mode is a Blend Mode choice\n";
+
+        ns::Symbol choice;
+        choice.id = "blend_choice";
+        choice.name = "Blend Choice";
+        choice.kind = ns::SymbolKind::Param;
+        choice.type = ns::DataType::Int;
+        choice.enumType = "BlendMode";
+        choice.value = std::int64_t { 1 }; // Multiply
+        graph.AddSymbol(choice);
+        auto* back = add("image.create");
+        auto* front = add("image.create");
+        for (auto* node : { back, front })
+        {
+            set(node, "width", std::int64_t { 2 });
+            set(node, "height", std::int64_t { 2 });
+        }
+        set(back, "color", ns::Vec3Default { 0.5f, 0.5f, 0.5f });
+        set(front, "color", ns::Vec3Default { 0.4f, 0.4f, 0.4f });
+        auto* blend = add("image.blend");
+        connect(graph, back, "image", blend, "background");
+        connect(graph, front, "image", blend, "foreground");
+        auto* mode = ns::AddSymbolGetNode(graph, registry, choice);
+        connect(graph, mode, "value", blend, "mode");
+        // Multiply: 0.5 x 0.4 = 0.2.
+        expectPixel("A Blend Mode choice param (Multiply)", evaluator.evaluate(graph, blend->Id(), "image", error), 0, 0, { 0.2f });
+        // Screen: 1 - (1 - 0.5)(1 - 0.4) = 0.7.
+        evaluator.getHost().paramOverrides["blend_choice"] = std::int64_t { 2 };
+        expectPixel("The choice overridden from outside (Screen)", evaluator.evaluate(graph, blend->Id(), "image", error), 0, 0, { 0.7f });
+        evaluator.getHost().paramOverrides.clear();
+
+        // A Blend Mode cannot wire into Ripple's direction (an Axis).
+        auto* ripple = add("image.ripple");
+        const auto* rippleDirection = [&]() -> const ns::Pin* {
+            for (const auto& p : ripple->Inputs())
+                if (p.name == "direction")
+                    return &p;
+            return nullptr;
+        }();
+        if (rippleDirection == nullptr || graph.Connect(mode->Id(), mode->Outputs().front().id, ripple->Id(), rippleDirection->id))
+        {
+            std::cerr << "FAIL a Blend Mode choice wired into an Axis setting\n";
+            ++failures;
+        }
+        else
+            std::cout << "ok   a Blend Mode choice does not wire into an Axis setting\n";
+    }
+
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
     // full, varied image inside 0..1, and that Hills (height) is marked as data.
     for (const char* type : { "image.gen.wood", "image.gen.marble", "image.gen.hills_raw" })

@@ -44,7 +44,8 @@ asset that node accepts.
 Texture is the suite's surface lab, with work areas:
 
 - **Materials** - the material node graph with a live 3D preview.
-- **Image Lab** - a procedural image editor built on a layer stack (section 5).
+- **Image Graph** - one procedural image system (nodes, layers, command drawing, surface maps), used through
+  several views (sections 4a, 4b, 5).
 - **Automations** - rules that run procedures automatically when an asset comes in.
 
 Everything the app produces goes back into the project as assets (saved materials, processed images,
@@ -58,24 +59,25 @@ choice - so adjustments can be made later. A tool's output (an image, a texture 
 - Materials: the material graph (`.frgraph`) - File > Open Material.
 - Surface Map: the texture set manifest records the source image and every setting - File > Open Surface Map
   reopens it with all knobs as saved; saving again under the same name updates it.
-- Image Lab: needs its own document (the layer stack, each layer's source and settings, the history of applied
-  effects). Not built yet - today it only saves the flattened image.
+- Image Graph: the graph document (nodes, wires, symbols, settings) - File > Open Image Graph. The Layers and
+  Draw views are views of it, so they need no document of their own.
 
 ### Work areas own the whole layout (decided 2026-09-27)
 
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own
 complete window layout, like DaVinci Resolve's pages or Blender's workspaces:
 
-- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Image Lab**, **Surface Map**,
-  **Image Graph** (Automations later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
+- Work areas are chosen from a **Layout** menu in the main menu bar: **Materials**, **Graph**, **Layers**, **Draw**,
+  **Surface Map** (Automations later), with a tick on the current one, and **Reset Layout**. No switcher buttons (owner, 2026-09-29).
   Choosing one swaps the whole layout; only that area's panels are shown. Panels of other areas never linger.
 - **Materials:** node palette on the left, Node Graph in the centre, 3D Preview on the right with Properties
   (the selected node) below it.
-- **Image Lab:** the canvas in the centre as the main thing, Layers on the right with History (the undo list)
-  below it; effects and tools on the left once they exist. No empty placeholder panels.
+- **Layers:** the canvas in the centre as the main thing, Layers on the right with History (the undo list)
+  below it; effects on the left. **Draw:** the canvas in the centre, the Draw node's script and brushes beside
+  it. No empty placeholder panels.
 - **Each area remembers its arrangement** (saved per work area through the suite's VFS settings store), with
   **Layout > Reset Layout** to go back to the default.
-- **Menus follow the work area**: Image Lab has its own Layer menu; Materials keeps the material menus. No
+- **Menus follow the work area**: Layers has its own Layer menu; Materials keeps the material menus. No
   commands that do not apply to the current area.
 
 ### The general node system is research's, not Texture's (2026-09-25)
@@ -89,7 +91,7 @@ test bed. Until it is ready:
 - Texture keeps a clean seam between "the graph" and "compile it for a target", so research's system can be
   swapped in there.
 - Work that carries over regardless of graph engine continues: node asset panels, the preview, storage in the
-  project, getting assets in and out, and the Image Lab below.
+  project, getting assets in and out, and the Image Graph views below.
 
 ## 4a. Surface Map: CrazyBump-style maps, saved as a texture set (decided 2026-09-30)
 
@@ -128,7 +130,8 @@ A node graph for making and processing images, in the spirit of Substance Design
   runs on the image wired into it. **One output per map type** (normal, height, occlusion, roughness, specular,
   diffuse, ORM): connect the ones you want - **an output that is not connected is not computed**.
 - Nothing is computed unless something downstream (or the preview) needs it.
-- **Its own layout: Layout > Image Graph** (node palette, graph, Properties, 2D preview).
+- **Its own layout: Layout > Graph** (node palette, Variables, graph, Properties, 2D preview), one of the views of
+  the Image Graph (section 5).
 - **Preview anywhere**: every node shows a thumbnail, and any node can be shown in a large 2D preview.
 - **Image analysis** nodes (histogram and other statistics) and **adjustment** nodes that change how colour and
   contrast are distributed - Curves and Levels edited by drawing on a graph over the histogram, like GIMP.
@@ -137,51 +140,56 @@ A node graph for making and processing images, in the spirit of Substance Design
   FRust routine and settings) kept separate from the graph engine so it can move to research's general node
   system when that is ready. Owner decision, 2026-09-30.
 
-## 5. Image Lab: a procedural layer editor
+## 5. One image system: the Image Graph, used in several ways (decided 2026-09-30)
 
-Think GIMP, simpler, with **no hand/mouse drawing tools**. Everything is procedural.
+**Image Lab is folded into the Image Graph.** There is one engine and one document type: the Image Graph.
+The separate Image Lab document and work area are retired and deleted outright. There is no old-format
+handling. The Layout menu entries are **views of the same graph**:
 
-- **A layer stack, worked graphically** like GIMP: each layer has a thumbnail, name, visibility, opacity, and
-  blend mode; layers are reordered by dragging; the canvas shows the composite.
-- **Layers start from images already in the project**, chosen in context (the rule in section 1) - never from a
-  general browser.
-- **Effects change the image.** An effect can modify a layer or, like GIMP, **produce a new layer** with the
-  result.
-- **Procedures are FRust.** Every effect and procedure is FRust code - written by hand today, generated by
-  research's node system eventually. The app does not care where the FRust came from.
+- **Graph**: the node view (section 4b).
+- **Layers**: the GIMP-like stack view (below).
+- **Draw**: a large canvas plus the command script of the selected Draw node.
+- **Surface Map**: the full panel for a Surface Map node (section 4a).
+- **Materials**: unchanged.
+
+Every node is a procedure that produces an image. Its result is cached, so it acts as baked pixels, and that
+cached image is the input to the next nodes, including further drawing.
+
+### Layers view: GIMP feel, graph underneath
+
+- **The layer stack is a view of a chain of graph nodes.** Each layer is a node, and its blend mode, opacity and
+  visibility are a Blend into the layer below. Reordering layers rewires the chain.
+- **Layers start from images already in the project**, chosen in context (section 1), or from any generator or
+  Draw node.
+- **Applying an effect is GIMP-style.** Choose an effect for a layer and a dialog opens with its settings, presets,
+  blend mode and opacity, **Preview** (on by default) and **Split view**. Preview is computed in the background
+  and drawn as it is produced. **Apply** inserts the effect node into that layer's chain, or onto a **new layer**
+  above if chosen, and computes it with a progress bar. **Cancel** discards everything.
+- It is not live. Results are cached, so the feel is baked pixels, but any step can be reopened and recomputed,
+  and the LLM can edit any of it.
+- **Every apply is one undo step** in a readable history (the same history the LLM reads and rolls back).
+  **Repeat Last** and **Re-show Last** work as in GIMP.
 - Results are saved back to the project as new assets (a flattened image, or individual layers).
 
-### How effects are applied: GIMP style, baked into the pixels (decided 2026-09-27)
+### Draw node: drawing by command, not by mouse
 
-Not live, not real time - it is a maths job. The owner's words: GIMP-style effects applied to images; it
-updates the image on screen as it does the work, but it does not have to be live action. Modelled on GIMP's
-classic filter workflow (GIMP 3 with "Merge filter" on):
+The point is that the AI can program it to draw complex things. It is not a teaching tool.
 
-1. Select a layer, choose an effect.
-2. **A dialog opens** with the effect's parameters, plus the common controls: presets, blend mode and opacity for
-   the result, **Preview** (on by default), and **Split view** (before/after with a draggable divider).
-3. With Preview on, the canvas shows the result while parameters change - computed in the background and drawn
-   as it is produced. Nothing is written to the layer yet.
-4. **Apply** runs the effect on the full layer with a progress bar and writes the result **into the pixels** -
-   or onto a **new layer** above, if chosen. **Cancel** discards everything.
-5. **Every apply is one undo step**, listed in a readable history (the same history the LLM reads and rolls
-   back).
-6. **Repeat Last** and **Re-show Last**, as in GIMP.
+- **Inputs:** an optional canvas image to draw onto, plus settings and symbols. Outputs an image, cached like any
+  node.
+- **Body:** a command script: pen and brush selection, move, line, arc, bezier, shapes, transforms (push/pop,
+  translate, rotate, scale), repeat, seeded randomness and scatter.
+- Its output can feed any node, including another Draw node that draws over it.
 
-So a layer is just pixels plus name, visibility, opacity and blend mode; effects are operations that change
-pixels, not objects that live in the stack.
+### Brushes
 
-### Procedural brushes
-
-Brushes are in; hand-drawn strokes are out. A brush is a procedural object:
-
-- a **stamp** - a shape, or a **texture** (an image from the project, for texture brushes);
-- **stroke settings** - spacing, rotation, scale, jitter/scatter, blend;
-- a **stroke** supplied by a procedure, not the mouse - a path, a grid, a scatter, the edge of a mask, a
-  noise-driven curve, a line through the image.
-
-The owner has further thoughts on how texture brushes should work - get them before designing brushes in
-detail.
+- **Brush shapes:** built-in tips (round, square, soft, chalk, bristle...) and **any image as a tip**, wired in from
+  another node or chosen from the project in context. So a Clouds node or a painted stamp can be a brush.
+- **Stroke settings:** size, spacing, opacity, hardness, rotation (fixed, or following the stroke), scatter and
+  jitter, blend, and a size or opacity curve along the stroke.
+- **The stroke comes from a procedure, not the mouse:** a path from the Draw script, a grid, a scatter, the edge
+  of a mask, a noise-driven curve.
+- The owner has further thoughts on texture brushes. Get them before finalizing texture-brush detail.
 
 ### Use case (illustration, not a spec): make an image tileable
 

@@ -72,10 +72,12 @@ MainComponent::MainComponent()
 
     imageGraphDock = std::make_unique<CreationDock::DockManager>(*this);
     imageGraphDock->registerPanel("GraphNodes", "Nodes", std::make_unique<NonOwningPanelHost>(imageGraph.getPalette()), Zone::Left);
+    imageGraphDock->registerPanel("GraphVariables", "Variables", std::make_unique<NonOwningPanelHost>(imageGraph.getVariablesPanel()), Zone::Left);
     imageGraphDock->registerPanel("ImageGraph", "Image Graph", std::make_unique<NonOwningPanelHost>(imageGraph.getGraphView()), Zone::CenterTab);
     imageGraphDock->registerPanel("GraphPreview", "2D Preview", std::make_unique<NonOwningPanelHost>(imageGraph.getPreview()), Zone::Right);
     imageGraphDock->registerPanel("GraphProperties", "Properties", std::make_unique<NonOwningPanelHost>(imageGraph.getPropertiesPanel()), Zone::Right);
     imageGraphDock->activatePanel("GraphPreview");
+    imageGraphDock->activatePanel("GraphNodes");
     addChildComponent(imageGraphDock.get());
 
     loadLayouts();
@@ -227,6 +229,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int, const juce::String& menuName
             menu.addItem(76, "Image Graph");
             menu.addItem(77, "2D Preview");
             menu.addItem(78, "Properties");
+            menu.addItem(80, "Variables");
         }
         else if (surfaceArea)
         {
@@ -289,6 +292,7 @@ void MainComponent::menuItemSelected(int menuItemID, int)
         case 76: dock.activatePanel("ImageGraph"); break;
         case 77: dock.activatePanel("GraphPreview"); break;
         case 78: dock.activatePanel("GraphProperties"); break;
+        case 80: dock.activatePanel("GraphVariables"); break;
         case 60: dock.activatePanel("SurfaceSettings"); break;
         case 61: dock.activatePanel("SurfaceMaps"); break;
         case 62: dock.activatePanel("SurfacePreview"); break;

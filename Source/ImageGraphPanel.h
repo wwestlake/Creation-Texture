@@ -4,6 +4,7 @@
 #include <creation/assets/ProjectSession.h>
 #include <creation/node_editor_ui/NodeGraphComponent.h>
 #include <creation/node_editor_ui/NodePalette.h>
+#include <creation/node_editor_ui/SymbolsPanel.h>
 #include <ImageGraph.h>
 #include "NodePropertiesPanel.h"
 #include "ProjectImagePicker.h"
@@ -25,6 +26,7 @@ public:
     juce::Component& getPalette() noexcept { return palette; }
     juce::Component& getGraphView() noexcept { return graphView; }
     juce::Component& getPropertiesPanel() noexcept { return properties; }
+    juce::Component& getVariablesPanel() noexcept { return symbols; }
     juce::Component& getPreview() noexcept;
 
     // File menu.
@@ -63,6 +65,7 @@ private:
     creation::node_editor_ui::NodeGraphComponent graphView { graph, registry };
     creation::node_editor_ui::NodePalette palette;
     NodePropertiesPanel properties;
+    creation::node_editor_ui::SymbolsPanel symbols { graph };
     std::unique_ptr<PreviewPanel> preview;
     std::unique_ptr<Worker> worker;
 

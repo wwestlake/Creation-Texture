@@ -141,8 +141,8 @@ public:
                 {
                     if (threadShouldExit() || pendingArrived())
                         break;
-                    if (node->Outputs().empty())
-                        continue;
+                    if (node->Outputs().empty() || node->Outputs().front().type.dataType != ns::DataType::Texture)
+                        continue; // value nodes have no picture
                     juce::String error;
                     if (auto image = evaluator->evaluate(*copy, id, node->Outputs().front().name, error))
                         out.thumbnails[id] = thumbnailOf(*image, 96);
@@ -320,10 +320,13 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     graphView.onSelectionChanged = [this](ns::NodeId id) { selectionChanged(id); };
     graphView.onGetNodeExtraHeight = [this](ns::NodeId id) {
         const auto* node = graph.FindNode(id);
-        return node != nullptr && ! node->Outputs().empty() ? thumbnailHeight : 0.0f;
+        return node != nullptr && ! node->Outputs().empty() && node->Outputs().front().type.dataType == ns::DataType::Texture
+                 ? thumbnailHeight : 0.0f;
     };
     graphView.onPaintNode = [this](juce::Graphics& g, ns::NodeId id, juce::Rectangle<float> bounds) {
-        auto area = bounds.withTrimmedTop(bounds.getHeight() - thumbnailHeight).reduced(8.0f, 6.0f);
+        // The thumbnail sits below the pin rows; the bounds are on screen, so scale its height by the zoom.
+        const float zoom = graphView.Zoom();
+        auto area = bounds.withTrimmedTop(bounds.getHeight() - thumbnailHeight * zoom).reduced(8.0f * zoom, 6.0f * zoom);
         auto error = errors.find(id);
         if (error != errors.end())
         {
@@ -350,6 +353,14 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     properties.setHost(std::move(host));
 
     preview->onTargetChanged = [this]() { requestEvaluation(); };
+
+    // Params, constants and variables (shared/NodeSystem/SYMBOLS.md): drag one onto the graph for a Get node.
+    symbols.setEnums(registry); // each enum is a Choice type in the Variables panel
+    symbols.onSymbolsChanged = [this]() {
+        graphView.repaint();
+        properties.refresh();
+        graphEdited();
+    };
     worker->addChangeListener(this);
 }
 
@@ -393,6 +404,7 @@ void ImageGraphWorkspace::graphEdited()
 {
     edited = true;
     graphView.repaint();
+    symbols.graphChanged(); // a Get node may have been added, removed or rebound
     requestEvaluation();
 }
 
@@ -407,7 +419,10 @@ void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
         return;
     std::vector<std::string> outputs;
     for (const auto& pin : node->Outputs())
-        outputs.push_back(pin.name);
+        if (pin.type.dataType == ns::DataType::Texture)
+            outputs.push_back(pin.name);
+    if (outputs.empty())
+        return; // a Get or value node has no picture: the preview stays on the last image
     const auto* descriptor = registry.Find(node->TypeName());
     preview->showNode(id, descriptor != nullptr ? juce::String(descriptor->displayName) : juce::String(node->TypeName()), outputs);
     requestEvaluation();
@@ -444,6 +459,57 @@ void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
 std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& node, const ns::Pin& pin, int& height)
 {
     const auto type = node.TypeName();
+
+    // A Get node: choose which param / constant / variable it reads, from those of its type.
+    if (ns::IsSymbolGetNode(type) && pin.name == ns::kSymbolIdPin)
+    {
+        auto box = std::make_unique<juce::ComboBox>();
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? std::get<std::string>(pin.defaultValue) : std::string();
+        // Only symbols whose value still fits every setting this Get node is wired into (a Choice's enum).
+        std::vector<ns::PinTypeDesc> wiredInto;
+        for (const auto& wire : graph.Connections())
+            if (wire.fromNode == node.Id())
+                if (const auto* to = graph.FindNode(wire.toNode))
+                    if (const auto* toPin = to->FindPin(wire.toPin))
+                    {
+                        auto t = toPin->type;
+                        if (const auto* def = ns::PinEnum(registry, *to, *toPin))
+                            t.enumType = def->name;
+                        wiredInto.push_back(t);
+                    }
+        auto fits = [&wiredInto, &node](const ns::Symbol& symbol) {
+            auto out = node.Outputs().front().type;
+            out.enumType = symbol.enumType;
+            for (const auto& t : wiredInto)
+                if (! ns::IsConnectionCompatible(out, t))
+                    return false;
+            return true;
+        };
+        int itemId = 1;
+        std::vector<std::string> ids;
+        for (const auto& symbol : graph.Symbols())
+            if (ns::SymbolGetNodeType(symbol.type) == type && fits(symbol))
+            {
+                box->addItem(juce::String(symbol.name) + "  (" + creation::node_editor_ui::symbolKindName(symbol.kind) + ")", itemId);
+                if (symbol.id == current)
+                    box->setSelectedId(itemId, juce::dontSendNotification);
+                ids.push_back(symbol.id);
+                ++itemId;
+            }
+        box->setTextWhenNothingSelected(ids.empty() ? "No symbols of this type - add one in Variables" : "Choose a symbol");
+        box->onChange = [this, nodeId = node.Id(), ids, b = box.get()]() {
+            const int index = b->getSelectedId() - 1;
+            auto* target = graph.FindNode(nodeId);
+            if (target == nullptr || ! juce::isPositiveAndBelow(index, static_cast<int>(ids.size())))
+                return;
+            if (const auto* symbol = graph.FindSymbol(ids[static_cast<size_t>(index)]))
+                ns::BindSymbolGetNode(*target, *symbol);
+            graphView.repaint();
+            graphEdited();
+        };
+        height = 26;
+        return box;
+    }
 
     // Surface Map: load settings from a saved surface map.
     if (type == "image.surfacemap" && pin.name == "surfaceMap")
@@ -533,6 +599,7 @@ void ImageGraphWorkspace::newGraph()
     errors.clear();
     preview->showNode(0, {}, {});
     properties.showNode(0);
+    symbols.refresh();
     status("New image graph.");
 }
 
@@ -646,6 +713,7 @@ void ImageGraphWorkspace::openGraph()
         errors.clear();
         preview->showNode(0, {}, {});
         properties.showNode(0);
+        symbols.refresh();
         requestEvaluation();
         status("Opened image graph " + graphName + ".");
     }));
