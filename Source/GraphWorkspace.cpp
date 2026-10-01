@@ -507,8 +507,13 @@ void GraphWorkspace::graphEdited()
     for (const auto& [id, node] : graph.Nodes())
         if (ns::FlowKindOf(*node) != ns::FlowKind::none)
             casesChanged = ns::SyncFlowNodeCases(graph, registry, id) || casesChanged;
+    // Properties shows the new case pins - rebuilt after this edit returns, never during it: the edit can come from a
+    // control in Properties itself (the cases count), and rebuilding then deletes that control while it is running.
     if (casesChanged)
-        properties.refresh();
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<NodePropertiesPanel>(&properties)]() {
+            if (safe != nullptr)
+                safe->refresh();
+        });
     graphView.repaint();
     symbols.graphChanged(); // a Get node may have been added, removed or rebound
     // The Draw view follows: a deleted node leaves it; a script edited in Properties shows in the Script panel.
