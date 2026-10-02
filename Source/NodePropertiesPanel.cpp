@@ -256,10 +256,11 @@ void NodePropertiesPanel::addInputRow(ns::Node& node, const ns::Pin& pin)
     const auto dataType = pin.type.dataType;
 
     // A drawing or brush input is only ever wired (section 5: Drawing).
-    if (dataType == ns::DataType::Drawing || dataType == ns::DataType::Brush)
+    if (dataType == ns::DataType::Drawing || dataType == ns::DataType::Brush || dataType == ns::DataType::Struct)
     {
         auto info = std::make_unique<juce::Label>();
         info->setText(dataType == ns::DataType::Drawing ? "Not wired - wire a shape or drawing in"
+                      : dataType == ns::DataType::Struct ? "Not wired - the struct's defaults are used"
                                                          : "Not wired - a white round brush is used",
                       juce::dontSendNotification);
         info->setColour(juce::Label::textColourId, juce::Colours::grey);

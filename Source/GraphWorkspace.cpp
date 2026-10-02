@@ -4,6 +4,7 @@
 #include <creation/assets/ProjectAssetService.h>
 #include <creation/assets/ProjectManifest.h>
 #include <node_system/frgraph_serialization.h>
+#include <node_system/struct_nodes.h>
 #include <creation/material/material_compiler.h>
 
 namespace ns = ce::node_system;
@@ -113,11 +114,12 @@ public:
 
     ~Worker() override { stopThread(4000); }
 
-    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode)
+    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode,
+                 std::vector<ns::StructDef> projectStructs)
     {
         {
             const juce::ScopedLock lock(requestLock);
-            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, true };
+            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, std::move(projectStructs), true };
         }
         notify();
     }
@@ -169,6 +171,7 @@ public:
                 evaluator = std::make_unique<image_graph::Evaluator>(library, host);
             }
 
+            evaluator->getHost().structs = std::move(job.structs);
             Result out;
             std::string parseError;
             auto copy = ns::DeserializeGraph(job.graphText, parseError);
@@ -242,6 +245,7 @@ private:
         ns::NodeId previewNode = 0;
         std::string previewOutput;
         ns::NodeId overlayNode = 0;
+        std::vector<ns::StructDef> structs; // the project's (TYPES.md)
         bool valid = false;
     };
 
@@ -462,9 +466,10 @@ GraphWorkspace::GraphWorkspace()
 
     // Types (TYPES.md): made in the Types panel, not in the graph; once made they are types things can be.
     types.onGraphTypesChanged = [this]() { typesChanged(); };
-    types.onProjectTypesChanged = [this](const std::vector<ns::EnumDef>& enums) {
+    types.onProjectTypesChanged = [this](const std::vector<ns::EnumDef>& enums, const std::vector<ns::StructDef>& structs) {
         registry.ReplaceEnums(ns::TypeScope::project, enums);
-        saveProjectTypes(enums);
+        registry.ReplaceStructs(ns::TypeScope::project, structs);
+        saveProjectTypes(enums, structs);
     };
     symbols.onSymbolsChanged = [this]() {
         graphView.repaint();
@@ -495,25 +500,36 @@ void GraphWorkspace::projectOpened()
 void GraphWorkspace::loadProjectTypes()
 {
     std::vector<ns::EnumDef> enums;
+    std::vector<ns::StructDef> structs;
     juce::MemoryBlock bytes;
     const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
     if (hasProject() && projectSession->readEntry(path, bytes))
     {
         std::string error;
-        if (! ns::DeserializeTypes(bytes.toString().toStdString(), ns::TypeScope::project, enums, error))
+        if (! ns::DeserializeTypes(bytes.toString().toStdString(), ns::TypeScope::project, enums, structs, error))
             status("The project's types could not be read: " + juce::String(error));
     }
     registry.ReplaceEnums(ns::TypeScope::project, enums);
-    types.setProjectTypes(enums, hasProject());
+    registry.ReplaceStructs(ns::TypeScope::project, structs);
+    types.setProjectTypes(enums, structs, hasProject());
     typesChanged();
     edited = false; // loading types is not an edit of the graph
 }
 
-void GraphWorkspace::saveProjectTypes(const std::vector<ns::EnumDef>& enums)
+std::vector<ns::StructDef> GraphWorkspace::projectStructs() const
+{
+    std::vector<ns::StructDef> project;
+    for (const auto& def : registry.Structs())
+        if (def.scope == ns::TypeScope::project)
+            project.push_back(def);
+    return project;
+}
+
+void GraphWorkspace::saveProjectTypes(const std::vector<ns::EnumDef>& enums, const std::vector<ns::StructDef>& structs)
 {
     if (! hasProject())
         return;
-    const auto text = juce::String(ns::SerializeTypes(enums));
+    const auto text = juce::String(ns::SerializeTypes(enums, structs));
     juce::String error;
     const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
     if (! projectSession->writeEntry(path, juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8())) || ! projectSession->commit(error))
@@ -563,6 +579,8 @@ void GraphWorkspace::graphEdited()
     for (const auto& [id, node] : graph.Nodes())
         if (ns::FlowKindOf(*node) != ns::FlowKind::none)
             casesChanged = ns::SyncFlowNodeCases(graph, registry, id) || casesChanged;
+        else if (ns::StructNodeKindOf(*node) != ns::StructNodeKind::none)
+            casesChanged = ns::SyncStructNodePins(graph, registry, id) || casesChanged; // members follow the struct
     // Properties shows the new case pins - rebuilt after this edit returns, never during it: the edit can come from a
     // control in Properties itself (the cases count), and rebuilding then deletes that control while it is running.
     if (casesChanged)
@@ -672,7 +690,7 @@ void GraphWorkspace::requestEvaluation()
         compileMaterial(); // a material is compiled, not evaluated
         return;
     }
-    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode);
+    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode, projectStructs());
 }
 
 void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
@@ -763,6 +781,7 @@ std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, co
         auto fits = [&wiredInto, &node](const ns::Symbol& symbol) {
             auto out = node.Outputs().front().type;
             out.enumType = symbol.enumType;
+            out.structType = symbol.structType;
             for (const auto& t : wiredInto)
                 if (! ns::IsConnectionCompatible(out, t))
                     return false;
@@ -792,6 +811,114 @@ std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, co
         };
         height = 26;
         return box;
+    }
+
+    // Struct nodes (TYPES.md): which struct, and for Set Members / Get Member which of its members.
+    if (ns::StructNodeKindOf(node) != ns::StructNodeKind::none)
+    {
+        auto setText = [this, nodeId = node.Id(), pinId = pin.id](std::string text) {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = std::move(text);
+                    graphView.repaint();
+                    graphEdited(); // the member pins follow
+                }
+        };
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? std::get<std::string>(pin.defaultValue) : std::string();
+
+        if (pin.name == ns::kStructTypePin)
+        {
+            // Structs in scope: the graph's own, then the project's not hidden by one of the graph's.
+            std::vector<const ns::StructDef*> inScope;
+            for (const auto& def : graph.Structs())
+                inScope.push_back(&def);
+            for (const auto& def : registry.Structs())
+                if (graph.FindStruct(def.name) == nullptr)
+                    inScope.push_back(&def);
+            auto box = std::make_unique<juce::ComboBox>();
+            std::vector<std::string> names;
+            for (const auto* def : inScope)
+            {
+                names.push_back(def->name);
+                box->addItem(juce::String(def->displayName.empty() ? def->name : def->displayName), static_cast<int>(names.size()));
+                if (def->name == current)
+                    box->setSelectedId(static_cast<int>(names.size()), juce::dontSendNotification);
+            }
+            box->setTextWhenNothingSelected(names.empty() ? "No structs - make one in Types" : "Choose a struct");
+            box->onChange = [setText, names, b = box.get()]() {
+                const int index = b->getSelectedId() - 1;
+                if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                    setText(names[static_cast<size_t>(index)]);
+            };
+            height = 26;
+            return box;
+        }
+
+        const auto* def = ns::FindStructFor(graph, registry, ns::StructNodeType(node));
+        if (def != nullptr && pin.name == ns::kStructMemberPin)
+        {
+            auto box = std::make_unique<juce::ComboBox>();
+            std::vector<std::string> names;
+            for (const auto& m : def->members)
+            {
+                names.push_back(m.name);
+                box->addItem(juce::String(m.name), static_cast<int>(names.size()));
+                if (m.name == current)
+                    box->setSelectedId(static_cast<int>(names.size()), juce::dontSendNotification);
+            }
+            box->setTextWhenNothingSelected("Choose a member");
+            box->onChange = [setText, names, b = box.get()]() {
+                const int index = b->getSelectedId() - 1;
+                if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                    setText(names[static_cast<size_t>(index)]);
+            };
+            height = 26;
+            return box;
+        }
+
+        if (def != nullptr && pin.name == ns::kStructMembersPin)
+        {
+            // Set Members: tick the members to change; the rest pass through.
+            juce::StringArray ticked;
+            ticked.addTokens(juce::String(current), ",", "");
+            ticked.trim();
+            ticked.removeEmptyStrings();
+            struct Ticks final : public juce::Component
+            {
+                std::vector<std::unique_ptr<juce::ToggleButton>> boxes;
+                void resized() override
+                {
+                    int y = 0;
+                    for (auto& b : boxes)
+                    {
+                        b->setBounds(0, y, getWidth(), 22);
+                        y += 24;
+                    }
+                }
+            };
+            auto list = std::make_unique<Ticks>();
+            std::vector<std::string> names;
+            for (const auto& m : def->members)
+                names.push_back(m.name);
+            for (const auto& name : names)
+            {
+                auto t = std::make_unique<juce::ToggleButton>(juce::String(name));
+                t->setToggleState(ticked.contains(juce::String(name)), juce::dontSendNotification);
+                list->addAndMakeVisible(*t);
+                list->boxes.push_back(std::move(t));
+            }
+            for (auto& t : list->boxes)
+                t->onClick = [setText, names, l = list.get()]() {
+                    juce::StringArray chosen;
+                    for (size_t i = 0; i < l->boxes.size(); ++i)
+                        if (l->boxes[i]->getToggleState())
+                            chosen.add(juce::String(names[i]));
+                    setText(chosen.joinIntoString(",").toStdString());
+                };
+            height = juce::jmax(24, static_cast<int>(names.size()) * 24);
+            return list;
+        }
     }
 
     // Draw Script: a code editor, several lines high. The drawing updates as you type.
@@ -1281,9 +1408,11 @@ public:
     };
 
     RenderJob(const image_graph::Library& lib, std::string text, std::vector<std::pair<ns::NodeId, juce::String>> targets,
-              creation::assets::ProjectSession& session, std::function<void(std::vector<Rendered>, juce::String)> done)
+              creation::assets::ProjectSession& session, std::vector<ns::StructDef> projectStructs,
+              std::function<void(std::vector<Rendered>, juce::String)> done)
         : juce::ThreadWithProgressWindow("Rendering the graph's outputs...", true, true),
-          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), onDone(std::move(done)) {}
+          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), structs(std::move(projectStructs)),
+          onDone(std::move(done)) {}
 
     void run() override
     {
@@ -1301,6 +1430,7 @@ public:
                 return image_graph::Host::LoadedGraph {};
             return image_graph::readGraphDocument(bytes.toString());
         };
+        host.structs = structs;
         image_graph::Evaluator evaluator(library, host);
         std::string parseError;
         auto graph = ns::DeserializeGraph(graphText, parseError);
@@ -1361,6 +1491,7 @@ private:
     std::string graphText;
     std::vector<std::pair<ns::NodeId, juce::String>> outputs;
     creation::assets::ProjectSession& project;
+    std::vector<ns::StructDef> structs;
     std::function<void(std::vector<Rendered>, juce::String)> onDone;
     std::vector<Rendered> rendered;
     juce::String error;
@@ -1393,7 +1524,7 @@ void GraphWorkspace::renderOutputs()
         return;
     }
 
-    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession,
+    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession, projectStructs(),
                               [this](std::vector<RenderJob::Rendered> rendered, juce::String error) {
         if (error.isNotEmpty())
         {

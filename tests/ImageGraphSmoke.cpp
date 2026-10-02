@@ -1009,6 +1009,164 @@ int main()
                   && evaluator.evaluateValue(graph, logic->Id(), "result", both, valueError) && ! std::get<bool>(both));
     }
 
+    // Structs (shared/NodeSystem/TYPES.md): made in the Struct Editor, then Make / Break / Set Members / Get Member and
+    // struct params carry them through the graph.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinIn = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto pinOut = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Outputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto member = [](const char* name, ns::DataType type, ns::PinDefaultValue value) {
+            ns::StructMember m;
+            m.name = name;
+            m.type = { ns::PinKind::Data, type };
+            m.defaultValue = std::move(value);
+            return m;
+        };
+        auto structNode = [&](const char* type, const char* structName) {
+            auto* n = add(type);
+            set(n, ns::kStructTypePin, std::string(structName));
+            ns::SyncStructNodePins(graph, registry, n->Id());
+            return n;
+        };
+        auto value = [&](ns::Node* n, const char* output, ns::PinDefaultValue& out) {
+            juce::String e;
+            const bool good = evaluator.evaluateValue(graph, n->Id(), output, out, e);
+            if (! good)
+                std::cerr << "     " << e << "\n";
+            return good;
+        };
+        auto isColour = [](const ns::PinDefaultValue& v, float r, float g, float b) {
+            const auto* c = std::get_if<ns::Vec3Default>(&v);
+            return c != nullptr && c->x == r && c->y == g && c->z == b;
+        };
+        auto isNumber = [](const ns::PinDefaultValue& v, float n) {
+            const auto* f = std::get_if<float>(&v);
+            return f != nullptr && std::abs(*f - n) < 1.0e-6f;
+        };
+
+        // Tint { colour (red), amount (0.5), picture (an image) }, the graph's own.
+        ns::StructDef tint;
+        tint.name = "Tint";
+        tint.displayName = "Tint";
+        tint.scope = ns::TypeScope::graph;
+        tint.members = { member("colour", ns::DataType::Color, ns::Vec3Default { 1.0f, 0.0f, 0.0f }),
+                         member("amount", ns::DataType::Float, 0.5f), member("picture", ns::DataType::Texture, std::string()) };
+        graph.AddStruct(tint);
+
+        // Make Struct: colour blue, a green image into picture. Break Struct gives them back.
+        auto* make = structNode(ns::kMakeStructType, "Tint");
+        check("Make Struct has the members colour, amount, picture as inputs",
+              pinIn(make, "colour") != 0 && pinIn(make, "amount") != 0 && pinIn(make, "picture") != 0 && pinOut(make, ns::kStructValuePin) != 0);
+        set(make, "colour", ns::Vec3Default { 0.0f, 0.0f, 1.0f });
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", make, "picture");
+        auto* brk = structNode(ns::kBreakStructType, "Tint");
+        connect(graph, make, ns::kStructValuePin, brk, ns::kStructValuePin);
+        expectPixel("Break Struct gives back the picture wired into Make Struct (green)", evaluator.evaluate(graph, brk->Id(), "picture", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+        ns::PinDefaultValue colour, amount;
+        check("Break Struct gives colour blue (set) and amount 0.5 (the default)",
+              value(brk, "colour", colour) && isColour(colour, 0.0f, 0.0f, 1.0f) && value(brk, "amount", amount) && isNumber(amount, 0.5f));
+
+        // Set Members with only amount ticked: amount 0.9; colour passes through.
+        auto* setter = add(ns::kSetMembersType);
+        set(setter, ns::kStructTypePin, std::string("Tint"));
+        set(setter, ns::kStructMembersPin, std::string("amount"));
+        ns::SyncStructNodePins(graph, registry, setter->Id());
+        check("Set Members shows only the ticked member", pinIn(setter, "amount") != 0 && pinIn(setter, "colour") == 0);
+        set(setter, "amount", 0.9f);
+        connect(graph, make, ns::kStructValuePin, setter, ns::kStructValuePin);
+        auto getMember = [&](const char* memberName) {
+            auto* g = add(ns::kGetMemberType);
+            set(g, ns::kStructTypePin, std::string("Tint"));
+            set(g, ns::kStructMemberPin, std::string(memberName));
+            ns::SyncStructNodePins(graph, registry, g->Id());
+            connect(graph, setter, ns::kStructValuePin, g, ns::kStructValuePin);
+            return g;
+        };
+        auto* getAmount = getMember("amount");
+        auto* getColour = getMember("colour");
+        ns::PinDefaultValue setAmount, keptColour;
+        check("Set Members changes amount to 0.9 and passes colour (blue) through",
+              value(getAmount, "amount", setAmount) && isNumber(setAmount, 0.9f) && value(getColour, "colour", keptColour)
+                  && isColour(keptColour, 0.0f, 0.0f, 1.0f));
+
+        // A struct param: its members' values (green, 0.25, no image), read with its Get node and taken apart.
+        ns::Symbol look;
+        look.id = "look";
+        look.name = "Look";
+        look.type = ns::DataType::Struct;
+        look.structType = "Tint";
+        look.memberValues = { ns::Vec3Default { 0.0f, 1.0f, 0.0f }, 0.25f, std::string() };
+        graph.AddSymbol(look);
+        auto* lookGet = ns::AddSymbolGetNode(graph, registry, look);
+        check("A struct param's Get node gives a Tint", lookGet != nullptr && lookGet->Outputs().front().type.structType == "Tint");
+        auto* lookBreak = structNode(ns::kBreakStructType, "Tint");
+        graph.Connect(lookGet->Id(), lookGet->Outputs().front().id, lookBreak->Id(), pinIn(lookBreak, ns::kStructValuePin));
+        ns::PinDefaultValue lookAmount, lookColour;
+        check("The param's members come out of Break Struct: amount 0.25, colour green",
+              value(lookBreak, "amount", lookAmount) && isNumber(lookAmount, 0.25f) && value(lookBreak, "colour", lookColour)
+                  && isColour(lookColour, 0.0f, 1.0f, 0.0f));
+        juce::String noImage;
+        check("A member image that was never given says so",
+              evaluator.evaluate(graph, lookBreak->Id(), "picture", noImage) == nullptr && noImage.contains("has no image"));
+
+        // A project struct (Host::structs): Grade { gain 2 }; Get Member with nothing wired in gives the default.
+        ns::StructDef grade;
+        grade.name = "Grade";
+        grade.scope = ns::TypeScope::project;
+        grade.members = { member("gain", ns::DataType::Float, 2.0f) };
+        registry.ReplaceStructs(ns::TypeScope::project, { grade });
+        evaluator.getHost().structs = { grade };
+        auto* gain = add(ns::kGetMemberType);
+        set(gain, ns::kStructTypePin, std::string("Grade"));
+        set(gain, ns::kStructMemberPin, std::string("gain"));
+        ns::SyncStructNodePins(graph, registry, gain->Id());
+        ns::PinDefaultValue gainValue;
+        check("A project struct's member default reaches the graph (gain 2)", value(gain, "gain", gainValue) && isNumber(gainValue, 2.0f));
+
+        // Renaming a member keeps the Get Member's wire once the node follows the rename (the Types panel does that).
+        auto* downstream = add("image.value.math");
+        connect(graph, getAmount, "amount", downstream, "a");
+        graph.FindStruct("Tint")->members[1].name = "strength";
+        set(getAmount, ns::kStructMemberPin, std::string("strength"));
+        ns::SyncStructNodePins(graph, registry, getAmount->Id());
+        bool wireKept = false;
+        for (const auto& c : graph.Connections())
+            wireKept = wireKept || (c.fromNode == getAmount->Id() && c.fromPin == pinOut(getAmount, "strength"));
+        check("A renamed member keeps its pin's wire", wireKept);
+
+        // Saved and read back: the struct, the struct nodes' settings and the param's member values survive.
+        std::string readError;
+        auto reread = ns::DeserializeGraph(ns::SerializeGraph(graph), readError);
+        const auto* readLook = reread != nullptr ? reread->FindSymbol("look") : nullptr;
+        check("Structs, struct nodes and struct params round trip",
+              reread != nullptr && reread->FindStruct("Tint") != nullptr && reread->FindStruct("Tint")->members.size() == 3
+                  && readLook != nullptr && readLook->structType == "Tint" && readLook->memberValues.size() == 3
+                  && reread->FindNode(setter->Id()) != nullptr
+                  && ns::StructNodeText(*reread->FindNode(setter->Id()), ns::kStructMembersPin) == "amount");
+    }
+
     // Analysis: channels, colour masks, Fourier, local frequency, evenness, colour spectrum. Test images come in
     // through Load Image: a 64 x 64 grey sine with period 8 px across (0.5 + 0.25 sin(2 pi x / 8)), the same on the
     // left half with flat 0.5 on the right, half red / half cyan, and a single colour.

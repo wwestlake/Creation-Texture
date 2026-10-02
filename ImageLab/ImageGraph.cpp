@@ -1875,6 +1875,8 @@ void Library::registerTypes(ns::NodeTypeRegistry& registry) const
                        ns::DataType::String, ns::DataType::Drawing, ns::DataType::Brush })
         flowTypes.push_back(ns::StandardFlowType(type));
     ns::RegisterFlowNodes(registry, flowTypes, { kImageDiagram });
+    // Struct nodes (TYPES.md): making, taking apart and changing structs, for building algorithms.
+    ns::RegisterStructNodes(registry, { kImageDiagram });
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -2064,13 +2066,14 @@ bool Evaluator::evaluateFlowNode(const ns::Graph& graph, const ns::Node& node, n
             case ns::DataType::Texture: result.outputs[outputName] = up.outputs[fromPin->name]; break;
             case ns::DataType::Drawing: result.drawings[outputName] = up.drawings[fromPin->name]; break;
             case ns::DataType::Brush: result.brushes[outputName] = up.brushes[fromPin->name]; break;
+            case ns::DataType::Struct: result.structs[outputName] = up.structs[fromPin->name]; break;
             default: result.values[outputName] = up.values[fromPin->name]; break;
         }
     }
     else
     {
         const auto type = source->type.dataType;
-        if (type == ns::DataType::Texture || type == ns::DataType::Drawing || type == ns::DataType::Brush)
+        if (type == ns::DataType::Texture || type == ns::DataType::Drawing || type == ns::DataType::Brush || type == ns::DataType::Struct)
         {
             error = title + ": nothing is wired into " + juce::String(source->name) + ".";
             return false;
@@ -2100,6 +2103,7 @@ bool Evaluator::evaluateGraphNode(const ns::Node& node, const Host::LoadedGraph&
         child.loadImage = host.loadImage;
         child.loadGraph = host.loadGraph;
         child.depth = host.depth + 1;
+        child.structs = host.structs;
         entry.evaluator.reset(new Evaluator(library, std::move(child), routines, surfaceMaps));
         entry.text = usedGraph.text;
     }
@@ -2218,6 +2222,31 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             error = "A Get node's symbol is missing - choose one in its Properties.";
             return false;
         }
+        if (symbol->type == ns::DataType::Struct)
+        {
+            // A struct param: the whole struct, to send along or take apart (TYPES.md).
+            const auto* def = findStruct(graph, symbol->structType);
+            if (def == nullptr)
+            {
+                error = "The struct " + juce::String(symbol->structType) + " of " + juce::String(symbol->name) + " is not in scope any more.";
+                return false;
+            }
+            // The struct itself too: a member added or its default changed is a different value.
+            std::string text = node->TypeName() + "|" + symbol->id + ":" + def->name;
+            for (const auto& m : def->members)
+                text += ";" + m.name + "/" + std::to_string(static_cast<int>(m.type.dataType)) + m.type.structType + "=" + valueText(m.defaultValue);
+            for (const auto& v : symbol->memberValues)
+                text += "," + valueText(v);
+            signatureOut = std::to_string(std::hash<std::string> {}(text));
+            auto& cachedGet = cache[id];
+            if (cachedGet.signature != signatureOut || cachedGet.structs.count(ns::kSymbolValuePin) == 0)
+            {
+                cachedGet = {};
+                cachedGet.signature = signatureOut;
+                cachedGet.structs[ns::kSymbolValuePin] = structWithDefaults(graph, *def, &symbol->memberValues, 0);
+            }
+            return true;
+        }
         auto value = symbol->value;
         if (symbol->kind == ns::SymbolKind::Param)
         {
@@ -2231,6 +2260,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         cachedGet.outputs.clear();
         cachedGet.drawings.clear();
         cachedGet.brushes.clear();
+        cachedGet.structs.clear();
         cachedGet.values = { { ns::kSymbolValuePin, value } };
         return true;
     }
@@ -2239,8 +2269,10 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         return evaluateFlowNode(graph, *node, kind, wanted, signatureOut, error, depth);
 
     const bool graphNode = ns::IsGraphNode(*node);
-    const auto* definition = graphNode ? nullptr : library.find(node->TypeName());
-    if (! graphNode && definition == nullptr)
+    const auto structKind = ns::StructNodeKindOf(*node);
+    const bool structNode = structKind != ns::StructNodeKind::none;
+    const auto* definition = graphNode || structNode ? nullptr : library.find(node->TypeName());
+    if (! graphNode && ! structNode && definition == nullptr)
     {
         error = "Unknown node type " + juce::String(node->TypeName()) + ".";
         return false;
@@ -2309,6 +2341,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             case ns::DataType::Texture: context.inputs[pin.name] = upstreamResult.outputs[fromPin->name]; break;
             case ns::DataType::Drawing: context.drawings[pin.name] = upstreamResult.drawings[fromPin->name]; break;
             case ns::DataType::Brush: context.brushes[pin.name] = upstreamResult.brushes[fromPin->name]; break;
+            case ns::DataType::Struct: context.structs[pin.name] = upstreamResult.structs[fromPin->name]; break;
             default: context.wiredValues[pin.name] = upstreamResult.values[fromPin->name]; break;
         }
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
@@ -2323,7 +2356,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         bool complete = true;
         for (const auto& name : needed)
             complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0
-                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0);
+                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0
+                                    || cached.structs.count(name) > 0);
         if (complete)
             return true;
         for (const auto& [name, image] : cached.outputs)
@@ -2333,11 +2367,18 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     context.wantedOutputs.assign(needed.begin(), needed.end());
     std::map<std::string, ImagePtr> outputs;
     juce::String nodeError;
-    const bool evaluated = graphNode ? evaluateGraphNode(*node, usedGraph, context, outputs, nodeError)
-                                     : definition->evaluate(context, outputs, nodeError);
+    const bool evaluated = graphNode    ? evaluateGraphNode(*node, usedGraph, context, outputs, nodeError)
+                           : structNode ? evaluateStructNode(graph, structKind, context, outputs, nodeError)
+                                        : definition->evaluate(context, outputs, nodeError);
     if (! evaluated)
     {
-        error = (graphNode ? juce::String("Graph") : juce::String(definition->descriptor.displayName)) + ": " + nodeError;
+        const auto title = graphNode ? juce::String("Graph")
+                         : structNode ? juce::String(structKind == ns::StructNodeKind::make         ? "Make Struct"
+                                                     : structKind == ns::StructNodeKind::breakApart ? "Break Struct"
+                                                     : structKind == ns::StructNodeKind::setMembers ? "Set Members"
+                                                                                                    : "Get Member")
+                                      : juce::String(definition->descriptor.displayName);
+        error = title + ": " + nodeError;
         cached = {};
         return false;
     }
@@ -2346,6 +2387,174 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     cached.values = std::move(context.valueOutputs);
     cached.drawings = std::move(context.drawingOutputs);
     cached.brushes = std::move(context.brushOutputs);
+    cached.structs = std::move(context.structOutputs);
+    return true;
+}
+
+const ns::StructDef* Evaluator::findStruct(const ns::Graph& graph, const std::string& name) const
+{
+    if (const auto* own = graph.FindStruct(name))
+        return own;
+    for (const auto& def : host.structs)
+        if (def.name == name)
+            return &def;
+    return nullptr;
+}
+
+StructPtr Evaluator::structWithDefaults(const ns::Graph& graph, const ns::StructDef& def, const std::vector<ns::PinDefaultValue>* memberValues,
+                                        int depth) const
+{
+    auto made = std::make_shared<StructValue>();
+    made->type = def.name;
+    for (size_t i = 0; i < def.members.size(); ++i)
+    {
+        const auto& member = def.members[i];
+        const auto key = ns::StructMemberPinName(member.name);
+        auto value = memberValues != nullptr && i < memberValues->size() && ! std::holds_alternative<std::monostate>((*memberValues)[i])
+                         ? (*memberValues)[i]
+                         : member.defaultValue;
+        switch (member.type.dataType)
+        {
+            case ns::DataType::Texture:
+                // An image member may name a project image.
+                if (const auto* path = std::get_if<std::string>(&value); path != nullptr && ! path->empty() && host.loadImage)
+                    if (auto image = host.loadImage(juce::String(*path)))
+                        made->images[key] = image;
+                break;
+            case ns::DataType::Struct:
+                if (const auto* inner = findStruct(graph, member.type.structType); inner != nullptr && depth < 8)
+                    made->structs[key] = structWithDefaults(graph, *inner, nullptr, depth + 1);
+                break;
+            case ns::DataType::Drawing:
+            case ns::DataType::Brush:
+                break; // nothing until one is wired in
+            default:
+                made->values[key] = std::holds_alternative<std::monostate>(value) ? ns::DefaultValueFor(member.type.dataType) : value;
+                break;
+        }
+    }
+    return made;
+}
+
+bool Evaluator::evaluateStructNode(const ns::Graph& graph, ns::StructNodeKind kind, Context& context, std::map<std::string, ImagePtr>& outputs,
+                                   juce::String& error)
+{
+    const auto& node = context.node;
+    const auto typeName = ns::StructNodeType(node);
+    if (typeName.empty())
+    {
+        error = "choose its struct in Properties.";
+        return false;
+    }
+    const auto* def = findStruct(graph, typeName);
+    if (def == nullptr)
+    {
+        error = "the struct " + juce::String(typeName) + " is not in scope any more.";
+        return false;
+    }
+    auto isFixed = [](const ns::Pin& pin) {
+        return pin.name == ns::kStructTypePin || pin.name == ns::kStructValuePin || pin.name == ns::kStructMembersPin
+            || pin.name == ns::kStructMemberPin;
+    };
+
+    // The struct coming in: wired, or the struct's defaults when nothing is.
+    StructPtr incoming;
+    if (kind != ns::StructNodeKind::make)
+    {
+        auto wired = context.structs.find(ns::kStructValuePin);
+        incoming = wired != context.structs.end() && wired->second != nullptr ? wired->second : structWithDefaults(graph, *def, nullptr, 0);
+    }
+
+    if (kind == ns::StructNodeKind::make || kind == ns::StructNodeKind::setMembers)
+    {
+        // Members in: each one's wired value, else what is typed into the node.
+        auto made = kind == ns::StructNodeKind::make ? std::make_shared<StructValue>() : std::make_shared<StructValue>(*incoming);
+        made->type = def->name;
+        for (const auto& pin : node.Inputs())
+        {
+            if (isFixed(pin))
+                continue;
+            switch (pin.type.dataType)
+            {
+                case ns::DataType::Texture:
+                {
+                    made->images.erase(pin.name);
+                    auto image = context.inputs.find(pin.name);
+                    if (image != context.inputs.end() && image->second != nullptr)
+                        made->images[pin.name] = image->second;
+                    else if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty() && host.loadImage)
+                        if (auto loaded = host.loadImage(juce::String(*path)))
+                            made->images[pin.name] = loaded;
+                    break;
+                }
+                case ns::DataType::Drawing:
+                    made->drawings.erase(pin.name);
+                    if (auto d = context.drawings.find(pin.name); d != context.drawings.end())
+                        made->drawings[pin.name] = d->second;
+                    break;
+                case ns::DataType::Brush:
+                    made->brushes.erase(pin.name);
+                    if (auto b = context.brushes.find(pin.name); b != context.brushes.end())
+                        made->brushes[pin.name] = b->second;
+                    break;
+                case ns::DataType::Struct:
+                    if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
+                        made->structs[pin.name] = st->second;
+                    else if (const auto* inner = findStruct(graph, pin.type.structType))
+                        made->structs[pin.name] = structWithDefaults(graph, *inner, nullptr, 0);
+                    break;
+                default:
+                    if (const auto* value = context.setting(pin.name))
+                        made->values[pin.name] = *value;
+                    break;
+            }
+        }
+        context.structOutputs[ns::kStructValuePin] = std::move(made);
+        return true;
+    }
+
+    // Break Struct / Get Member: members out.
+    for (const auto& pin : node.Outputs())
+    {
+        if (isFixed(pin))
+            continue;
+        switch (pin.type.dataType)
+        {
+            case ns::DataType::Texture:
+            {
+                auto image = incoming->images.find(pin.name);
+                if (image == incoming->images.end())
+                {
+                    if (context.wants(pin.name))
+                    {
+                        error = juce::String(pin.name) + " has no image - wire one into the struct, or choose one in its param.";
+                        return false;
+                    }
+                    break;
+                }
+                outputs[pin.name] = image->second;
+                break;
+            }
+            case ns::DataType::Drawing:
+                if (auto d = incoming->drawings.find(pin.name); d != incoming->drawings.end())
+                    context.drawingOutputs[pin.name] = d->second;
+                break;
+            case ns::DataType::Brush:
+                if (auto b = incoming->brushes.find(pin.name); b != incoming->brushes.end())
+                    context.brushOutputs[pin.name] = b->second;
+                break;
+            case ns::DataType::Struct:
+                if (auto st = incoming->structs.find(pin.name); st != incoming->structs.end())
+                    context.structOutputs[pin.name] = st->second;
+                break;
+            default:
+                if (auto v = incoming->values.find(pin.name); v != incoming->values.end())
+                    context.valueOutputs[pin.name] = v->second;
+                else
+                    context.valueOutputs[pin.name] = ns::DefaultValueFor(pin.type.dataType);
+                break;
+        }
+    }
     return true;
 }
 

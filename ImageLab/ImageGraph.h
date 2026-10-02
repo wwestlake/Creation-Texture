@@ -6,6 +6,7 @@
 #include <node_system/symbol_nodes.h>
 #include <node_system/graph_nodes.h>
 #include <node_system/flow_nodes.h>
+#include <node_system/struct_nodes.h>
 
 #include "SurfaceMaps.h"
 #include "Drawing.h"
@@ -34,6 +35,19 @@ struct Image
 };
 using ImagePtr = std::shared_ptr<const Image>;
 
+// A struct's value (shared/NodeSystem/TYPES.md) as it flows along a wire: each member by its pin name, kept the way
+// that kind of value is kept everywhere else. Never changed once made - Set Members makes a new one.
+struct StructValue
+{
+    std::string type;
+    std::map<std::string, ce::node_system::PinDefaultValue> values;
+    std::map<std::string, std::shared_ptr<const Image>> images;
+    std::map<std::string, drawing::DrawingPtr> drawings;
+    std::map<std::string, drawing::BrushPtr> brushes;
+    std::map<std::string, std::shared_ptr<const StructValue>> structs;
+};
+using StructPtr = std::shared_ptr<const StructValue>;
+
 // What the evaluator needs from the app.
 struct Host
 {
@@ -58,6 +72,9 @@ struct Host
     std::map<std::string, ImagePtr> graphInputs;
     std::map<std::string, std::string> graphInputKeys;
     int depth = 0; // graphs used inside graphs, to stop a graph that uses itself
+
+    // The project's structs (the graph's own are in the graph), for struct nodes and struct params.
+    std::vector<ce::node_system::StructDef> structs;
 };
 
 // An image graph document (.imggraph.json): its format name, and reading one into a graph typed as an image graph.
@@ -85,6 +102,9 @@ struct Context
     std::map<std::string, drawing::BrushPtr> brushOutputs;
     // The graph being evaluated, for nodes that read its Variables (Draw Script).
     const ce::node_system::Graph* graph = nullptr;
+    // Wired struct inputs, by pin name, and the ones this node produces (TYPES.md).
+    std::map<std::string, StructPtr> structs;
+    std::map<std::string, StructPtr> structOutputs;
 
     // The graph's number, integer and toggle Variables by id, with params' outside values applied (toggles are 0 / 1).
     std::map<std::string, double> numericVariables() const;
@@ -163,6 +183,7 @@ private:
         std::map<std::string, ce::node_system::PinDefaultValue> values;
         std::map<std::string, drawing::DrawingPtr> drawings;
         std::map<std::string, drawing::BrushPtr> brushes;
+        std::map<std::string, StructPtr> structs;
     };
 
     bool evaluateNode(const ce::node_system::Graph& graph, ce::node_system::NodeId node, const std::vector<std::string>& wanted,
@@ -172,6 +193,14 @@ private:
                           const std::vector<std::string>& wanted, std::string& signatureOut, juce::String& error, int depth);
     bool readSelector(const ce::node_system::Graph& graph, const ce::node_system::Node& node, ce::node_system::PinDefaultValue& selector,
                       std::string& signature, juce::String& error, int depth);
+    // Make Struct, Break Struct, Set Members, Get Member (TYPES.md): no FRust, just members moved about.
+    bool evaluateStructNode(const ce::node_system::Graph& graph, ce::node_system::StructNodeKind kind, Context& context,
+                            std::map<std::string, ImagePtr>& outputs, juce::String& error);
+    // A struct by name, the graph's own first, then the project's.
+    const ce::node_system::StructDef* findStruct(const ce::node_system::Graph& graph, const std::string& name) const;
+    // A struct with its members' default values; a param's member values (in member order) over them if given.
+    StructPtr structWithDefaults(const ce::node_system::Graph& graph, const ce::node_system::StructDef& def,
+                                 const std::vector<ce::node_system::PinDefaultValue>* memberValues, int depth) const;
     // A Graph node: runs the graph it uses, with its params and Graph Inputs set from the node's inputs.
     bool evaluateGraphNode(const ce::node_system::Node& node, const Host::LoadedGraph& used, Context& context,
                            std::map<std::string, ImagePtr>& outputs, juce::String& error);
