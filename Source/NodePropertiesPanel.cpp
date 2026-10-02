@@ -1,5 +1,7 @@
 #include "NodePropertiesPanel.h"
 
+#include <creation/node_editor_ui/Fields.h>
+
 namespace ns = ce::node_system;
 
 namespace
@@ -221,6 +223,7 @@ void NodePropertiesPanel::rebuild()
         addRow("Outputs", std::move(outputs), 24);
     }
 
+    creation::node_editor_ui::selectAllWhenFocused(content); // clicking a value selects it: typing replaces it
     layoutRows();
 }
 

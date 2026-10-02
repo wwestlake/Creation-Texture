@@ -115,11 +115,11 @@ public:
     ~Worker() override { stopThread(4000); }
 
     void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode,
-                 std::vector<ns::StructDef> projectStructs)
+                 ProjectTypes projectTypes)
     {
         {
             const juce::ScopedLock lock(requestLock);
-            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, std::move(projectStructs), true };
+            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, std::move(projectTypes), true };
         }
         notify();
     }
@@ -171,7 +171,8 @@ public:
                 evaluator = std::make_unique<image_graph::Evaluator>(library, host);
             }
 
-            evaluator->getHost().structs = std::move(job.structs);
+            evaluator->getHost().structs = std::move(job.types.structs);
+            evaluator->getHost().enums = std::move(job.types.enums);
             Result out;
             std::string parseError;
             auto copy = ns::DeserializeGraph(job.graphText, parseError);
@@ -245,7 +246,7 @@ private:
         ns::NodeId previewNode = 0;
         std::string previewOutput;
         ns::NodeId overlayNode = 0;
-        std::vector<ns::StructDef> structs; // the project's (TYPES.md)
+        ProjectTypes types; // the project's (TYPES.md)
         bool valid = false;
     };
 
@@ -516,12 +517,15 @@ void GraphWorkspace::loadProjectTypes()
     edited = false; // loading types is not an edit of the graph
 }
 
-std::vector<ns::StructDef> GraphWorkspace::projectStructs() const
+GraphWorkspace::ProjectTypes GraphWorkspace::projectTypes() const
 {
-    std::vector<ns::StructDef> project;
+    ProjectTypes project;
     for (const auto& def : registry.Structs())
         if (def.scope == ns::TypeScope::project)
-            project.push_back(def);
+            project.structs.push_back(def);
+    for (const auto& def : registry.Enums())
+        if (def.scope == ns::TypeScope::project)
+            project.enums.push_back(def);
     return project;
 }
 
@@ -581,6 +585,8 @@ void GraphWorkspace::graphEdited()
             casesChanged = ns::SyncFlowNodeCases(graph, registry, id) || casesChanged;
         else if (ns::StructNodeKindOf(*node) != ns::StructNodeKind::none)
             casesChanged = ns::SyncStructNodePins(graph, registry, id) || casesChanged; // members follow the struct
+        else if (ns::EnumNodeKindOf(*node) != ns::EnumNodeKind::none)
+            casesChanged = ns::SyncEnumNodePins(graph, registry, id) || casesChanged; // fields follow the enum
     // Properties shows the new case pins - rebuilt after this edit returns, never during it: the edit can come from a
     // control in Properties itself (the cases count), and rebuilding then deletes that control while it is running.
     if (casesChanged)
@@ -690,7 +696,7 @@ void GraphWorkspace::requestEvaluation()
         compileMaterial(); // a material is compiled, not evaluated
         return;
     }
-    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode, projectStructs());
+    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode, projectTypes());
 }
 
 void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
@@ -808,6 +814,63 @@ std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, co
                 ns::BindSymbolGetNode(*target, *symbol);
             graphView.repaint();
             graphEdited();
+        };
+        height = 26;
+        return box;
+    }
+
+    // Enum nodes (TYPES.md): which enum (only those whose values carry data - Make Variant and Match exist for those;
+    // a plain enum's value is just chosen), and for Make Variant which value.
+    if (const auto enumKind = ns::EnumNodeKindOf(node); enumKind != ns::EnumNodeKind::none
+        && (pin.name == ns::kEnumTypePin || pin.name == ns::kEnumVariantPin))
+    {
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? std::get<std::string>(pin.defaultValue) : std::string();
+        auto setText = [this, nodeId = node.Id(), pinId = pin.id](std::string text) {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = std::move(text);
+                    graphView.repaint();
+                    graphEdited(); // the pins follow
+                }
+        };
+        std::vector<std::string> names;
+        std::vector<juce::String> labels;
+        if (pin.name == ns::kEnumTypePin)
+        {
+            std::vector<const ns::EnumDef*> inScope;
+            for (const auto& def : graph.Enums())
+                inScope.push_back(&def);
+            for (const auto& def : registry.Enums())
+                if (graph.FindEnum(def.name) == nullptr)
+                    inScope.push_back(&def);
+            for (const auto* def : inScope)
+                if (ns::EnumCarriesValues(*def))
+                {
+                    names.push_back(def->name);
+                    labels.push_back(juce::String(def->displayName.empty() ? def->name : def->displayName));
+                }
+        }
+        else if (const auto* def = ns::FindEnumFor(graph, registry, ns::StructNodeText(node, ns::kEnumTypePin)))
+            for (const auto& variant : def->variants)
+            {
+                names.push_back(variant.name);
+                labels.push_back(juce::String(variant.name));
+            }
+        auto box = std::make_unique<juce::ComboBox>();
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            box->addItem(labels[i], static_cast<int>(i) + 1);
+            if (names[i] == current)
+                box->setSelectedId(static_cast<int>(i) + 1, juce::dontSendNotification);
+        }
+        box->setTextWhenNothingSelected(pin.name == ns::kEnumVariantPin ? juce::String("Choose a value")
+                                        : names.empty() ? juce::String("No enum carries values - add some in Types")
+                                                        : juce::String("Choose an enum"));
+        box->onChange = [setText, names, b = box.get()]() {
+            const int index = b->getSelectedId() - 1;
+            if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                setText(names[static_cast<size_t>(index)]);
         };
         height = 26;
         return box;
@@ -1408,10 +1471,10 @@ public:
     };
 
     RenderJob(const image_graph::Library& lib, std::string text, std::vector<std::pair<ns::NodeId, juce::String>> targets,
-              creation::assets::ProjectSession& session, std::vector<ns::StructDef> projectStructs,
+              creation::assets::ProjectSession& session, ProjectTypes projectTypes,
               std::function<void(std::vector<Rendered>, juce::String)> done)
         : juce::ThreadWithProgressWindow("Rendering the graph's outputs...", true, true),
-          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), structs(std::move(projectStructs)),
+          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), types(std::move(projectTypes)),
           onDone(std::move(done)) {}
 
     void run() override
@@ -1430,7 +1493,8 @@ public:
                 return image_graph::Host::LoadedGraph {};
             return image_graph::readGraphDocument(bytes.toString());
         };
-        host.structs = structs;
+        host.structs = types.structs;
+        host.enums = types.enums;
         image_graph::Evaluator evaluator(library, host);
         std::string parseError;
         auto graph = ns::DeserializeGraph(graphText, parseError);
@@ -1491,7 +1555,7 @@ private:
     std::string graphText;
     std::vector<std::pair<ns::NodeId, juce::String>> outputs;
     creation::assets::ProjectSession& project;
-    std::vector<ns::StructDef> structs;
+    ProjectTypes types;
     std::function<void(std::vector<Rendered>, juce::String)> onDone;
     std::vector<Rendered> rendered;
     juce::String error;
@@ -1524,7 +1588,7 @@ void GraphWorkspace::renderOutputs()
         return;
     }
 
-    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession, projectStructs(),
+    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession, projectTypes(),
                               [this](std::vector<RenderJob::Rendered> rendered, juce::String error) {
         if (error.isNotEmpty())
         {

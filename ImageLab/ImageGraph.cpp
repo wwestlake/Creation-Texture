@@ -1877,6 +1877,7 @@ void Library::registerTypes(ns::NodeTypeRegistry& registry) const
     ns::RegisterFlowNodes(registry, flowTypes, { kImageDiagram });
     // Struct nodes (TYPES.md): making, taking apart and changing structs, for building algorithms.
     ns::RegisterStructNodes(registry, { kImageDiagram });
+    ns::RegisterEnumNodes(registry, { kImageDiagram }); // enums whose values carry data: Make Variant, Match
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -2067,7 +2068,11 @@ bool Evaluator::evaluateFlowNode(const ns::Graph& graph, const ns::Node& node, n
             case ns::DataType::Drawing: result.drawings[outputName] = up.drawings[fromPin->name]; break;
             case ns::DataType::Brush: result.brushes[outputName] = up.brushes[fromPin->name]; break;
             case ns::DataType::Struct: result.structs[outputName] = up.structs[fromPin->name]; break;
-            default: result.values[outputName] = up.values[fromPin->name]; break;
+            default:
+                result.values[outputName] = up.values[fromPin->name];
+                if (auto full = up.structs.find(fromPin->name); full != up.structs.end())
+                    result.structs[outputName] = full->second; // an enum carrying data passes through whole
+                break;
         }
     }
     else
@@ -2104,6 +2109,7 @@ bool Evaluator::evaluateGraphNode(const ns::Node& node, const Host::LoadedGraph&
         child.loadGraph = host.loadGraph;
         child.depth = host.depth + 1;
         child.structs = host.structs;
+        child.enums = host.enums;
         entry.evaluator.reset(new Evaluator(library, std::move(child), routines, surfaceMaps));
         entry.text = usedGraph.text;
     }
@@ -2254,7 +2260,18 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             if (overridden != host.paramOverrides.end())
                 value = overridden->second;
         }
-        signatureOut = std::to_string(std::hash<std::string> {}(node->TypeName() + "|" + symbol->id + "=" + valueText(value)));
+        // A Choice of an enum whose values carry data: what the chosen value carries, and the enum itself, count too.
+        const auto* carrying = findEnum(graph, symbol->enumType);
+        if (carrying != nullptr && ! ns::EnumCarriesValues(*carrying))
+            carrying = nullptr;
+        std::string text = node->TypeName() + "|" + symbol->id + "=" + valueText(value);
+        if (carrying != nullptr)
+        {
+            for (const auto& v : symbol->memberValues)
+                text += "," + valueText(v);
+            text += "|" + ns::FrustEnumDeclaration(*carrying);
+        }
+        signatureOut = std::to_string(std::hash<std::string> {}(text));
         auto& cachedGet = cache[id];
         cachedGet.signature = signatureOut;
         cachedGet.outputs.clear();
@@ -2262,6 +2279,15 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         cachedGet.brushes.clear();
         cachedGet.structs.clear();
         cachedGet.values = { { ns::kSymbolValuePin, value } };
+        if (carrying != nullptr)
+        {
+            const auto* index = std::get_if<std::int64_t>(&value);
+            // What it carries belongs to the param's own value; an outside value (an Automation) picks another variant,
+            // which then carries its defaults.
+            const bool own = index != nullptr && symbol->value == value;
+            cachedGet.structs[ns::kSymbolValuePin] = enumWithDefaults(graph, *carrying, index != nullptr ? static_cast<int>(*index) : 0,
+                                                                      own ? &symbol->memberValues : nullptr, 0);
+        }
         return true;
     }
 
@@ -2271,8 +2297,10 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     const bool graphNode = ns::IsGraphNode(*node);
     const auto structKind = ns::StructNodeKindOf(*node);
     const bool structNode = structKind != ns::StructNodeKind::none;
-    const auto* definition = graphNode || structNode ? nullptr : library.find(node->TypeName());
-    if (! graphNode && ! structNode && definition == nullptr)
+    const auto enumKind = ns::EnumNodeKindOf(*node);
+    const bool enumNode = enumKind != ns::EnumNodeKind::none;
+    const auto* definition = graphNode || structNode || enumNode ? nullptr : library.find(node->TypeName());
+    if (! graphNode && ! structNode && ! enumNode && definition == nullptr)
     {
         error = "Unknown node type " + juce::String(node->TypeName()) + ".";
         return false;
@@ -2342,7 +2370,12 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             case ns::DataType::Drawing: context.drawings[pin.name] = upstreamResult.drawings[fromPin->name]; break;
             case ns::DataType::Brush: context.brushes[pin.name] = upstreamResult.brushes[fromPin->name]; break;
             case ns::DataType::Struct: context.structs[pin.name] = upstreamResult.structs[fromPin->name]; break;
-            default: context.wiredValues[pin.name] = upstreamResult.values[fromPin->name]; break;
+            default:
+                context.wiredValues[pin.name] = upstreamResult.values[fromPin->name];
+                // An enum value carrying data: its full value comes along with its number.
+                if (auto full = upstreamResult.structs.find(fromPin->name); full != upstreamResult.structs.end())
+                    context.structs[pin.name] = full->second;
+                break;
         }
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
     }
@@ -2369,6 +2402,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     juce::String nodeError;
     const bool evaluated = graphNode    ? evaluateGraphNode(*node, usedGraph, context, outputs, nodeError)
                            : structNode ? evaluateStructNode(graph, structKind, context, outputs, nodeError)
+                           : enumNode   ? evaluateEnumNode(graph, enumKind, context, outputs, nodeError)
                                         : definition->evaluate(context, outputs, nodeError);
     if (! evaluated)
     {
@@ -2377,6 +2411,7 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
                                                      : structKind == ns::StructNodeKind::breakApart ? "Break Struct"
                                                      : structKind == ns::StructNodeKind::setMembers ? "Set Members"
                                                                                                     : "Get Member")
+                         : enumNode   ? juce::String(enumKind == ns::EnumNodeKind::makeVariant ? "Make Variant" : "Match")
                                       : juce::String(definition->descriptor.displayName);
         error = title + ": " + nodeError;
         cached = {};
@@ -2401,6 +2436,60 @@ const ns::StructDef* Evaluator::findStruct(const ns::Graph& graph, const std::st
     return nullptr;
 }
 
+const ns::EnumDef* Evaluator::findEnum(const ns::Graph& graph, const std::string& name) const
+{
+    if (name.empty())
+        return nullptr;
+    if (const auto* own = graph.FindEnum(name))
+        return own;
+    for (const auto& def : host.enums)
+        if (def.name == name)
+            return &def;
+    for (const auto& def : library.getEnums())
+        if (def.name == name)
+            return &def;
+    return nullptr;
+}
+
+bool Evaluator::carriesValues(const ns::Graph& graph, const ns::PinTypeDesc& type) const
+{
+    const auto* def = type.enumType.empty() ? nullptr : findEnum(graph, type.enumType);
+    return def != nullptr && ns::EnumCarriesValues(*def);
+}
+
+void Evaluator::putDefault(const ns::Graph& graph, StructValue& into, const std::string& key, const ns::PinTypeDesc& type,
+                           const ns::PinDefaultValue& value, int depth) const
+{
+    switch (type.dataType)
+    {
+        case ns::DataType::Texture:
+            // An image member may name a project image.
+            if (const auto* path = std::get_if<std::string>(&value); path != nullptr && ! path->empty() && host.loadImage)
+                if (auto image = host.loadImage(juce::String(*path)))
+                    into.images[key] = image;
+            break;
+        case ns::DataType::Struct:
+            if (const auto* inner = findStruct(graph, type.structType); inner != nullptr && depth < 8)
+                into.structs[key] = structWithDefaults(graph, *inner, nullptr, depth + 1);
+            break;
+        case ns::DataType::Drawing:
+        case ns::DataType::Brush:
+            break; // nothing until one is wired in
+        default:
+        {
+            into.values[key] = std::holds_alternative<std::monostate>(value) ? ns::DefaultValueFor(type.dataType) : value;
+            // An enum whose values carry data: the full value travels alongside its number. Recursive types (a list
+            // whose value carries a list) stop after a few levels - the default of a default needs no more.
+            if (const auto* def = carriesValues(graph, type) ? findEnum(graph, type.enumType) : nullptr; def != nullptr && depth < 8)
+            {
+                const auto* index = std::get_if<std::int64_t>(&into.values[key]);
+                into.structs[key] = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, depth + 1);
+            }
+            break;
+        }
+    }
+}
+
 StructPtr Evaluator::structWithDefaults(const ns::Graph& graph, const ns::StructDef& def, const std::vector<ns::PinDefaultValue>* memberValues,
                                         int depth) const
 {
@@ -2409,31 +2498,126 @@ StructPtr Evaluator::structWithDefaults(const ns::Graph& graph, const ns::Struct
     for (size_t i = 0; i < def.members.size(); ++i)
     {
         const auto& member = def.members[i];
-        const auto key = ns::StructMemberPinName(member.name);
-        auto value = memberValues != nullptr && i < memberValues->size() && ! std::holds_alternative<std::monostate>((*memberValues)[i])
-                         ? (*memberValues)[i]
-                         : member.defaultValue;
-        switch (member.type.dataType)
-        {
-            case ns::DataType::Texture:
-                // An image member may name a project image.
-                if (const auto* path = std::get_if<std::string>(&value); path != nullptr && ! path->empty() && host.loadImage)
-                    if (auto image = host.loadImage(juce::String(*path)))
-                        made->images[key] = image;
-                break;
-            case ns::DataType::Struct:
-                if (const auto* inner = findStruct(graph, member.type.structType); inner != nullptr && depth < 8)
-                    made->structs[key] = structWithDefaults(graph, *inner, nullptr, depth + 1);
-                break;
-            case ns::DataType::Drawing:
-            case ns::DataType::Brush:
-                break; // nothing until one is wired in
-            default:
-                made->values[key] = std::holds_alternative<std::monostate>(value) ? ns::DefaultValueFor(member.type.dataType) : value;
-                break;
-        }
+        const auto& value = memberValues != nullptr && i < memberValues->size() && ! std::holds_alternative<std::monostate>((*memberValues)[i])
+                                ? (*memberValues)[i]
+                                : member.defaultValue;
+        putDefault(graph, *made, ns::StructMemberPinName(member.name), member.type, value, depth);
     }
     return made;
+}
+
+StructPtr Evaluator::enumWithDefaults(const ns::Graph& graph, const ns::EnumDef& def, int variant, const std::vector<ns::PinDefaultValue>* fieldValues,
+                                      int depth) const
+{
+    auto made = std::make_shared<StructValue>();
+    made->type = def.name;
+    made->variant = def.variants.empty() ? 0 : juce::jlimit(0, static_cast<int>(def.variants.size()) - 1, variant);
+    if (def.variants.empty())
+        return made;
+    const auto& fields = def.variants[static_cast<size_t>(made->variant)].fields;
+    for (size_t i = 0; i < fields.size(); ++i)
+    {
+        const ns::PinDefaultValue none;
+        const auto& value = fieldValues != nullptr && i < fieldValues->size() ? (*fieldValues)[i] : none;
+        putDefault(graph, *made, ns::StructMemberPinName(fields[i].name), fields[i].type, value, depth);
+    }
+    return made;
+}
+
+void Evaluator::takeMember(const ns::Graph& graph, Context& context, const ns::Pin& pin, StructValue& into) const
+{
+    switch (pin.type.dataType)
+    {
+        case ns::DataType::Texture:
+        {
+            into.images.erase(pin.name);
+            auto image = context.inputs.find(pin.name);
+            if (image != context.inputs.end() && image->second != nullptr)
+                into.images[pin.name] = image->second;
+            else if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty() && host.loadImage)
+                if (auto loaded = host.loadImage(juce::String(*path)))
+                    into.images[pin.name] = loaded;
+            break;
+        }
+        case ns::DataType::Drawing:
+            into.drawings.erase(pin.name);
+            if (auto d = context.drawings.find(pin.name); d != context.drawings.end())
+                into.drawings[pin.name] = d->second;
+            break;
+        case ns::DataType::Brush:
+            into.brushes.erase(pin.name);
+            if (auto b = context.brushes.find(pin.name); b != context.brushes.end())
+                into.brushes[pin.name] = b->second;
+            break;
+        case ns::DataType::Struct:
+            if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
+                into.structs[pin.name] = st->second;
+            else if (const auto* inner = findStruct(graph, pin.type.structType))
+                into.structs[pin.name] = structWithDefaults(graph, *inner, nullptr, 0);
+            break;
+        default:
+            if (const auto* value = context.setting(pin.name))
+                into.values[pin.name] = *value;
+            // An enum whose values carry data: the full value wired in, else the typed-in value with what it carries
+            // by default.
+            into.structs.erase(pin.name);
+            if (carriesValues(graph, pin.type))
+            {
+                if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
+                    into.structs[pin.name] = st->second;
+                else if (const auto* def = findEnum(graph, pin.type.enumType))
+                {
+                    const auto* index = std::get_if<std::int64_t>(&into.values[pin.name]);
+                    into.structs[pin.name] = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, 0);
+                }
+            }
+            break;
+    }
+}
+
+bool Evaluator::giveMember(const StructValue& from, const std::string& key, const ns::Pin& out, Context& context,
+                           std::map<std::string, ImagePtr>& outputs, juce::String& error) const
+{
+    switch (out.type.dataType)
+    {
+        case ns::DataType::Texture:
+        {
+            auto image = from.images.find(key);
+            if (image == from.images.end())
+            {
+                if (context.wants(out.name))
+                {
+                    error = juce::String(out.name) + " has no image - wire one in where the value is made, or choose one in its param.";
+                    return false;
+                }
+                break;
+            }
+            outputs[out.name] = image->second;
+            break;
+        }
+        case ns::DataType::Drawing:
+            if (auto d = from.drawings.find(key); d != from.drawings.end())
+                context.drawingOutputs[out.name] = d->second;
+            break;
+        case ns::DataType::Brush:
+            if (auto b = from.brushes.find(key); b != from.brushes.end())
+                context.brushOutputs[out.name] = b->second;
+            break;
+        case ns::DataType::Struct:
+            if (auto st = from.structs.find(key); st != from.structs.end())
+                context.structOutputs[out.name] = st->second;
+            break;
+        default:
+            if (auto v = from.values.find(key); v != from.values.end())
+                context.valueOutputs[out.name] = v->second;
+            else
+                context.valueOutputs[out.name] = ns::DefaultValueFor(out.type.dataType);
+            // An enum carrying data: its full value goes along too.
+            if (auto st = from.structs.find(key); st != from.structs.end())
+                context.structOutputs[out.name] = st->second;
+            break;
+    }
+    return true;
 }
 
 bool Evaluator::evaluateStructNode(const ns::Graph& graph, ns::StructNodeKind kind, Context& context, std::map<std::string, ImagePtr>& outputs,
@@ -2471,90 +2655,94 @@ bool Evaluator::evaluateStructNode(const ns::Graph& graph, ns::StructNodeKind ki
         auto made = kind == ns::StructNodeKind::make ? std::make_shared<StructValue>() : std::make_shared<StructValue>(*incoming);
         made->type = def->name;
         for (const auto& pin : node.Inputs())
-        {
-            if (isFixed(pin))
-                continue;
-            switch (pin.type.dataType)
-            {
-                case ns::DataType::Texture:
-                {
-                    made->images.erase(pin.name);
-                    auto image = context.inputs.find(pin.name);
-                    if (image != context.inputs.end() && image->second != nullptr)
-                        made->images[pin.name] = image->second;
-                    else if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty() && host.loadImage)
-                        if (auto loaded = host.loadImage(juce::String(*path)))
-                            made->images[pin.name] = loaded;
-                    break;
-                }
-                case ns::DataType::Drawing:
-                    made->drawings.erase(pin.name);
-                    if (auto d = context.drawings.find(pin.name); d != context.drawings.end())
-                        made->drawings[pin.name] = d->second;
-                    break;
-                case ns::DataType::Brush:
-                    made->brushes.erase(pin.name);
-                    if (auto b = context.brushes.find(pin.name); b != context.brushes.end())
-                        made->brushes[pin.name] = b->second;
-                    break;
-                case ns::DataType::Struct:
-                    if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
-                        made->structs[pin.name] = st->second;
-                    else if (const auto* inner = findStruct(graph, pin.type.structType))
-                        made->structs[pin.name] = structWithDefaults(graph, *inner, nullptr, 0);
-                    break;
-                default:
-                    if (const auto* value = context.setting(pin.name))
-                        made->values[pin.name] = *value;
-                    break;
-            }
-        }
+            if (! isFixed(pin))
+                takeMember(graph, context, pin, *made);
         context.structOutputs[ns::kStructValuePin] = std::move(made);
         return true;
     }
 
     // Break Struct / Get Member: members out.
     for (const auto& pin : node.Outputs())
+        if (! isFixed(pin) && ! giveMember(*incoming, pin.name, pin, context, outputs, error))
+            return false;
+    return true;
+}
+
+bool Evaluator::evaluateEnumNode(const ns::Graph& graph, ns::EnumNodeKind kind, Context& context, std::map<std::string, ImagePtr>& outputs,
+                                 juce::String& error)
+{
+    const auto& node = context.node;
+    const auto typeName = ns::StructNodeText(node, ns::kEnumTypePin);
+    if (typeName.empty())
     {
-        if (isFixed(pin))
-            continue;
-        switch (pin.type.dataType)
-        {
-            case ns::DataType::Texture:
-            {
-                auto image = incoming->images.find(pin.name);
-                if (image == incoming->images.end())
-                {
-                    if (context.wants(pin.name))
-                    {
-                        error = juce::String(pin.name) + " has no image - wire one into the struct, or choose one in its param.";
-                        return false;
-                    }
-                    break;
-                }
-                outputs[pin.name] = image->second;
-                break;
-            }
-            case ns::DataType::Drawing:
-                if (auto d = incoming->drawings.find(pin.name); d != incoming->drawings.end())
-                    context.drawingOutputs[pin.name] = d->second;
-                break;
-            case ns::DataType::Brush:
-                if (auto b = incoming->brushes.find(pin.name); b != incoming->brushes.end())
-                    context.brushOutputs[pin.name] = b->second;
-                break;
-            case ns::DataType::Struct:
-                if (auto st = incoming->structs.find(pin.name); st != incoming->structs.end())
-                    context.structOutputs[pin.name] = st->second;
-                break;
-            default:
-                if (auto v = incoming->values.find(pin.name); v != incoming->values.end())
-                    context.valueOutputs[pin.name] = v->second;
-                else
-                    context.valueOutputs[pin.name] = ns::DefaultValueFor(pin.type.dataType);
-                break;
-        }
+        error = "choose its enum in Properties.";
+        return false;
     }
+    const auto* def = findEnum(graph, typeName);
+    if (def == nullptr || def->variants.empty())
+    {
+        error = "the enum " + juce::String(typeName) + " is not in scope any more.";
+        return false;
+    }
+
+    if (kind == ns::EnumNodeKind::makeVariant)
+    {
+        // The chosen value, with what it carries: each wired in, else typed into the node.
+        const auto chosen = ns::StructNodeText(node, ns::kEnumVariantPin);
+        int variant = -1;
+        for (size_t i = 0; i < def->variants.size(); ++i)
+            if (def->variants[i].name == chosen)
+                variant = static_cast<int>(i);
+        if (variant < 0)
+        {
+            error = chosen.empty() ? juce::String("choose its value in Properties.") : "the enum has no value " + juce::String(chosen) + " any more.";
+            return false;
+        }
+        auto made = std::make_shared<StructValue>();
+        made->type = def->name;
+        made->variant = variant;
+        for (const auto& pin : node.Inputs())
+            if (pin.name != ns::kEnumTypePin && pin.name != ns::kEnumVariantPin)
+                takeMember(graph, context, pin, *made);
+        context.valueOutputs[ns::kEnumValuePin] = static_cast<std::int64_t>(variant);
+        context.structOutputs[ns::kEnumValuePin] = std::move(made);
+        return true;
+    }
+
+    // Match: the value coming in - wired with what it carries, or just its number (then it carries the defaults).
+    StructPtr incoming;
+    if (auto wired = context.structs.find(ns::kEnumValuePin); wired != context.structs.end() && wired->second != nullptr)
+        incoming = wired->second;
+    else
+    {
+        const auto* index = context.setting(ns::kEnumValuePin) != nullptr ? std::get_if<std::int64_t>(context.setting(ns::kEnumValuePin)) : nullptr;
+        incoming = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, 0);
+    }
+    const auto& chosenName = def->variants[static_cast<size_t>(juce::jlimit(0, static_cast<int>(def->variants.size()) - 1, incoming->variant))].name;
+
+    // Every variant's fields have pins; only the chosen variant's carry anything (like a Route's unchosen outputs).
+    for (const auto& variant : def->variants)
+        for (const auto& field : variant.fields)
+        {
+            const auto pinName = ns::MatchPinName(variant.name, field.name);
+            const ns::Pin* out = nullptr;
+            for (const auto& pin : node.Outputs())
+                if (pin.name == pinName)
+                    out = &pin;
+            if (out == nullptr)
+                continue;
+            if (variant.name != chosenName)
+            {
+                if (context.wants(pinName))
+                {
+                    error = "Not chosen - the value is " + juce::String(chosenName) + ".";
+                    return false;
+                }
+                continue;
+            }
+            if (! giveMember(*incoming, ns::StructMemberPinName(field.name), *out, context, outputs, error))
+                return false;
+        }
     return true;
 }
 

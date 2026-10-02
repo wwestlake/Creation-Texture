@@ -1167,6 +1167,174 @@ int main()
                   && ns::StructNodeText(*reread->FindNode(setter->Id()), ns::kStructMembersPin) == "amount");
     }
 
+    // Enums whose values carry data (shared/NodeSystem/TYPES.md): Make Variant builds one, Match takes it apart, a
+    // Switch branches on it, and the whole value travels through params and struct members.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinIn = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto pinOut = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Outputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto field = [](const char* name, ns::DataType type, const char* enumType = "") {
+            ns::EnumField f;
+            f.name = name;
+            f.type = { ns::PinKind::Data, type };
+            f.type.enumType = enumType;
+            return f;
+        };
+        auto value = [&](ns::Node* n, const std::string& output, ns::PinDefaultValue& out) {
+            juce::String e;
+            const bool good = evaluator.evaluateValue(graph, n->Id(), output, out, e);
+            if (! good)
+                std::cerr << "     " << e << "\n";
+            return good;
+        };
+        auto isColour = [](const ns::PinDefaultValue& v, float r, float g, float b) {
+            const auto* c = std::get_if<ns::Vec3Default>(&v);
+            return c != nullptr && c->x == r && c->y == g && c->z == b;
+        };
+        auto isNumber = [](const ns::PinDefaultValue& v, float n) {
+            const auto* f = std::get_if<float>(&v);
+            return f != nullptr && std::abs(*f - n) < 1.0e-6f;
+        };
+        auto makeVariant = [&](const char* enumName, const char* variant) {
+            auto* n = add(ns::kMakeVariantType);
+            set(n, ns::kEnumTypePin, std::string(enumName));
+            set(n, ns::kEnumVariantPin, std::string(variant));
+            ns::SyncEnumNodePins(graph, registry, n->Id());
+            return n;
+        };
+        auto matchOf = [&](const char* enumName, ns::Node* from, const std::string& fromPin) {
+            auto* n = add(ns::kMatchType);
+            set(n, ns::kEnumTypePin, std::string(enumName));
+            ns::SyncEnumNodePins(graph, registry, n->Id());
+            graph.Connect(from->Id(), pinOut(from, fromPin), n->Id(), pinIn(n, ns::kEnumValuePin));
+            return n;
+        };
+
+        // Fill { Nothing, Solid(colour, amount), Picture(image) }, the graph's own.
+        ns::EnumDef fill { "Fill", "Fill", { "Nothing", "Solid", "Picture" }, "", ns::TypeScope::graph };
+        fill.variants[1].fields = { field("colour", ns::DataType::Color), field("amount", ns::DataType::Float) };
+        fill.variants[2].fields = { field("image", ns::DataType::Texture) };
+        graph.AddEnum(fill);
+
+        // Solid (blue, 0.75) -> Match: Solid's values come out; Picture's is not chosen.
+        auto* solidFill = makeVariant("Fill", "Solid");
+        set(solidFill, "colour", ns::Vec3Default { 0.0f, 0.0f, 1.0f });
+        set(solidFill, "amount", 0.75f);
+        auto* solidMatch = matchOf("Fill", solidFill, ns::kEnumValuePin);
+        ns::PinDefaultValue colour, amount;
+        check("Match takes Solid apart: colour blue, amount 0.75",
+              value(solidMatch, "Solid_colour", colour) && isColour(colour, 0.0f, 0.0f, 1.0f) && value(solidMatch, "Solid_amount", amount)
+                  && isNumber(amount, 0.75f));
+        juce::String notChosen;
+        check("Match's Picture pins carry nothing when the value is Solid",
+              evaluator.evaluate(graph, solidMatch->Id(), "Picture_image", notChosen) == nullptr && notChosen.contains("Not chosen - the value is Solid"));
+
+        // Picture with a green image -> Match gives it back; the same value drives a Switch to its Picture case (blue).
+        auto* pictureFill = makeVariant("Fill", "Picture");
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", pictureFill, "image");
+        auto* pictureMatch = matchOf("Fill", pictureFill, ns::kEnumValuePin);
+        expectPixel("Match gives back the image Picture carries (green)", evaluator.evaluate(graph, pictureMatch->Id(), "Picture_image", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+        auto* byFill = add("core.switch.image");
+        graph.Connect(pictureFill->Id(), pinOut(pictureFill, ns::kEnumValuePin), byFill->Id(), pinIn(byFill, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, byFill->Id());
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", byFill, "Nothing");
+        connect(graph, solid(1.0f, 1.0f, 1.0f), "image", byFill, "Solid");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", byFill, "Picture");
+        expectPixel("An enum carrying data drives a Switch: Picture picks blue", evaluator.evaluate(graph, byFill->Id(), "value", error), 0, 0,
+                    { 0.0f, 0.0f, 1.0f });
+
+        // A Choice param of Fill set to Solid (red, 0.5): its Get node carries what Solid carries.
+        ns::Symbol paint;
+        paint.id = "paint";
+        paint.name = "Paint";
+        paint.type = ns::DataType::Int;
+        paint.enumType = "Fill";
+        paint.value = std::int64_t { 1 };
+        paint.memberValues = { ns::Vec3Default { 1.0f, 0.0f, 0.0f }, 0.5f };
+        graph.AddSymbol(paint);
+        auto* paintGet = ns::AddSymbolGetNode(graph, registry, paint);
+        auto* paintMatch = matchOf("Fill", paintGet, paintGet->Outputs().front().name);
+        ns::PinDefaultValue paintAmount, paintColour;
+        check("A Choice param's value carries its data through Match: 0.5, red",
+              value(paintMatch, "Solid_amount", paintAmount) && isNumber(paintAmount, 0.5f) && value(paintMatch, "Solid_colour", paintColour)
+                  && isColour(paintColour, 1.0f, 0.0f, 0.0f));
+
+        // A struct member of type Fill keeps the whole value: Make Struct -> Break Struct -> Match gives the green image.
+        ns::StructDef layer;
+        layer.name = "Layer";
+        layer.displayName = "Layer";
+        layer.scope = ns::TypeScope::graph;
+        ns::StructMember fillMember;
+        fillMember.name = "fill";
+        fillMember.type = { ns::PinKind::Data, ns::DataType::Int };
+        fillMember.type.enumType = "Fill";
+        fillMember.defaultValue = std::int64_t { 0 };
+        layer.members = { fillMember };
+        graph.AddStruct(layer);
+        auto* makeLayer = add(ns::kMakeStructType);
+        set(makeLayer, ns::kStructTypePin, std::string("Layer"));
+        ns::SyncStructNodePins(graph, registry, makeLayer->Id());
+        graph.Connect(pictureFill->Id(), pinOut(pictureFill, ns::kEnumValuePin), makeLayer->Id(), pinIn(makeLayer, "fill"));
+        auto* breakLayer = add(ns::kBreakStructType);
+        set(breakLayer, ns::kStructTypePin, std::string("Layer"));
+        ns::SyncStructNodePins(graph, registry, breakLayer->Id());
+        graph.Connect(makeLayer->Id(), pinOut(makeLayer, ns::kStructValuePin), breakLayer->Id(), pinIn(breakLayer, ns::kStructValuePin));
+        auto* layerMatch = matchOf("Fill", breakLayer, "fill");
+        expectPixel("A struct member keeps the whole enum value (Picture's green image)",
+                    evaluator.evaluate(graph, layerMatch->Id(), "Picture_image", error), 0, 0, { 0.0f, 1.0f, 0.0f });
+
+        // A recursive type: List { Nil, Cons(head, tail: List) }. [1.5, 2.5]: the head, the tail's head, then Nil.
+        ns::EnumDef list { "List", "List", { "Nil", "Cons" }, "", ns::TypeScope::graph };
+        list.variants[1].fields = { field("head", ns::DataType::Float), field("tail", ns::DataType::Int, "List") };
+        graph.AddEnum(list);
+        auto* inner = makeVariant("List", "Cons");
+        set(inner, "head", 2.5f); // its tail is not wired: Nil, the default
+        auto* outer = makeVariant("List", "Cons");
+        set(outer, "head", 1.5f);
+        graph.Connect(inner->Id(), pinOut(inner, ns::kEnumValuePin), outer->Id(), pinIn(outer, "tail"));
+        auto* first = matchOf("List", outer, ns::kEnumValuePin);
+        auto* second = matchOf("List", first, "Cons_tail");
+        auto* third = matchOf("List", second, "Cons_tail");
+        ns::PinDefaultValue head1, head2;
+        check("A recursive list: heads 1.5 then 2.5", value(first, "Cons_head", head1) && isNumber(head1, 1.5f) && value(second, "Cons_head", head2)
+                                                         && isNumber(head2, 2.5f));
+        ns::PinDefaultValue none;
+        juce::String endError;
+        check("...and then Nil: no head", ! evaluator.evaluateValue(graph, third->Id(), "Cons_head", none, endError)
+                                             && endError.contains("Not chosen - the value is Nil"));
+
+        // Saved and read back: what the values carry, the enum nodes and the param's carried values survive.
+        std::string readError;
+        auto reread = ns::DeserializeGraph(ns::SerializeGraph(graph), readError);
+        check("Enums carrying values, Make Variant / Match and the param round trip",
+              reread != nullptr && reread->FindEnum("List") != nullptr && reread->FindEnum("List")->variants[1].fields[1].type.enumType == "List"
+                  && reread->FindSymbol("paint") != nullptr && reread->FindSymbol("paint")->memberValues.size() == 2
+                  && reread->FindNode(solidFill->Id()) != nullptr
+                  && ns::StructNodeText(*reread->FindNode(solidFill->Id()), ns::kEnumVariantPin) == "Solid");
+    }
+
     // Analysis: channels, colour masks, Fourier, local frequency, evenness, colour spectrum. Test images come in
     // through Load Image: a 64 x 64 grey sine with period 8 px across (0.5 + 0.25 sin(2 pi x / 8)), the same on the
     // left half with flat 0.5 on the right, half red / half cyan, and a single colour.

@@ -37,9 +37,13 @@ using ImagePtr = std::shared_ptr<const Image>;
 
 // A struct's value (shared/NodeSystem/TYPES.md) as it flows along a wire: each member by its pin name, kept the way
 // that kind of value is kept everywhere else. Never changed once made - Set Members makes a new one.
+//
+// The same holds an enum value whose variant carries data (the sum type): `variant` says which, and the members are
+// what that variant carries. Such a value travels alongside its variant number, which every plain integer use reads.
 struct StructValue
 {
     std::string type;
+    int variant = -1; // an enum value: which variant; -1 for a struct
     std::map<std::string, ce::node_system::PinDefaultValue> values;
     std::map<std::string, std::shared_ptr<const Image>> images;
     std::map<std::string, drawing::DrawingPtr> drawings;
@@ -73,8 +77,9 @@ struct Host
     std::map<std::string, std::string> graphInputKeys;
     int depth = 0; // graphs used inside graphs, to stop a graph that uses itself
 
-    // The project's structs (the graph's own are in the graph), for struct nodes and struct params.
+    // The project's structs and enums (the graph's own are in the graph), for struct and enum nodes and params.
     std::vector<ce::node_system::StructDef> structs;
+    std::vector<ce::node_system::EnumDef> enums;
 };
 
 // An image graph document (.imggraph.json): its format name, and reading one into a graph typed as an image graph.
@@ -196,11 +201,27 @@ private:
     // Make Struct, Break Struct, Set Members, Get Member (TYPES.md): no FRust, just members moved about.
     bool evaluateStructNode(const ce::node_system::Graph& graph, ce::node_system::StructNodeKind kind, Context& context,
                             std::map<std::string, ImagePtr>& outputs, juce::String& error);
-    // A struct by name, the graph's own first, then the project's.
+    // Make Variant and Match (TYPES.md): an enum value with what it carries, and taking one apart.
+    bool evaluateEnumNode(const ce::node_system::Graph& graph, ce::node_system::EnumNodeKind kind, Context& context,
+                          std::map<std::string, ImagePtr>& outputs, juce::String& error);
+    // A struct or enum by name, the graph's own first, then the project's (and the library's built-in enums).
     const ce::node_system::StructDef* findStruct(const ce::node_system::Graph& graph, const std::string& name) const;
+    const ce::node_system::EnumDef* findEnum(const ce::node_system::Graph& graph, const std::string& name) const;
+    // True for a pin of an enum whose values carry data: its full value travels alongside its number.
+    bool carriesValues(const ce::node_system::Graph& graph, const ce::node_system::PinTypeDesc& type) const;
     // A struct with its members' default values; a param's member values (in member order) over them if given.
     StructPtr structWithDefaults(const ce::node_system::Graph& graph, const ce::node_system::StructDef& def,
                                  const std::vector<ce::node_system::PinDefaultValue>* memberValues, int depth) const;
+    // An enum value: the variant, carrying its fields' defaults, or the given values (in field order) over them.
+    StructPtr enumWithDefaults(const ce::node_system::Graph& graph, const ce::node_system::EnumDef& def, int variant,
+                               const std::vector<ce::node_system::PinDefaultValue>* fieldValues, int depth) const;
+    // One member's default, by its type, into a struct or enum value.
+    void putDefault(const ce::node_system::Graph& graph, StructValue& into, const std::string& key, const ce::node_system::PinTypeDesc& type,
+                    const ce::node_system::PinDefaultValue& value, int depth) const;
+    // A member from a node's input pin (wired, else typed in) into a value; a member out of a value onto an output pin.
+    void takeMember(const ce::node_system::Graph& graph, Context& context, const ce::node_system::Pin& pin, StructValue& into) const;
+    bool giveMember(const StructValue& from, const std::string& key, const ce::node_system::Pin& out, Context& context,
+                    std::map<std::string, ImagePtr>& outputs, juce::String& error) const;
     // A Graph node: runs the graph it uses, with its params and Graph Inputs set from the node's inputs.
     bool evaluateGraphNode(const ce::node_system::Node& node, const Host::LoadedGraph& used, Context& context,
                            std::map<std::string, ImagePtr>& outputs, juce::String& error);

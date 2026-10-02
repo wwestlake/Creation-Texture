@@ -89,8 +89,13 @@ private:
     void compileMaterial();
     // The project's types: read from and written to the project (TYPES.md), and put in the registry's project scope.
     void loadProjectTypes();
-    // The project's structs, for the evaluator (a copy: it runs on another thread).
-    std::vector<ce::node_system::StructDef> projectStructs() const;
+    // The project's structs and enums, for the evaluator (copies: it runs on another thread).
+    struct ProjectTypes
+    {
+        std::vector<ce::node_system::StructDef> structs;
+        std::vector<ce::node_system::EnumDef> enums;
+    };
+    ProjectTypes projectTypes() const;
     void saveProjectTypes(const std::vector<ce::node_system::EnumDef>& enums, const std::vector<ce::node_system::StructDef>& structs);
     void typesChanged();
     void status(const juce::String& text);
