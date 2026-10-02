@@ -1,0 +1,889 @@
+manifest "{\"name\":\"image_analysis\",\"version\":\"0.1.0\",\"description\":\"Image analysis maths: a 2D FFT (radix 2), frequency band filtering and spectra, windowed local frequency (scale, direction, strength, band energies), local detail, colour channel splits and combines (RGB, CMYK, Lab, HSV), colour and hue masks, and the hue histogram. General and reusable - the host calls it. 32-bit float linear RGBA.\",\"entryPoints\":[],\"requiredHostFunctions\":[{\"name\":\"an_host_sin\"},{\"name\":\"an_host_cos\"},{\"name\":\"an_host_sqrt\"},{\"name\":\"an_host_atan2\"},{\"name\":\"an_host_log\"},{\"name\":\"an_host_pow\"},{\"name\":\"an_host_floor\"},{\"name\":\"an_host_i64_to_f32\"},{\"name\":\"an_host_f32_to_i64\"}],\"intendedApplications\":[\"creation-texture\"]}";
+
+// Image analysis for Djehuti Texture's Image Graph - a general math pack (AGENTS.md: the technology calls the math),
+// to become the frust_image_analysis Frate pod.
+//
+// Complex buffers hold re, im pairs. Images are rgba, 32-bit float, linear light; analysis results are grey maps.
+// Frequencies are measured on the image as repeating (FFT), so a tileable image stays tileable when filtered.
+// FRust today: a dereference must start an expression, pointer arithmetic is base + one offset, no `||`, `out` is
+// reserved, no negative literals - so offsets are computed first, values read into locals, and -x is 0 - x.
+
+extern fn an_host_sin(v: f32) -> f32;
+extern fn an_host_cos(v: f32) -> f32;
+extern fn an_host_sqrt(v: f32) -> f32;
+extern fn an_host_atan2(y: f32, x: f32) -> f32;
+extern fn an_host_log(v: f32) -> f32;
+extern fn an_host_pow(b: f32, e: f32) -> f32;
+extern fn an_host_floor(v: f32) -> f32;
+extern fn an_host_i64_to_f32(v: i64) -> f32;
+extern fn an_host_f32_to_i64(v: f32) -> i64;
+
+// ---------------------------------------------------------------- helpers
+
+fn clamp01(v: f32) -> f32 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    if (v < zero) { zero } else if (v > one) { one } else { v }
+}
+
+fn fmin(a: f32, b: f32) -> f32 = { if (a < b) { a } else { b } }
+fn fmax(a: f32, b: f32) -> f32 = { if (a > b) { a } else { b } }
+fn imin(a: i64, b: i64) -> i64 = { if (a < b) { a } else { b } }
+fn imax(a: i64, b: i64) -> i64 = { if (a > b) { a } else { b } }
+fn tof(v: i64) -> f32 = { an_host_i64_to_f32(v) }
+fn floori(v: f32) -> i64 = { an_host_f32_to_i64(an_host_floor(v)) }
+
+fn wrapi(i: i64, n: i64) -> i64 = {
+    let mut v: i64 = i - (i / n) * n;
+    if (v < 0) { v = v + n; };
+    v
+}
+
+fn getf(buf: raw* f32, index: i64) -> f32 = {
+    let mut p: raw* f32 = buf;
+    p = buf + index;
+    let v: f32 = *p;
+    v
+}
+
+fn setf(buf: raw* f32, index: i64, v: f32) -> i64 = {
+    let mut p: raw* f32 = buf;
+    p = buf + index;
+    *p = v;
+    1
+}
+
+fn lum(rgba: raw* f32, pixel: i64) -> f32 = {
+    let kr: f32 = 0.2126;
+    let kg: f32 = 0.7152;
+    let kb: f32 = 0.0722;
+    let o: i64 = pixel * 4;
+    kr * getf(rgba, o) + kg * getf(rgba, o + 1) + kb * getf(rgba, o + 2)
+}
+
+fn put_grey(rgba: raw* f32, pixel: i64, v: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let o: i64 = pixel * 4;
+    setf(rgba, o, v);
+    setf(rgba, o + 1, v);
+    setf(rgba, o + 2, v);
+    setf(rgba, o + 3, one);
+    1
+}
+
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 = {
+    let two: f32 = 2.0;
+    let three: f32 = 3.0;
+    let t: f32 = clamp01((x - e0) / (e1 - e0));
+    t * t * (three - two * t)
+}
+
+// ---------------------------------------------------------------- FFT
+
+// In place, n complex numbers (n a power of two) at element start, start + stride ... (element = re, im).
+// inverse: the inverse transform, scaled by 1 / n.
+fn fft_line(buf: raw* f32, start: i64, stride: i64, n: i64, inverse: i64) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let twoPi: f32 = 6.28318530718;
+    let mut i: i64 = 0;
+    let mut j: i64 = 0;
+    let mut m: i64 = 0;
+    let mut a: i64 = 0;
+    let mut b: i64 = 0;
+    let mut tr: f32 = 0.0;
+    let mut ti: f32 = 0.0;
+    let mut going: i64 = 0;
+    // Bit-reversed order.
+    while (i < n - 1) {
+        if (i < j) {
+            a = (start + i * stride) * 2;
+            b = (start + j * stride) * 2;
+            tr = getf(buf, a);
+            ti = getf(buf, a + 1);
+            setf(buf, a, getf(buf, b));
+            setf(buf, a + 1, getf(buf, b + 1));
+            setf(buf, b, tr);
+            setf(buf, b + 1, ti);
+        };
+        m = n / 2;
+        going = 1;
+        while (going != 0) {
+            if (m >= 1) {
+                if (j >= m) { j = j - m; m = m / 2; } else { going = 0; };
+            } else {
+                going = 0;
+            };
+        };
+        j = j + m;
+        i = i + 1;
+    };
+    // Butterflies.
+    let mut len: i64 = 2;
+    let mut half: i64 = 0;
+    let mut angle: f32 = 0.0;
+    let mut wr: f32 = 0.0;
+    let mut wi: f32 = 0.0;
+    let mut cr: f32 = 0.0;
+    let mut ci: f32 = 0.0;
+    let mut k: i64 = 0;
+    let mut ur: f32 = 0.0;
+    let mut ui: f32 = 0.0;
+    let mut vr: f32 = 0.0;
+    let mut vi: f32 = 0.0;
+    let mut xr: f32 = 0.0;
+    let mut xi: f32 = 0.0;
+    let mut nr: f32 = 0.0;
+    while (len <= n) {
+        half = len / 2;
+        angle = twoPi / tof(len);
+        if (inverse == 0) { angle = zero - angle; };
+        wr = an_host_cos(angle);
+        wi = an_host_sin(angle);
+        i = 0;
+        while (i < n) {
+            cr = one;
+            ci = zero;
+            k = 0;
+            while (k < half) {
+                a = (start + (i + k) * stride) * 2;
+                b = (start + (i + k + half) * stride) * 2;
+                ur = getf(buf, a);
+                ui = getf(buf, a + 1);
+                xr = getf(buf, b);
+                xi = getf(buf, b + 1);
+                vr = xr * cr - xi * ci;
+                vi = xr * ci + xi * cr;
+                setf(buf, a, ur + vr);
+                setf(buf, a + 1, ui + vi);
+                setf(buf, b, ur - vr);
+                setf(buf, b + 1, ui - vi);
+                nr = cr * wr - ci * wi;
+                ci = cr * wi + ci * wr;
+                cr = nr;
+                k = k + 1;
+            };
+            i = i + len;
+        };
+        len = len * 2;
+    };
+    if (inverse != 0) {
+        let scale: f32 = one / tof(n);
+        i = 0;
+        while (i < n) {
+            a = (start + i * stride) * 2;
+            setf(buf, a, getf(buf, a) * scale);
+            setf(buf, a + 1, getf(buf, a + 1) * scale);
+            i = i + 1;
+        };
+    };
+    1
+}
+
+// 2D FFT of a w x h complex buffer (both powers of two): rows, then columns.
+pub fn an_fft2d(buf: raw* f32, w: i64, h: i64, inverse: i64) -> i64 = {
+    let mut y: i64 = 0;
+    while (y < h) {
+        fft_line(buf, y * w, 1, w, inverse);
+        y = y + 1;
+    };
+    let mut x: i64 = 0;
+    while (x < w) {
+        fft_line(buf, x, w, h, inverse);
+        x = x + 1;
+    };
+    1
+}
+
+// One channel of an image into a complex buffer (imaginary 0). channel 0..3, or 4 for luminance.
+pub fn an_pack(rgba: raw* f32, buf: raw* f32, count: i64, channel: i64) -> i64 = {
+    let zero: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        if (channel == 4) { v = lum(rgba, i); } else { v = getf(rgba, i * 4 + channel); };
+        setf(buf, i * 2, v);
+        setf(buf, i * 2 + 1, zero);
+        i = i + 1;
+    };
+    1
+}
+
+// The real part of a complex buffer back into one channel (0..3; 4 writes grey into R, G and B).
+pub fn an_unpack(buf: raw* f32, rgba: raw* f32, count: i64, channel: i64) -> i64 = {
+    let mut i: i64 = 0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        v = getf(buf, i * 2);
+        if (channel == 4) {
+            setf(rgba, i * 4, v);
+            setf(rgba, i * 4 + 1, v);
+            setf(rgba, i * 4 + 2, v);
+        } else {
+            setf(rgba, i * 4 + channel, v);
+        };
+        i = i + 1;
+    };
+    1
+}
+
+// Signed frequency of index i of n (0, 1 .. n/2, then negative).
+fn signed_freq(i: i64, n: i64) -> f32 = {
+    if (i <= n / 2) { tof(i) } else { tof(i - n) }
+}
+
+// Keeps the detail whose size (wavelength, pixels) is between minWave and maxWave, with soft edges `soft` octaves
+// wide (0: hard). keepAverage keeps the overall average (the zero frequency).
+pub fn an_band(buf: raw* f32, w: i64, h: i64, minWave: f32, maxWave: f32, soft: f32, keepAverage: i64) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let ln2: f32 = 0.69314718;
+    let mut u: i64 = 0;
+    let mut v: i64 = 0;
+    let mut fu: f32 = 0.0;
+    let mut fv: f32 = 0.0;
+    let mut r: f32 = 0.0;
+    let mut wave: f32 = 0.0;
+    let mut low: f32 = 0.0;
+    let mut high: f32 = 0.0;
+    let mut weight: f32 = 0.0;
+    let mut o: i64 = 0;
+    while (v < h) {
+        u = 0;
+        while (u < w) {
+            fu = signed_freq(u, w) / tof(w);
+            fv = signed_freq(v, h) / tof(h);
+            r = an_host_sqrt(fu * fu + fv * fv);
+            if (r <= zero) {
+                if (keepAverage != 0) { weight = one; } else { weight = zero; };
+            } else {
+                wave = one / r;
+                // Octaves inside the band from each edge; a hard edge counts exactly at the edge as inside.
+                low = an_host_log(wave / minWave) / ln2;
+                high = an_host_log(maxWave / wave) / ln2;
+                if (soft > zero) {
+                    weight = clamp01(low / soft + half) * clamp01(high / soft + half);
+                } else {
+                    weight = one;
+                    if (low < zero) { weight = zero; };
+                    if (high < zero) { weight = zero; };
+                };
+            };
+            o = (v * w + u) * 2;
+            setf(buf, o, getf(buf, o) * weight);
+            setf(buf, o + 1, getf(buf, o + 1) * weight);
+            u = u + 1;
+        };
+        v = v + 1;
+    };
+    1
+}
+
+// The magnitude spectrum as a grey image: log(1 + |F|), scaled to its largest value, with the average (zero
+// frequency) in the middle.
+pub fn an_spectrum(buf: raw* f32, rgba: raw* f32, w: i64, h: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let zero: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut top: f32 = 0.0;
+    let mut re: f32 = 0.0;
+    let mut im: f32 = 0.0;
+    let mut m: f32 = 0.0;
+    let count: i64 = w * h;
+    while (i < count) {
+        re = getf(buf, i * 2);
+        im = getf(buf, i * 2 + 1);
+        m = an_host_log(one + an_host_sqrt(re * re + im * im));
+        setf(buf, i * 2, m);
+        if (m > top) { top = m; };
+        i = i + 1;
+    };
+    if (top <= zero) { top = one; };
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut sx: i64 = 0;
+    let mut sy: i64 = 0;
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            sx = wrapi(x + w / 2, w);
+            sy = wrapi(y + h / 2, h);
+            put_grey(rgba, sy * w + sx, getf(buf, (y * w + x) * 2) / top);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// Bilinear resample with wrap-around (keeps tiling), all four channels.
+pub fn an_resample(src: raw* f32, sw: i64, sh: i64, dst: raw* f32, dw: i64, dh: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut fx: f32 = 0.0;
+    let mut fy: f32 = 0.0;
+    let mut x0: i64 = 0;
+    let mut y0: i64 = 0;
+    let mut tx: f32 = 0.0;
+    let mut ty: f32 = 0.0;
+    let mut c: i64 = 0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut cc: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut i00: i64 = 0;
+    let mut i10: i64 = 0;
+    let mut i01: i64 = 0;
+    let mut i11: i64 = 0;
+    while (y < dh) {
+        fy = (tof(y) + half) * tof(sh) / tof(dh) - half;
+        y0 = floori(fy);
+        ty = fy - tof(y0);
+        x = 0;
+        while (x < dw) {
+            fx = (tof(x) + half) * tof(sw) / tof(dw) - half;
+            x0 = floori(fx);
+            tx = fx - tof(x0);
+            i00 = (wrapi(y0, sh) * sw + wrapi(x0, sw)) * 4;
+            i10 = (wrapi(y0, sh) * sw + wrapi(x0 + 1, sw)) * 4;
+            i01 = (wrapi(y0 + 1, sh) * sw + wrapi(x0, sw)) * 4;
+            i11 = (wrapi(y0 + 1, sh) * sw + wrapi(x0 + 1, sw)) * 4;
+            c = 0;
+            while (c < 4) {
+                a = getf(src, i00 + c);
+                b = getf(src, i10 + c);
+                cc = getf(src, i01 + c);
+                d = getf(src, i11 + c);
+                setf(dst, (y * dw + x) * 4 + c, (a + (b - a) * tx) + ((cc + (d - cc) * tx) - (a + (b - a) * tx)) * ty);
+                c = c + 1;
+            };
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- local analysis
+
+// Windowed FFT square by square (win x win, a power of two, every `hop` pixels, wrapping at the edges). For each
+// square, from its spectrum without the average:
+//   scale     - the typical wavelength as a fraction of the square (energy-weighted), 0..1
+//   direction - which way the detail runs (its lines), 0..1 over 180 degrees, 0 = horizontal lines... 0.5 = vertical
+//   strength  - how much it has one direction (0 = none, 1 = all one way)
+//   bands     - six octave band energy fractions (wavelengths 2-4, 4-8 ... 64+ px), then total energy per pixel
+// scratch: win * win complex. Grids are gw x gh (bands: 7 per square).
+pub fn an_local(rgba: raw* f32, w: i64, h: i64, win: i64, hop: i64, scratch: raw* f32, gw: i64, gh: i64,
+                scaleGrid: raw* f32, dirGrid: raw* f32, strengthGrid: raw* f32, bands: raw* f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let two: f32 = 2.0;
+    let pi: f32 = 3.14159265359;
+    let twoPi: f32 = 6.28318530718;
+    let ln2: f32 = 0.69314718;
+    let n: i64 = win * win;
+    let mut tx: i64 = 0;
+    let mut ty: i64 = 0;
+    let mut px: i64 = 0;
+    let mut py: i64 = 0;
+    let mut mean: f32 = 0.0;
+    let mut wx: f32 = 0.0;
+    let mut wy: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    let mut u: i64 = 0;
+    let mut q: i64 = 0;
+    let mut fu: f32 = 0.0;
+    let mut fv: f32 = 0.0;
+    let mut r: f32 = 0.0;
+    let mut p: f32 = 0.0;
+    let mut re: f32 = 0.0;
+    let mut im: f32 = 0.0;
+    let mut total: f32 = 0.0;
+    let mut sumR: f32 = 0.0;
+    let mut c2: f32 = 0.0;
+    let mut s2: f32 = 0.0;
+    let mut theta: f32 = 0.0;
+    let mut phi: f32 = 0.0;
+    let mut dir: f32 = 0.0;
+    let mut band: i64 = 0;
+    let mut cell: i64 = 0;
+    let mut k: i64 = 0;
+    while (ty < gh) {
+        tx = 0;
+        while (tx < gw) {
+            // The square's luminance, its mean removed, under a Hann window.
+            mean = zero;
+            py = 0;
+            while (py < win) {
+                px = 0;
+                while (px < win) {
+                    mean = mean + lum(rgba, wrapi(ty * hop + py, h) * w + wrapi(tx * hop + px, w));
+                    px = px + 1;
+                };
+                py = py + 1;
+            };
+            mean = mean / tof(n);
+            py = 0;
+            while (py < win) {
+                wy = half - half * an_host_cos(twoPi * (tof(py) + half) / tof(win));
+                px = 0;
+                while (px < win) {
+                    wx = half - half * an_host_cos(twoPi * (tof(px) + half) / tof(win));
+                    v = (lum(rgba, wrapi(ty * hop + py, h) * w + wrapi(tx * hop + px, w)) - mean) * wx * wy;
+                    setf(scratch, (py * win + px) * 2, v);
+                    setf(scratch, (py * win + px) * 2 + 1, zero);
+                    px = px + 1;
+                };
+                py = py + 1;
+            };
+            an_fft2d(scratch, win, win, 0);
+
+            total = zero;
+            sumR = zero;
+            c2 = zero;
+            s2 = zero;
+            cell = ty * gw + tx;
+            k = 0;
+            while (k < 7) {
+                setf(bands, cell * 7 + k, zero);
+                k = k + 1;
+            };
+            q = 0;
+            while (q < win) {
+                u = 0;
+                while (u < win) {
+                    fu = signed_freq(u, win);
+                    fv = signed_freq(q, win);
+                    r = an_host_sqrt(fu * fu + fv * fv) / tof(win);
+                    if (r > zero) {
+                        re = getf(scratch, (q * win + u) * 2);
+                        im = getf(scratch, (q * win + u) * 2 + 1);
+                        p = re * re + im * im;
+                        total = total + p;
+                        sumR = sumR + p * r;
+                        theta = an_host_atan2(fv, fu);
+                        c2 = c2 + p * an_host_cos(two * theta);
+                        s2 = s2 + p * an_host_sin(two * theta);
+                        // Octave band by wavelength: 2-4 px -> 0, 4-8 -> 1 ... 64 and more -> 5.
+                        band = floori(an_host_log(one / r) / ln2) - 1;
+                        band = imin(5, imax(0, band));
+                        setf(bands, cell * 7 + band, getf(bands, cell * 7 + band) + p);
+                    };
+                    u = u + 1;
+                };
+                q = q + 1;
+            };
+            if (total > zero) {
+                setf(scaleGrid, cell, clamp01((tof(1) / (sumR / total)) / tof(win)));
+                setf(strengthGrid, cell, clamp01(an_host_sqrt(c2 * c2 + s2 * s2) / total));
+                phi = an_host_atan2(s2, c2) / two;              // the direction the detail changes along
+                dir = phi + pi * half;                          // its lines run across that
+                dir = dir - pi * an_host_floor(dir / pi);       // 0..pi
+                setf(dirGrid, cell, dir / pi);
+                k = 0;
+                while (k < 6) {
+                    setf(bands, cell * 7 + k, getf(bands, cell * 7 + k) / total);
+                    k = k + 1;
+                };
+            } else {
+                setf(scaleGrid, cell, one);
+                setf(strengthGrid, cell, zero);
+                setf(dirGrid, cell, zero);
+            };
+            setf(bands, cell * 7 + 6, total / tof(n * n));
+            tx = tx + 1;
+        };
+        ty = ty + 1;
+    };
+    1
+}
+
+// A grid of values (one per square, squares `hop` apart, `win` across) spread over the image, bilinear between
+// square centres, as a grey map.
+pub fn an_grid_to_image(grid: raw* f32, gw: i64, gh: i64, win: i64, hop: i64, rgba: raw* f32, w: i64, h: i64) -> i64 = {
+    let half: f32 = 0.5;
+    let zero: f32 = 0.0;
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut gx: f32 = 0.0;
+    let mut gy: f32 = 0.0;
+    let mut x0: i64 = 0;
+    let mut y0: i64 = 0;
+    let mut x1: i64 = 0;
+    let mut y1: i64 = 0;
+    let mut tx: f32 = 0.0;
+    let mut ty: f32 = 0.0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let maxX: f32 = tof(gw - 1);
+    let maxY: f32 = tof(gh - 1);
+    while (y < h) {
+        gy = fmax(zero, fmin(maxY, (tof(y) + half - tof(win) * half) / tof(hop)));
+        y0 = floori(gy);
+        y1 = imin(gh - 1, y0 + 1);
+        ty = gy - tof(y0);
+        x = 0;
+        while (x < w) {
+            gx = fmax(zero, fmin(maxX, (tof(x) + half - tof(win) * half) / tof(hop)));
+            x0 = floori(gx);
+            x1 = imin(gw - 1, x0 + 1);
+            tx = gx - tof(x0);
+            a = getf(grid, y0 * gw + x0);
+            b = getf(grid, y0 * gw + x1);
+            c = getf(grid, y1 * gw + x0);
+            d = getf(grid, y1 * gw + x1);
+            put_grey(rgba, y * w + x, (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    1
+}
+
+// How much change each part of the image holds: the standard deviation of luminance over a (2 radius + 1)-pixel
+// square around each pixel, wrapping. tmpA, tmpB: count floats each.
+pub fn an_detail(rgba: raw* f32, w: i64, h: i64, radius: i64, tmpA: raw* f32, tmpB: raw* f32, outImage: raw* f32) -> i64 = {
+    let zero: f32 = 0.0;
+    let size: i64 = radius * 2 + 1;
+    let area: f32 = tof(size * size);
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut k: i64 = 0;
+    let mut s: f32 = 0.0;
+    let mut s2: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    // Across: sums of l and l squared in a row window.
+    while (y < h) {
+        x = 0;
+        while (x < w) {
+            s = zero;
+            s2 = zero;
+            k = 0 - radius;
+            while (k <= radius) {
+                v = lum(rgba, y * w + wrapi(x + k, w));
+                s = s + v;
+                s2 = s2 + v * v;
+                k = k + 1;
+            };
+            setf(tmpA, y * w + x, s);
+            setf(tmpB, y * w + x, s2);
+            x = x + 1;
+        };
+        y = y + 1;
+    };
+    // Down: the column window of those, then the standard deviation.
+    let mut mean: f32 = 0.0;
+    let mut var: f32 = 0.0;
+    x = 0;
+    while (x < w) {
+        y = 0;
+        while (y < h) {
+            s = zero;
+            s2 = zero;
+            k = 0 - radius;
+            while (k <= radius) {
+                s = s + getf(tmpA, wrapi(y + k, h) * w + x);
+                s2 = s2 + getf(tmpB, wrapi(y + k, h) * w + x);
+                k = k + 1;
+            };
+            mean = s / area;
+            var = s2 / area - mean * mean;
+            if (var < zero) { var = zero; };
+            put_grey(outImage, y * w + x, an_host_sqrt(var));
+            y = y + 1;
+        };
+        x = x + 1;
+    };
+    1
+}
+
+// ---------------------------------------------------------------- colour
+
+fn hue_sat_val(r: f32, g: f32, b: f32, part: i64) -> f32 = {
+    let zero: f32 = 0.0;
+    let six: f32 = 6.0;
+    let two: f32 = 2.0;
+    let four: f32 = 4.0;
+    let mx: f32 = fmax(r, fmax(g, b));
+    let mn: f32 = fmin(r, fmin(g, b));
+    let d: f32 = mx - mn;
+    let mut hue: f32 = 0.0;
+    if (d > zero) {
+        if (mx == r) { hue = (g - b) / d; } else if (mx == g) { hue = two + (b - r) / d; } else { hue = four + (r - g) / d; };
+        hue = hue / six;
+        hue = hue - an_host_floor(hue);
+    };
+    if (part == 0) { hue } else if (part == 1) { if (mx > zero) { d / mx } else { zero } } else { mx }
+}
+
+// Lab (D65) from linear RGB: part 0 L / 100, part 1 a, part 2 b, with a and b mapped so 0.5 is neutral (a / 256 + 0.5).
+fn lab_f(t: f32) -> f32 = {
+    let eps: f32 = 0.008856;
+    let k: f32 = 7.787;
+    let c: f32 = 0.137931;
+    let third: f32 = 0.333333333;
+    if (t > eps) { an_host_pow(t, third) } else { k * t + c }
+}
+
+fn lab_part(r: f32, g: f32, b: f32, part: i64) -> f32 = {
+    let half: f32 = 0.5;
+    let x: f32 = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047;
+    let y: f32 = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+    let z: f32 = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883;
+    let fx: f32 = lab_f(x);
+    let fy: f32 = lab_f(y);
+    let fz: f32 = lab_f(z);
+    if (part == 0) { (116.0 * fy - 16.0) / 100.0 } else if (part == 1) { (500.0 * (fx - fy)) / 256.0 + half } else { (200.0 * (fy - fz)) / 256.0 + half }
+}
+
+// One channel of a colour model as a grey map. mode 0 RGBA (index 0..3), 1 CMYK (0..3), 2 Lab (0..2), 3 HSV (0..2).
+pub fn an_channel(rgba: raw* f32, outImage: raw* f32, count: i64, mode: i64, index: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let zero: f32 = 0.0;
+    let mut i: i64 = 0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut k: f32 = 0.0;
+    let mut v: f32 = 0.0;
+    while (i < count) {
+        r = clamp01(getf(rgba, i * 4));
+        g = clamp01(getf(rgba, i * 4 + 1));
+        b = clamp01(getf(rgba, i * 4 + 2));
+        if (mode == 0) {
+            v = getf(rgba, i * 4 + index);
+        } else if (mode == 1) {
+            k = one - fmax(r, fmax(g, b));
+            if (index == 3) {
+                v = k;
+            } else if (k >= one) {
+                v = zero;
+            } else if (index == 0) {
+                v = (one - r - k) / (one - k);
+            } else if (index == 1) {
+                v = (one - g - k) / (one - k);
+            } else {
+                v = (one - b - k) / (one - k);
+            };
+        } else if (mode == 2) {
+            v = lab_part(r, g, b, index);
+        } else {
+            v = hue_sat_val(r, g, b, index);
+        };
+        put_grey(outImage, i, v);
+        i = i + 1;
+    };
+    1
+}
+
+fn lab_finv(t: f32) -> f32 = {
+    let eps: f32 = 0.206893;
+    let k: f32 = 7.787;
+    let c: f32 = 0.137931;
+    if (t > eps) { t * t * t } else { (t - c) / k }
+}
+
+// Grey maps (their red channel) combined into a colour by a colour model; mode as an_channel. Alpha is a4's red
+// for RGBA, else 1.
+pub fn an_combine(c1: raw* f32, c2: raw* f32, c3: raw* f32, c4: raw* f32, outImage: raw* f32, count: i64, mode: i64) -> i64 = {
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let six: f32 = 6.0;
+    let mut i: i64 = 0;
+    let mut a: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut c: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut bl: f32 = 0.0;
+    let mut alpha: f32 = 1.0;
+    let mut fy: f32 = 0.0;
+    let mut fx: f32 = 0.0;
+    let mut fz: f32 = 0.0;
+    let mut x: f32 = 0.0;
+    let mut y: f32 = 0.0;
+    let mut z: f32 = 0.0;
+    let mut h6: f32 = 0.0;
+    let mut sector: i64 = 0;
+    let mut f: f32 = 0.0;
+    let mut p: f32 = 0.0;
+    let mut q: f32 = 0.0;
+    let mut t: f32 = 0.0;
+    while (i < count) {
+        a = getf(c1, i * 4);
+        b = getf(c2, i * 4);
+        c = getf(c3, i * 4);
+        d = getf(c4, i * 4);
+        alpha = one;
+        if (mode == 0) {
+            r = a; g = b; bl = c; alpha = d;
+        } else if (mode == 1) {
+            r = (one - a) * (one - d);
+            g = (one - b) * (one - d);
+            bl = (one - c) * (one - d);
+        } else if (mode == 2) {
+            fy = (a * 100.0 + 16.0) / 116.0;
+            fx = fy + ((b - half) * 256.0) / 500.0;
+            fz = fy - ((c - half) * 256.0) / 200.0;
+            x = lab_finv(fx) * 0.95047;
+            y = lab_finv(fy);
+            z = lab_finv(fz) * 1.08883;
+            r = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z;
+            g = 0.0 - 0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
+            bl = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
+        } else {
+            h6 = (a - an_host_floor(a)) * six;
+            sector = floori(h6);
+            f = h6 - tof(sector);
+            p = c * (one - b);
+            q = c * (one - b * f);
+            t = c * (one - b * (one - f));
+            if (sector == 0) { r = c; g = t; bl = p; }
+            else if (sector == 1) { r = q; g = c; bl = p; }
+            else if (sector == 2) { r = p; g = c; bl = t; }
+            else if (sector == 3) { r = p; g = q; bl = c; }
+            else if (sector == 4) { r = t; g = p; bl = c; }
+            else { r = c; g = p; bl = q; };
+        };
+        setf(outImage, i * 4, r);
+        setf(outImage, i * 4 + 1, g);
+        setf(outImage, i * 4 + 2, bl);
+        setf(outImage, i * 4 + 3, alpha);
+        i = i + 1;
+    };
+    1
+}
+
+// How much of a colour each pixel holds: 1 within `tolerance` of it (RGB distance, 0..1 over the cube's diagonal),
+// fading to 0 over `softness` beyond.
+pub fn an_colour_mask(rgba: raw* f32, outImage: raw* f32, count: i64, r: f32, g: f32, b: f32, tolerance: f32, softness: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let root3: f32 = 1.7320508;
+    let tiny: f32 = 0.00001;
+    let mut i: i64 = 0;
+    let mut dr: f32 = 0.0;
+    let mut dg: f32 = 0.0;
+    let mut db: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    while (i < count) {
+        dr = getf(rgba, i * 4) - r;
+        dg = getf(rgba, i * 4 + 1) - g;
+        db = getf(rgba, i * 4 + 2) - b;
+        d = an_host_sqrt(dr * dr + dg * dg + db * db) / root3;
+        put_grey(outImage, i, one - smoothstep(tolerance, tolerance + fmax(softness, tiny), d));
+        i = i + 1;
+    };
+    1
+}
+
+// The pixels whose hue is within width / 2 of centre (both 0..1 around the colour wheel), fading over softness,
+// weighted by saturation (greys have no hue).
+pub fn an_hue_band(rgba: raw* f32, outImage: raw* f32, count: i64, centre: f32, width: f32, softness: f32) -> i64 = {
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let tiny: f32 = 0.00001;
+    let mut i: i64 = 0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut hue: f32 = 0.0;
+    let mut d: f32 = 0.0;
+    while (i < count) {
+        r = clamp01(getf(rgba, i * 4));
+        g = clamp01(getf(rgba, i * 4 + 1));
+        b = clamp01(getf(rgba, i * 4 + 2));
+        hue = hue_sat_val(r, g, b, 0);
+        d = hue - centre;
+        d = d - an_host_floor(d + half);                // -0.5..0.5 around the wheel
+        if (d < 0.0) { d = 0.0 - d; };
+        put_grey(outImage, i, (one - smoothstep(width * half, width * half + fmax(softness, tiny), d)) * hue_sat_val(r, g, b, 1));
+        i = i + 1;
+    };
+    1
+}
+
+// How much of each hue the image holds: `bins` bins around the wheel, each pixel adding its saturation x value.
+pub fn an_hue_histogram(rgba: raw* f32, count: i64, hist: raw* f32, bins: i64) -> i64 = {
+    let zero: f32 = 0.0;
+    let mut i: i64 = 0;
+    while (i < bins) {
+        setf(hist, i, zero);
+        i = i + 1;
+    };
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut bin: i64 = 0;
+    i = 0;
+    while (i < count) {
+        r = clamp01(getf(rgba, i * 4));
+        g = clamp01(getf(rgba, i * 4 + 1));
+        b = clamp01(getf(rgba, i * 4 + 2));
+        bin = imin(bins - 1, floori(hue_sat_val(r, g, b, 0) * tof(bins)));
+        setf(hist, bin, getf(hist, bin) + hue_sat_val(r, g, b, 1) * hue_sat_val(r, g, b, 2));
+        i = i + 1;
+    };
+    1
+}
+
+// The hue histogram as a bar chart: one bar per bin in its own hue, heights scaled to the tallest, on dark grey.
+pub fn an_hue_chart(hist: raw* f32, bins: i64, rgba: raw* f32, w: i64, h: i64) -> i64 = {
+    let zero: f32 = 0.0;
+    let one: f32 = 1.0;
+    let half: f32 = 0.5;
+    let dark: f32 = 0.02;
+    let mut top: f32 = 0.0;
+    let mut i: i64 = 0;
+    while (i < bins) {
+        if (getf(hist, i) > top) { top = getf(hist, i); };
+        i = i + 1;
+    };
+    if (top <= zero) { top = one; };
+    let mut x: i64 = 0;
+    let mut y: i64 = 0;
+    let mut bin: i64 = 0;
+    let mut height: f32 = 0.0;
+    let mut hue6: f32 = 0.0;
+    let mut sector: i64 = 0;
+    let mut f: f32 = 0.0;
+    let mut r: f32 = 0.0;
+    let mut g: f32 = 0.0;
+    let mut b: f32 = 0.0;
+    let mut o: i64 = 0;
+    while (x < w) {
+        bin = imin(bins - 1, (x * bins) / w);
+        height = getf(hist, bin) / top;
+        hue6 = (tof(bin) + half) / tof(bins) * 6.0;
+        sector = floori(hue6);
+        f = hue6 - tof(sector);
+        if (sector == 0) { r = one; g = f; b = zero; }
+        else if (sector == 1) { r = one - f; g = one; b = zero; }
+        else if (sector == 2) { r = zero; g = one; b = f; }
+        else if (sector == 3) { r = zero; g = one - f; b = one; }
+        else if (sector == 4) { r = f; g = zero; b = one; }
+        else { r = one; g = zero; b = one - f; };
+        y = 0;
+        while (y < h) {
+            o = (y * w + x) * 4;
+            if (tof(h - y) <= height * tof(h)) {
+                setf(rgba, o, r);
+                setf(rgba, o + 1, g);
+                setf(rgba, o + 2, b);
+            } else {
+                setf(rgba, o, dark);
+                setf(rgba, o + 1, dark);
+                setf(rgba, o + 2, dark);
+            };
+            setf(rgba, o + 3, one);
+            y = y + 1;
+        };
+        x = x + 1;
+    };
+    1
+}

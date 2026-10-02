@@ -62,6 +62,15 @@ choice - so adjustments can be made later. A tool's output (an image, a texture 
 - Image Graph: the graph document (nodes, wires, symbols, settings) - File > Open Image Graph. The Layers and
   Draw views are views of it, so they need no document of their own.
 
+### One node system: the graph's type picks the nodes (decided 2026-10-01)
+
+Everything node-based in Texture is one node system (shared/NodeSystem/GRAPH_TYPES.md). A graph has a **type** -
+what it makes: **Image** or **Material** - and the type picks its node list, its engine and its preview. There is
+one **Graph** editor for both (File > New Image Graph / New Material, Open lists both). A graph has an interface
+(params and inputs in, outputs out), so a **graph can be used as a node** in another graph - the hierarchy that
+builds complexity in an organised way - and later across types (an image graph as a material's texture source).
+Whatever a graph makes shows in its own form: images as pictures, materials lit in 3D, drawings as lines.
+
 ### Work areas own the whole layout (decided 2026-09-27)
 
 The dockable windows exist so the app can be organised around what you are doing. Each work area has its own
@@ -203,6 +212,22 @@ Given as an example of how the tools will be used - **do not build this as its o
 
 It combines measuring, transforming, and a procedural brush, joined by a decision. That is the pattern: tools
 are general building blocks, and procedures combine them.
+
+## 5a. Analysis: measuring images (decided 2026-10-01)
+
+Nodes that measure an image and hand back maps and values, so the graph can decide from them (Switch, Compare) and
+procedures can act on them. The maths is a general FRust math pack (analysis.frust, to become a Frate pod); the
+nodes call it.
+
+- **Channels:** Split / Combine RGB, CMYK (print separations), Lab (lightness apart from colour), HSV; Colour Mask
+  (how much of a chosen colour each pixel holds) and Hue Band (a range of hues).
+- **Fourier, whole image:** Frequency Band keeps detail between two sizes (the image is treated as repeating, so
+  tileable images stay tileable); Spectrum shows the frequency picture.
+- **Fourier, square by square** (a windowed transform): Detail Map (how much change each part holds), Local
+  Frequency (the scale, direction and strength of the detail in each part), Evenness (whether the image is the same
+  kind of thing all over - the measurement the tileable-texture procedure in section 5 starts with).
+- **The colour spectrum:** the image's hues as a chart, its dominant hues as colours, and the palette's harmony from
+  a Fourier analysis of the hues (one hue, complementary, triad, tetrad, spread).
 
 ## 6. The tools
 

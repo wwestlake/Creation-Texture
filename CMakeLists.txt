@@ -129,8 +129,8 @@ target_sources(CreationTextureApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/MainComponent.h
-    Source/MaterialDocument.cpp
-    Source/MaterialDocument.h
+    Source/ProjectImages.cpp
+    Source/ProjectImages.h
     Source/ProjectImagePicker.cpp
     Source/ProjectImagePicker.h
     Source/NodePropertiesPanel.cpp
@@ -138,8 +138,8 @@ target_sources(CreationTextureApp PRIVATE
     Source/ImageLabDocument.h
     Source/ImageLabPanel.cpp
     Source/SurfaceMapPanel.cpp
-    Source/ImageGraphPanel.cpp
-    Source/ImageGraphPanel.h
+    Source/GraphWorkspace.cpp
+    Source/GraphWorkspace.h
     Source/DrawPanels.cpp
     Source/DrawPanels.h
     Source/SurfaceMapPanel.h
@@ -147,9 +147,7 @@ target_sources(CreationTextureApp PRIVATE
     Source/SurfacePreview.h
     Source/ImageLabPanel.h
     Source/NodePropertiesPanel.h
-    Source/NodeGraphPanel.cpp
     Source/ViewerPanel.cpp
-    Source/NodeGraphPanel.h
     Source/ViewerPanel.h
     Source/ViewerNodeEditor.cpp
     Source/ViewerNodeEditor.h

@@ -1,15 +1,19 @@
-#include "ImageGraphPanel.h"
+#include "GraphWorkspace.h"
 
 #include <TextureSet.h>
 #include <creation/assets/ProjectAssetService.h>
 #include <creation/assets/ProjectManifest.h>
 #include <node_system/frgraph_serialization.h>
+#include <node_system/struct_nodes.h>
+#include <creation/material/material_compiler.h>
 
 namespace ns = ce::node_system;
 
 namespace
 {
 constexpr const char* documentFormat = "djehuti-image-graph";
+// The project's own types (shared/NodeSystem/TYPES.md), for every graph in the project.
+constexpr const char* projectTypesFile = "project.frtypes";
 constexpr float thumbnailHeight = 100.0f;
 const juce::Colour panelBackground { 0xff1e2227 };
 
@@ -86,7 +90,7 @@ juce::String slugFor(const juce::String& name)
 //==============================================================================
 // Evaluates on a background thread from a copy of the graph (serialised text - node ids round-trip exactly).
 // Only the latest request matters.
-class ImageGraphWorkspace::Worker final : public juce::Thread, public juce::ChangeBroadcaster
+class GraphWorkspace::Worker final : public juce::Thread, public juce::ChangeBroadcaster
 {
 public:
     struct Result
@@ -110,11 +114,12 @@ public:
 
     ~Worker() override { stopThread(4000); }
 
-    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode)
+    void request(std::string graphText, ns::NodeId previewNode, std::string previewOutput, ns::NodeId overlayNode,
+                 ProjectTypes projectTypes)
     {
         {
             const juce::ScopedLock lock(requestLock);
-            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, true };
+            pending = { std::move(graphText), previewNode, std::move(previewOutput), overlayNode, std::move(projectTypes), true };
         }
         notify();
     }
@@ -156,9 +161,18 @@ public:
             {
                 image_graph::Host host;
                 host.loadImage = [this](const juce::String& path) { return loadProjectImage(path); };
+                host.loadGraph = [this](const juce::String& path) {
+                    juce::MemoryBlock bytes;
+                    auto* session = projectSession();
+                    if (session == nullptr || ! session->isValid() || ! session->readEntry(path, bytes))
+                        return image_graph::Host::LoadedGraph {};
+                    return image_graph::readGraphDocument(bytes.toString());
+                };
                 evaluator = std::make_unique<image_graph::Evaluator>(library, host);
             }
 
+            evaluator->getHost().structs = std::move(job.types.structs);
+            evaluator->getHost().enums = std::move(job.types.enums);
             Result out;
             std::string parseError;
             auto copy = ns::DeserializeGraph(job.graphText, parseError);
@@ -181,6 +195,16 @@ public:
                     }
                     if (node->Outputs().front().type.dataType != ns::DataType::Texture)
                         continue; // value and brush nodes have no picture
+                    if (ns::FlowKindOf(*node) == ns::FlowKind::route)
+                    {
+                        // A Route shows what flows out of its chosen output.
+                        const auto chosen = evaluator->flowChosenCase(*copy, id, error);
+                        if (auto image = chosen.empty() ? nullptr : evaluator->evaluate(*copy, id, chosen, error))
+                            out.thumbnails[id] = thumbnailOf(*image, 96);
+                        else
+                            out.errors[id] = error;
+                        continue;
+                    }
                     if (auto image = evaluator->evaluate(*copy, id, node->Outputs().front().name, error))
                         out.thumbnails[id] = thumbnailOf(*image, 96);
                     else
@@ -222,6 +246,7 @@ private:
         ns::NodeId previewNode = 0;
         std::string previewOutput;
         ns::NodeId overlayNode = 0;
+        ProjectTypes types; // the project's (TYPES.md)
         bool valid = false;
     };
 
@@ -259,7 +284,7 @@ private:
 //==============================================================================
 // The chosen node's chosen output, large: fit to the panel over a checkerboard. Pin keeps showing that node while
 // other nodes are selected.
-class ImageGraphWorkspace::PreviewPanel final : public juce::Component
+class GraphWorkspace::PreviewPanel final : public juce::Component
 {
 public:
     std::function<void()> onTargetChanged;
@@ -348,18 +373,29 @@ namespace
 {
 ns::NodeTypeRegistry makeRegistry(const image_graph::Library& library)
 {
+    // One registry for every kind of graph; each graph's type picks the nodes that belong in it (GRAPH_TYPES.md).
     ns::NodeTypeRegistry registry;
     library.registerTypes(registry);
+    ce::material::RegisterMaterialNodes(registry);
+    // Number and colour decisions belong in materials too (a shader select); the rest only in image graphs.
+    ns::RegisterFlowNodes(registry, { ns::StandardFlowType(ns::DataType::Float), ns::StandardFlowType(ns::DataType::Color) },
+                          { image_graph::kImageDiagram, ce::material::kMaterialDiagram });
     return registry;
 }
 }
 
-ImageGraphWorkspace::ImageGraphWorkspace()
+GraphWorkspace::GraphWorkspace()
     : registry(makeRegistry(library)),
       palette(registry),
       preview(std::make_unique<PreviewPanel>()),
       worker(std::make_unique<Worker>(library, [this]() { return projectSession; }))
 {
+    // An image graph: the palette lists the nodes that belong in one (shared/NodeSystem/GRAPH_TYPES.md).
+    graph.SetDiagramType(image_graph::kImageDiagram);
+    palette.SetDiagramType(image_graph::kImageDiagram);
+    // Enter in the palette's search, or a double-click on a node, adds it in the middle of the graph.
+    palette.onAddRequested = [this](const std::string& typeName) { graphView.AddNodeAtCentre(typeName); };
+
     graphView.onGraphChanged = [this]() {
         properties.refresh(); // wiring changed: which inputs are editable changed
         graphEdited();
@@ -369,6 +405,8 @@ ImageGraphWorkspace::ImageGraphWorkspace()
         const auto* node = graph.FindNode(id);
         if (node == nullptr || node->Outputs().empty())
             return 0.0f;
+        if (node->TypeName() == "material.texture.sample2d")
+            return thumbnailHeight; // shows the image it samples
         const auto type = node->Outputs().front().type.dataType;
         return type == ns::DataType::Texture || type == ns::DataType::Drawing ? thumbnailHeight : 0.0f;
     };
@@ -379,12 +417,18 @@ ImageGraphWorkspace::ImageGraphWorkspace()
         auto error = errors.find(id);
         if (error != errors.end())
         {
-            g.setColour(juce::Colour(0xffff8a80));
+            // A path the decision did not take is not an error: grey, not red.
+            g.setColour(error->second.contains("Not chosen") ? juce::Colour(0xff8a94a3) : juce::Colour(0xffff8a80));
             g.setFont(juce::FontOptions(11.0f));
             g.drawFittedText(error->second, area.toNearestInt(), juce::Justification::centred, 4);
             return;
         }
         auto thumb = thumbnails.find(id);
+        if (thumb == thumbnails.end() && images.thumbnail)
+            if (const auto* node = graph.FindNode(id); node != nullptr && node->TypeName() == "material.texture.sample2d")
+                for (const auto& pin : node->Inputs())
+                    if (const auto* path = std::get_if<std::string>(&pin.defaultValue); pin.name == "texture" && path != nullptr && ! path->empty())
+                        thumb = thumbnails.emplace(id, images.thumbnail(juce::String(*path))).first;
         if (thumb != thumbnails.end() && thumb->second.isValid())
         {
             const auto fitted = juce::RectanglePlacement(juce::RectanglePlacement::centred)
@@ -403,6 +447,10 @@ ImageGraphWorkspace::ImageGraphWorkspace()
 
     preview->onTargetChanged = [this]() { requestEvaluation(); };
 
+    // A material graph recompiles on edits; its preview can ask for it, and save.
+    materialPreview.getViewer()->onCompileRequested = [this]() { compileMaterial(); };
+    materialPreview.getViewer()->onSaveRequested = [this]() { saveGraph(); };
+
     // Params, constants and variables (shared/NodeSystem/SYMBOLS.md): drag one onto the graph for a Get node.
     // The Draw view's script editor writes into the selected Draw Script node.
     scriptPanel.onScriptChanged = [this](const juce::String& text) {
@@ -416,6 +464,14 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     };
 
     symbols.setEnums(registry); // each enum is a Choice type in the Variables panel
+
+    // Types (TYPES.md): made in the Types panel, not in the graph; once made they are types things can be.
+    types.onGraphTypesChanged = [this]() { typesChanged(); };
+    types.onProjectTypesChanged = [this](const std::vector<ns::EnumDef>& enums, const std::vector<ns::StructDef>& structs) {
+        registry.ReplaceEnums(ns::TypeScope::project, enums);
+        registry.ReplaceStructs(ns::TypeScope::project, structs);
+        saveProjectTypes(enums, structs);
+    };
     symbols.onSymbolsChanged = [this]() {
         graphView.repaint();
         properties.refresh();
@@ -424,20 +480,79 @@ ImageGraphWorkspace::ImageGraphWorkspace()
     worker->addChangeListener(this);
 }
 
-ImageGraphWorkspace::~ImageGraphWorkspace()
+GraphWorkspace::~GraphWorkspace()
 {
     worker->removeChangeListener(this);
     worker.reset();
 }
 
-juce::Component& ImageGraphWorkspace::getPreview() noexcept { return *preview; }
+juce::Component& GraphWorkspace::getPreview() noexcept { return *preview; }
 
-void ImageGraphWorkspace::setProjectSession(creation::assets::ProjectSession* session)
+void GraphWorkspace::setProjectSession(creation::assets::ProjectSession* session)
 {
     projectSession = session;
 }
 
-void ImageGraphWorkspace::setImageSource(project_images::Source source)
+void GraphWorkspace::projectOpened()
+{
+    loadProjectTypes();
+}
+
+void GraphWorkspace::loadProjectTypes()
+{
+    std::vector<ns::EnumDef> enums;
+    std::vector<ns::StructDef> structs;
+    juce::MemoryBlock bytes;
+    const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
+    if (hasProject() && projectSession->readEntry(path, bytes))
+    {
+        std::string error;
+        if (! ns::DeserializeTypes(bytes.toString().toStdString(), ns::TypeScope::project, enums, structs, error))
+            status("The project's types could not be read: " + juce::String(error));
+    }
+    registry.ReplaceEnums(ns::TypeScope::project, enums);
+    registry.ReplaceStructs(ns::TypeScope::project, structs);
+    types.setProjectTypes(enums, structs, hasProject());
+    typesChanged();
+    edited = false; // loading types is not an edit of the graph
+}
+
+GraphWorkspace::ProjectTypes GraphWorkspace::projectTypes() const
+{
+    ProjectTypes project;
+    for (const auto& def : registry.Structs())
+        if (def.scope == ns::TypeScope::project)
+            project.structs.push_back(def);
+    for (const auto& def : registry.Enums())
+        if (def.scope == ns::TypeScope::project)
+            project.enums.push_back(def);
+    return project;
+}
+
+void GraphWorkspace::saveProjectTypes(const std::vector<ns::EnumDef>& enums, const std::vector<ns::StructDef>& structs)
+{
+    if (! hasProject())
+        return;
+    const auto text = juce::String(ns::SerializeTypes(enums, structs));
+    juce::String error;
+    const auto path = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + projectTypesFile;
+    if (! projectSession->writeEntry(path, juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8())) || ! projectSession->commit(error))
+        status("Could not save the project's types: " + (error.isNotEmpty() ? error : projectSession->getLastWriteError()));
+}
+
+// Types changed (made, renamed, values changed, removed): everything that shows or uses them follows. Called from
+// the Types panel's own controls, so the panels it rebuilds are not the one being clicked.
+void GraphWorkspace::typesChanged()
+{
+    symbols.refresh();
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<NodePropertiesPanel>(&properties)]() {
+        if (safe != nullptr)
+            safe->refresh();
+    });
+    graphEdited();
+}
+
+void GraphWorkspace::setImageSource(project_images::Source source)
 {
     images = std::move(source);
     auto host = NodePropertiesPanel::Host {};
@@ -449,20 +564,36 @@ void ImageGraphWorkspace::setImageSource(project_images::Source source)
     properties.setHost(std::move(host));
 }
 
-void ImageGraphWorkspace::status(const juce::String& text)
+void GraphWorkspace::status(const juce::String& text)
 {
     if (onStatus)
         onStatus(text);
 }
 
-juce::String ImageGraphWorkspace::getTitle() const
+juce::String GraphWorkspace::getTitle() const
 {
-    return (graphName.isNotEmpty() ? graphName : juce::String("Untitled image graph")) + (edited ? " *" : "");
+    return (graphName.isNotEmpty() ? graphName : juce::String(isMaterial() ? "Untitled material" : "Untitled image graph")) + (edited ? " *" : "");
 }
 
-void ImageGraphWorkspace::graphEdited()
+void GraphWorkspace::graphEdited()
 {
     edited = true;
+    // Decisions name their cases after what drives the selector (FLOW.md): keep them in line with the wiring.
+    bool casesChanged = false;
+    for (const auto& [id, node] : graph.Nodes())
+        if (ns::FlowKindOf(*node) != ns::FlowKind::none)
+            casesChanged = ns::SyncFlowNodeCases(graph, registry, id) || casesChanged;
+        else if (ns::StructNodeKindOf(*node) != ns::StructNodeKind::none)
+            casesChanged = ns::SyncStructNodePins(graph, registry, id) || casesChanged; // members follow the struct
+        else if (ns::EnumNodeKindOf(*node) != ns::EnumNodeKind::none)
+            casesChanged = ns::SyncEnumNodePins(graph, registry, id) || casesChanged; // fields follow the enum
+    // Properties shows the new case pins - rebuilt after this edit returns, never during it: the edit can come from a
+    // control in Properties itself (the cases count), and rebuilding then deletes that control while it is running.
+    if (casesChanged)
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<NodePropertiesPanel>(&properties)]() {
+            if (safe != nullptr)
+                safe->refresh();
+        });
     graphView.repaint();
     symbols.graphChanged(); // a Get node may have been added, removed or rebound
     // The Draw view follows: a deleted node leaves it; a script edited in Properties shows in the Script panel.
@@ -481,7 +612,7 @@ void ImageGraphWorkspace::graphEdited()
     requestEvaluation();
 }
 
-std::string ImageGraphWorkspace::scriptText(ns::NodeId id) const
+std::string GraphWorkspace::scriptText(ns::NodeId id) const
 {
     if (const auto* node = graph.FindNode(id))
         for (const auto& pin : node->Inputs())
@@ -491,7 +622,7 @@ std::string ImageGraphWorkspace::scriptText(ns::NodeId id) const
     return {};
 }
 
-void ImageGraphWorkspace::forgetDrawTargets()
+void GraphWorkspace::forgetDrawTargets()
 {
     overlayNode = 0;
     scriptNode = 0;
@@ -500,7 +631,7 @@ void ImageGraphWorkspace::forgetDrawTargets()
     scriptPanel.showScript({}, {});
 }
 
-void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
+void GraphWorkspace::selectionChanged(ns::NodeId id)
 {
     selectedNode = id;
     properties.showNode(id);
@@ -558,12 +689,17 @@ void ImageGraphWorkspace::selectionChanged(ns::NodeId id)
     requestEvaluation();
 }
 
-void ImageGraphWorkspace::requestEvaluation()
+void GraphWorkspace::requestEvaluation()
 {
-    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode);
+    if (isMaterial())
+    {
+        compileMaterial(); // a material is compiled, not evaluated
+        return;
+    }
+    worker->request(ns::SerializeGraph(graph), preview->getNode(), preview->getOutput(), overlayNode, projectTypes());
 }
 
-void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
+void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
 {
     Worker::Result result;
     if (! worker->takeResult(result))
@@ -598,8 +734,36 @@ void ImageGraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
     }
 }
 
+// A material graph becomes a shader for the 3D Preview; its texture samples read the project's images.
+void GraphWorkspace::compileMaterial()
+{
+    auto* viewer = materialPreview.getViewer();
+    const auto result = ce::material::CompileMaterialGraph(graph, registry);
+    if (! result.ok)
+    {
+        juce::StringArray problems;
+        for (const auto& error : result.errors)
+            problems.add(juce::String(error));
+        viewer->setGraphProblem("The material cannot be previewed yet: " + problems.joinIntoString(" "));
+        return;
+    }
+    viewer->setGraphProblem({});
+    auto snapshot = std::make_shared<TextureFrameSnapshot>();
+    snapshot->generatedGlsl = result.source.declarations + "\n" + result.source.evaluateFunction;
+    for (const auto& texture : result.source.textures)
+    {
+        TextureFrameImageSlot slot;
+        slot.uniformName = texture.uniformName;
+        if (images.image)
+            slot.image = images.image(juce::String(texture.path));
+        snapshot->imageSlots.push_back(slot);
+    }
+    snapshot->debugColour = juce::Colour(0xff121212);
+    viewer->setSnapshot(snapshot);
+}
+
 // Node-specific editors in Properties.
-std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& node, const ns::Pin& pin, int& height)
+std::unique_ptr<juce::Component> GraphWorkspace::customEditor(ns::Node& node, const ns::Pin& pin, int& height)
 {
     const auto type = node.TypeName();
 
@@ -616,13 +780,14 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
                     if (const auto* toPin = to->FindPin(wire.toPin))
                     {
                         auto t = toPin->type;
-                        if (const auto* def = ns::PinEnum(registry, *to, *toPin))
+                        if (const auto* def = ns::PinEnum(graph, registry, *to, *toPin))
                             t.enumType = def->name;
                         wiredInto.push_back(t);
                     }
         auto fits = [&wiredInto, &node](const ns::Symbol& symbol) {
             auto out = node.Outputs().front().type;
             out.enumType = symbol.enumType;
+            out.structType = symbol.structType;
             for (const auto& t : wiredInto)
                 if (! ns::IsConnectionCompatible(out, t))
                     return false;
@@ -654,6 +819,171 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
         return box;
     }
 
+    // Enum nodes (TYPES.md): which enum (only those whose values carry data - Make Variant and Match exist for those;
+    // a plain enum's value is just chosen), and for Make Variant which value.
+    if (const auto enumKind = ns::EnumNodeKindOf(node); enumKind != ns::EnumNodeKind::none
+        && (pin.name == ns::kEnumTypePin || pin.name == ns::kEnumVariantPin))
+    {
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? std::get<std::string>(pin.defaultValue) : std::string();
+        auto setText = [this, nodeId = node.Id(), pinId = pin.id](std::string text) {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = std::move(text);
+                    graphView.repaint();
+                    graphEdited(); // the pins follow
+                }
+        };
+        std::vector<std::string> names;
+        std::vector<juce::String> labels;
+        if (pin.name == ns::kEnumTypePin)
+        {
+            std::vector<const ns::EnumDef*> inScope;
+            for (const auto& def : graph.Enums())
+                inScope.push_back(&def);
+            for (const auto& def : registry.Enums())
+                if (graph.FindEnum(def.name) == nullptr)
+                    inScope.push_back(&def);
+            for (const auto* def : inScope)
+                if (ns::EnumCarriesValues(*def))
+                {
+                    names.push_back(def->name);
+                    labels.push_back(juce::String(def->displayName.empty() ? def->name : def->displayName));
+                }
+        }
+        else if (const auto* def = ns::FindEnumFor(graph, registry, ns::StructNodeText(node, ns::kEnumTypePin)))
+            for (const auto& variant : def->variants)
+            {
+                names.push_back(variant.name);
+                labels.push_back(juce::String(variant.name));
+            }
+        auto box = std::make_unique<juce::ComboBox>();
+        for (size_t i = 0; i < names.size(); ++i)
+        {
+            box->addItem(labels[i], static_cast<int>(i) + 1);
+            if (names[i] == current)
+                box->setSelectedId(static_cast<int>(i) + 1, juce::dontSendNotification);
+        }
+        box->setTextWhenNothingSelected(pin.name == ns::kEnumVariantPin ? juce::String("Choose a value")
+                                        : names.empty() ? juce::String("No enum carries values - add some in Types")
+                                                        : juce::String("Choose an enum"));
+        box->onChange = [setText, names, b = box.get()]() {
+            const int index = b->getSelectedId() - 1;
+            if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                setText(names[static_cast<size_t>(index)]);
+        };
+        height = 26;
+        return box;
+    }
+
+    // Struct nodes (TYPES.md): which struct, and for Set Members / Get Member which of its members.
+    if (ns::StructNodeKindOf(node) != ns::StructNodeKind::none)
+    {
+        auto setText = [this, nodeId = node.Id(), pinId = pin.id](std::string text) {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = std::move(text);
+                    graphView.repaint();
+                    graphEdited(); // the member pins follow
+                }
+        };
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? std::get<std::string>(pin.defaultValue) : std::string();
+
+        if (pin.name == ns::kStructTypePin)
+        {
+            // Structs in scope: the graph's own, then the project's not hidden by one of the graph's.
+            std::vector<const ns::StructDef*> inScope;
+            for (const auto& def : graph.Structs())
+                inScope.push_back(&def);
+            for (const auto& def : registry.Structs())
+                if (graph.FindStruct(def.name) == nullptr)
+                    inScope.push_back(&def);
+            auto box = std::make_unique<juce::ComboBox>();
+            std::vector<std::string> names;
+            for (const auto* def : inScope)
+            {
+                names.push_back(def->name);
+                box->addItem(juce::String(def->displayName.empty() ? def->name : def->displayName), static_cast<int>(names.size()));
+                if (def->name == current)
+                    box->setSelectedId(static_cast<int>(names.size()), juce::dontSendNotification);
+            }
+            box->setTextWhenNothingSelected(names.empty() ? "No structs - make one in Types" : "Choose a struct");
+            box->onChange = [setText, names, b = box.get()]() {
+                const int index = b->getSelectedId() - 1;
+                if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                    setText(names[static_cast<size_t>(index)]);
+            };
+            height = 26;
+            return box;
+        }
+
+        const auto* def = ns::FindStructFor(graph, registry, ns::StructNodeType(node));
+        if (def != nullptr && pin.name == ns::kStructMemberPin)
+        {
+            auto box = std::make_unique<juce::ComboBox>();
+            std::vector<std::string> names;
+            for (const auto& m : def->members)
+            {
+                names.push_back(m.name);
+                box->addItem(juce::String(m.name), static_cast<int>(names.size()));
+                if (m.name == current)
+                    box->setSelectedId(static_cast<int>(names.size()), juce::dontSendNotification);
+            }
+            box->setTextWhenNothingSelected("Choose a member");
+            box->onChange = [setText, names, b = box.get()]() {
+                const int index = b->getSelectedId() - 1;
+                if (juce::isPositiveAndBelow(index, static_cast<int>(names.size())))
+                    setText(names[static_cast<size_t>(index)]);
+            };
+            height = 26;
+            return box;
+        }
+
+        if (def != nullptr && pin.name == ns::kStructMembersPin)
+        {
+            // Set Members: tick the members to change; the rest pass through.
+            juce::StringArray ticked;
+            ticked.addTokens(juce::String(current), ",", "");
+            ticked.trim();
+            ticked.removeEmptyStrings();
+            struct Ticks final : public juce::Component
+            {
+                std::vector<std::unique_ptr<juce::ToggleButton>> boxes;
+                void resized() override
+                {
+                    int y = 0;
+                    for (auto& b : boxes)
+                    {
+                        b->setBounds(0, y, getWidth(), 22);
+                        y += 24;
+                    }
+                }
+            };
+            auto list = std::make_unique<Ticks>();
+            std::vector<std::string> names;
+            for (const auto& m : def->members)
+                names.push_back(m.name);
+            for (const auto& name : names)
+            {
+                auto t = std::make_unique<juce::ToggleButton>(juce::String(name));
+                t->setToggleState(ticked.contains(juce::String(name)), juce::dontSendNotification);
+                list->addAndMakeVisible(*t);
+                list->boxes.push_back(std::move(t));
+            }
+            for (auto& t : list->boxes)
+                t->onClick = [setText, names, l = list.get()]() {
+                    juce::StringArray chosen;
+                    for (size_t i = 0; i < l->boxes.size(); ++i)
+                        if (l->boxes[i]->getToggleState())
+                            chosen.add(juce::String(names[i]));
+                    setText(chosen.joinIntoString(",").toStdString());
+                };
+            height = juce::jmax(24, static_cast<int>(names.size()) * 24);
+            return list;
+        }
+    }
+
     // Draw Script: a code editor, several lines high. The drawing updates as you type.
     if (type == "draw.script" && pin.name == "script")
     {
@@ -678,6 +1008,40 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     }
 
     // Surface Map: load settings from a saved surface map.
+    // A Switch or Route's selector, not wired: choose the case by name.
+    if (ns::FlowKindOf(node) != ns::FlowKind::none && pin.name == ns::kFlowSelectorPin)
+    {
+        auto box = std::make_unique<juce::ComboBox>();
+        const auto cases = ns::FlowCasePins(node);
+        for (size_t i = 0; i < cases.size(); ++i)
+            box->addItem(juce::String(cases[i]->name).replaceCharacter('_', ' '), static_cast<int>(i) + 1);
+        box->setSelectedId(ns::FlowCaseIndex(pin.defaultValue, static_cast<int>(cases.size())) + 1, juce::dontSendNotification);
+        box->setTooltip("Which case flows. Wire a Choice param, a toggle or a number in to decide it from outside.");
+        box->onChange = [this, nodeId = node.Id(), pinId = pin.id, b = box.get()]() {
+            if (auto* target = graph.FindNode(nodeId))
+                if (auto* p = target->FindPin(pinId))
+                {
+                    p->defaultValue = static_cast<std::int64_t>(b->getSelectedId() - 1);
+                    graphEdited();
+                }
+        };
+        height = 26;
+        return box;
+    }
+
+    // A Graph node: which saved image graph it uses.
+    if (ns::IsGraphNode(node) && pin.name == ns::kGraphPathPin)
+    {
+        const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String();
+        auto button = std::make_unique<juce::TextButton>(current.isNotEmpty()
+                                                             ? "Uses " + current.fromLastOccurrenceOf("/", false, false).upToFirstOccurrenceOf(".imggraph", false, false)
+                                                             : juce::String("Choose the graph it uses..."));
+        button->setTooltip("Its params and Graph Inputs become this node's inputs, its Outputs this node's outputs.");
+        button->onClick = [this, id = node.Id()]() { chooseGraphFor(id); };
+        height = 28;
+        return button;
+    }
+
     if (type == "image.surfacemap" && pin.name == "surfaceMap")
     {
         const auto current = std::holds_alternative<std::string>(pin.defaultValue) ? juce::String(std::get<std::string>(pin.defaultValue)) : juce::String();
@@ -689,7 +1053,7 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     }
 
     // Image inputs other than Load Image's own are wired in, not picked.
-    if (pin.type.dataType == ns::DataType::Texture && type != "image.load")
+    if (! isMaterial() && pin.type.dataType == ns::DataType::Texture && type != "image.load")
     {
         auto label = std::make_unique<juce::Label>();
         const bool sizeOnly = type == "image.noise" || type == "image.cells" || type == "image.checker" || type == "image.gradient";
@@ -701,7 +1065,84 @@ std::unique_ptr<juce::Component> ImageGraphWorkspace::customEditor(ns::Node& nod
     return nullptr;
 }
 
-void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
+image_graph::Host::LoadedGraph GraphWorkspace::readProjectGraph(const juce::String& path) const
+{
+    juce::MemoryBlock bytes;
+    if (! hasProject() || ! projectSession->readEntry(path, bytes))
+        return {};
+    return image_graph::readGraphDocument(bytes.toString());
+}
+
+juce::String GraphWorkspace::ownGraphPath() const
+{
+    return graphName.isEmpty() ? juce::String()
+                               : juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(graphName) + ".imggraph.json";
+}
+
+// Every Graph node's pins follow the graph it uses as it is saved now (it may have changed since).
+void GraphWorkspace::syncGraphNodes()
+{
+    for (const auto& [id, node] : graph.Nodes())
+    {
+        if (! ns::IsGraphNode(*node))
+            continue;
+        const auto path = ns::GraphNodePath(*node);
+        if (path.empty())
+            continue;
+        const auto used = readProjectGraph(juce::String(path));
+        if (used.graph != nullptr)
+            ns::SyncGraphNodePins(graph, id, ns::InterfaceOf(*used.graph, registry));
+    }
+}
+
+void GraphWorkspace::chooseGraphFor(ns::NodeId id)
+{
+    if (! hasProject())
+    {
+        status("Open a project first.");
+        return;
+    }
+    project_images::Source graphs;
+    graphs.noun = "image graph";
+    graphs.list = [this]() {
+        juce::Array<project_images::Entry> entries;
+        const auto own = ownGraphPath();
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath.endsWith(".imggraph.json") && asset.logicalPath != own) // a graph cannot use itself
+                entries.add({ asset.displayName, asset.logicalPath });
+        return entries;
+    };
+
+    juce::DialogWindow::LaunchOptions options;
+    options.dialogTitle = "The graph this node uses";
+    options.content.setOwned(new ProjectImagePicker(graphs, {}, [this, id](const juce::String& path) {
+        auto* node = graph.FindNode(id);
+        if (node == nullptr || path.isEmpty())
+            return;
+        const auto used = readProjectGraph(path);
+        if (used.graph == nullptr)
+        {
+            status("Could not read " + path + (used.error.isNotEmpty() ? ": " + used.error : juce::String()));
+            return;
+        }
+        for (const auto& pin : node->Inputs())
+            if (pin.name == ns::kGraphPathPin)
+                node->FindPin(pin.id)->defaultValue = path.toStdString();
+        ns::SyncGraphNodePins(graph, id, ns::InterfaceOf(*used.graph, registry));
+        graphView.repaint();
+        properties.refresh();
+        graphEdited();
+        status("This node now uses " + path.fromLastOccurrenceOf("/", false, false) + ".");
+    }));
+    options.componentToCentreAround = graphView.getTopLevelComponent();
+    options.dialogBackgroundColour = juce::Colour(0xff161a1f);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = true;
+    options.launchAsync();
+}
+
+void GraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
 {
     if (! hasProject())
     {
@@ -755,22 +1196,47 @@ void ImageGraphWorkspace::chooseSurfaceMapFor(ns::NodeId id)
 
 //==============================================================================
 // Documents: the graph saves as a JSON document that reopens it exactly.
-void ImageGraphWorkspace::newGraph()
+void GraphWorkspace::newGraph(const std::string& diagramType)
 {
-    graph = ns::Graph("Image Graph", ns::GraphTarget::Dataflow);
-    graphView.GraphReplaced();
-    graphName.clear();
+    const bool material = diagramType == ce::material::kMaterialDiagram;
+    ns::Graph fresh(material ? "Material" : "Image Graph", material ? ns::GraphTarget::Material : ns::GraphTarget::Dataflow);
+    fresh.SetDiagramType(diagramType);
+    // A new material starts with its Material Output in place - a material without one does not compile.
+    if (material)
+        if (auto* output = ns::AddRegisteredNode(fresh, registry, "material.surface.output"))
+            output->SetEditorPosition(400.0f, 150.0f);
+    adoptGraph(std::move(fresh), {});
+    status(material ? "New material." : "New image graph.");
+}
+
+void GraphWorkspace::adoptGraph(ns::Graph newGraph, const juce::String& name)
+{
+    const bool material = newGraph.DiagramType() == ce::material::kMaterialDiagram;
+    graph = std::move(newGraph);
+    graph.SetTarget(material ? ns::GraphTarget::Material : ns::GraphTarget::Dataflow);
+    graphName = name;
     edited = false;
+    palette.SetDiagramType(graph.DiagramType());
+    // Material Variables become shader uniforms or literals: numbers and colours.
+    symbols.setAllowedTypes(material ? std::vector<ns::DataType> { ns::DataType::Float, ns::DataType::Color }
+                                     : std::vector<ns::DataType> { ns::DataType::Float, ns::DataType::Int, ns::DataType::Bool,
+                                                                   ns::DataType::Color, ns::DataType::String });
+    if (! material)
+        syncGraphNodes(); // graphs it uses may have changed since it was saved
+    graphView.GraphReplaced();
     thumbnails.clear();
     errors.clear();
     preview->showNode(0, {}, {});
     properties.showNode(0);
     symbols.refresh();
+    types.refresh();
     forgetDrawTargets();
-    status("New image graph.");
+    if (onTypeChanged)
+        onTypeChanged();
+    requestEvaluation();
 }
 
-void ImageGraphWorkspace::writeGraph(const juce::String& name)
+void GraphWorkspace::writeGraph(const juce::String& name)
 {
     auto* doc = new juce::DynamicObject();
     doc->setProperty("format", documentFormat);
@@ -804,7 +1270,34 @@ void ImageGraphWorkspace::writeGraph(const juce::String& name)
     status("Saved image graph " + name + ".");
 }
 
-void ImageGraphWorkspace::saveGraph()
+// A material saves as a material asset - its graph as .frgraph text - the form other apps read.
+void GraphWorkspace::writeMaterial(const juce::String& name)
+{
+    const auto text = juce::String(ns::SerializeGraph(graph));
+    creation::assets::ProjectAssetService::ImportOptions options;
+    options.kind = creation::assets::AssetKind::material;
+    options.displayName = name;
+    options.logicalPath = juce::String(creation::assets::ProjectContainerPaths::sourceAssetRoot) + slugFor(name) + ".frgraph";
+    options.mediaType = "application/x-creation-node-graph";
+    options.sourceApp = "Djehuti Texture";
+    options.sourceTool = "Material Graph";
+    options.description = "Material node graph.";
+
+    creation::assets::AssetDescriptor saved;
+    juce::String error;
+    if (! creation::assets::ProjectAssetService::saveGeneratedAsset(*projectSession, juce::MemoryBlock(text.toRawUTF8(), text.getNumBytesAsUTF8()),
+                                                                    options, saved, error)
+        || ! projectSession->commit(error))
+    {
+        status("Could not save the material: " + error);
+        return;
+    }
+    graphName = name;
+    edited = false;
+    status("Saved material " + name + ".");
+}
+
+void GraphWorkspace::saveGraph()
 {
     if (! hasProject())
     {
@@ -813,29 +1306,37 @@ void ImageGraphWorkspace::saveGraph()
     }
     if (graphName.isEmpty())
         saveGraphAs();
+    else if (isMaterial())
+        writeMaterial(graphName);
     else
         writeGraph(graphName);
 }
 
-void ImageGraphWorkspace::saveGraphAs()
+void GraphWorkspace::saveGraphAs()
 {
     if (! hasProject())
     {
         status("Open a project first.");
         return;
     }
-    auto* prompt = new juce::AlertWindow("Save Image Graph", "Name this image graph:", juce::MessageBoxIconType::NoIcon, &graphView);
+    auto* prompt = new juce::AlertWindow(isMaterial() ? "Save Material" : "Save Image Graph",
+                                         isMaterial() ? "Name this material:" : "Name this image graph:", juce::MessageBoxIconType::NoIcon, &graphView);
     prompt->addTextEditor("name", graphName);
     prompt->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
     prompt->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     prompt->enterModalState(true, juce::ModalCallbackFunction::create([this, prompt](int result) {
         const auto name = prompt->getTextEditorContents("name").trim();
         if (result == 1 && name.isNotEmpty())
-            writeGraph(name);
+        {
+            if (isMaterial())
+                writeMaterial(name);
+            else
+                writeGraph(name);
+        }
     }), true);
 }
 
-void ImageGraphWorkspace::openGraph()
+void GraphWorkspace::openGraph()
 {
     if (! hasProject())
     {
@@ -843,46 +1344,58 @@ void ImageGraphWorkspace::openGraph()
         return;
     }
     project_images::Source graphs;
-    graphs.noun = "image graph";
+    graphs.noun = "graph";
     graphs.list = [this]() {
         juce::Array<project_images::Entry> entries;
         for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+        {
             if (asset.logicalPath.endsWith(".imggraph.json"))
-                entries.add({ asset.displayName, asset.logicalPath });
+                entries.add({ asset.displayName + "  (image graph)", asset.logicalPath });
+            else if (asset.kind == creation::assets::AssetKind::material && asset.logicalPath.endsWith(".frgraph"))
+                entries.add({ asset.displayName + "  (material)", asset.logicalPath });
+        }
         return entries;
     };
 
     juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Open Image Graph";
+    options.dialogTitle = "Open Graph";
     options.content.setOwned(new ProjectImagePicker(graphs, {}, [this](const juce::String& path) {
         juce::MemoryBlock bytes;
         if (path.isEmpty() || ! projectSession->readEntry(path, bytes))
             return;
-        const auto doc = juce::JSON::parse(bytes.toString());
-        if (doc["format"].toString() != documentFormat)
+        juce::String name;
+        for (const auto& asset : projectSession->getManifest().assetCatalog.assets)
+            if (asset.logicalPath == path)
+                name = asset.displayName;
+
+        if (path.endsWith(".frgraph"))
         {
-            status(path + " is not an image graph.");
+            // A material asset: its graph as .frgraph text.
+            std::string parseError;
+            auto loaded = ns::DeserializeGraph(bytes.toString().toStdString(), parseError);
+            if (loaded == nullptr)
+            {
+                status("Could not read the material: " + juce::String(parseError));
+                return;
+            }
+            loaded->SetDiagramType(ce::material::kMaterialDiagram); // a material, whether or not the file says so
+            adoptGraph(std::move(*loaded), name);
+            status("Opened material " + name + ".");
+            return;
+        }
+        const auto doc = juce::JSON::parse(bytes.toString());
+        const auto loaded = image_graph::readGraphDocument(bytes.toString());
+        if (loaded.graph == nullptr)
+        {
+            status("Could not read the graph: " + loaded.error);
             return;
         }
         std::string parseError;
-        auto loaded = ns::DeserializeGraph(doc["graph"].toString().toStdString(), parseError);
-        if (loaded == nullptr)
-        {
-            status("Could not read the graph: " + juce::String(parseError));
+        auto editable = ns::DeserializeGraph(loaded.text, parseError); // graphs are not copied: read the text again
+        if (editable == nullptr)
             return;
-        }
-        graph = std::move(*loaded);
-        graph.SetTarget(ns::GraphTarget::Dataflow);
-        graphView.GraphReplaced();
-        graphName = doc["name"].toString();
-        edited = false;
-        thumbnails.clear();
-        errors.clear();
-        preview->showNode(0, {}, {});
-        properties.showNode(0);
-        symbols.refresh();
-        forgetDrawTargets();
-        requestEvaluation();
+        editable->SetDiagramType(image_graph::kImageDiagram);
+        adoptGraph(std::move(*editable), doc["name"].toString());
         status("Opened image graph " + graphName + ".");
     }));
     options.componentToCentreAround = graphView.getTopLevelComponent();
@@ -893,13 +1406,13 @@ void ImageGraphWorkspace::openGraph()
     options.launchAsync();
 }
 
-bool ImageGraphWorkspace::canSaveOutput() const noexcept
+bool GraphWorkspace::canSaveOutput() const noexcept
 {
     return hasProject() && lastPreview != nullptr;
 }
 
 // Saves the previewed output as a PNG image asset in the project.
-void ImageGraphWorkspace::saveOutputAsImage()
+void GraphWorkspace::saveOutputAsImage()
 {
     if (! canSaveOutput())
     {
@@ -948,7 +1461,7 @@ void ImageGraphWorkspace::saveOutputAsImage()
 //==============================================================================
 // Render Outputs: evaluates every Output node on its own thread (with a progress window), encodes them, then
 // saves each on the message thread.
-class ImageGraphWorkspace::RenderJob final : public juce::ThreadWithProgressWindow
+class GraphWorkspace::RenderJob final : public juce::ThreadWithProgressWindow
 {
 public:
     struct Rendered
@@ -958,9 +1471,11 @@ public:
     };
 
     RenderJob(const image_graph::Library& lib, std::string text, std::vector<std::pair<ns::NodeId, juce::String>> targets,
-              creation::assets::ProjectSession& session, std::function<void(std::vector<Rendered>, juce::String)> done)
+              creation::assets::ProjectSession& session, ProjectTypes projectTypes,
+              std::function<void(std::vector<Rendered>, juce::String)> done)
         : juce::ThreadWithProgressWindow("Rendering the graph's outputs...", true, true),
-          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), onDone(std::move(done)) {}
+          library(lib), graphText(std::move(text)), outputs(std::move(targets)), project(session), types(std::move(projectTypes)),
+          onDone(std::move(done)) {}
 
     void run() override
     {
@@ -972,6 +1487,14 @@ public:
                 return nullptr;
             return image_graph::fromDisplayImage(juce::ImageFileFormat::loadFrom(bytes.getData(), bytes.getSize()));
         };
+        host.loadGraph = [this](const juce::String& path) {
+            juce::MemoryBlock bytes;
+            if (! project.readEntry(path, bytes))
+                return image_graph::Host::LoadedGraph {};
+            return image_graph::readGraphDocument(bytes.toString());
+        };
+        host.structs = types.structs;
+        host.enums = types.enums;
         image_graph::Evaluator evaluator(library, host);
         std::string parseError;
         auto graph = ns::DeserializeGraph(graphText, parseError);
@@ -1032,12 +1555,13 @@ private:
     std::string graphText;
     std::vector<std::pair<ns::NodeId, juce::String>> outputs;
     creation::assets::ProjectSession& project;
+    ProjectTypes types;
     std::function<void(std::vector<Rendered>, juce::String)> onDone;
     std::vector<Rendered> rendered;
     juce::String error;
 };
 
-void ImageGraphWorkspace::renderOutputs()
+void GraphWorkspace::renderOutputs()
 {
     if (! hasProject())
     {
@@ -1064,7 +1588,7 @@ void ImageGraphWorkspace::renderOutputs()
         return;
     }
 
-    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession,
+    auto* job = new RenderJob(library, ns::SerializeGraph(graph), outputs, *projectSession, projectTypes(),
                               [this](std::vector<RenderJob::Rendered> rendered, juce::String error) {
         if (error.isNotEmpty())
         {

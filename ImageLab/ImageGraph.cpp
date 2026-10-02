@@ -6,8 +6,10 @@
 #include "DrawScript.h"
 
 #include <creation/frust/PluginRuntime.h>
+#include <node_system/frgraph_serialization.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <set>
@@ -50,7 +52,18 @@ extern "C" float dr_host_sin(float v) { return std::sin(v); }
 extern "C" float dr_host_cos(float v) { return std::cos(v); }
 extern "C" float dr_host_hash(std::int64_t x, std::int64_t y, std::int64_t seed) { return ig_host_hash(x, y, seed); }
 
+extern "C" float an_host_sin(float v) { return std::sin(v); }
+extern "C" float an_host_cos(float v) { return std::cos(v); }
+extern "C" float an_host_sqrt(float v) { return std::sqrt(v < 0.0f ? 0.0f : v); }
+extern "C" float an_host_atan2(float y, float x) { return std::atan2(y, x); }
+extern "C" float an_host_log(float v) { return std::log(v > 1.0e-30f ? v : 1.0e-30f); }
+extern "C" float an_host_pow(float b, float e) { return std::pow(b, e); }
+extern "C" float an_host_floor(float v) { return std::floor(v); }
+extern "C" float an_host_i64_to_f32(std::int64_t v) { return static_cast<float>(v); }
+extern "C" std::int64_t an_host_f32_to_i64(float v) { return static_cast<std::int64_t>(v); }
+
 constexpr const char* key = "image_graph";
+constexpr const char* analysisKey = "image_analysis";
 constexpr const char* drawKey = "drawing";
 constexpr const char* demoKey = "frust_image_demo";
 constexpr const char* fxKey = "image_fx";
@@ -139,6 +152,25 @@ public:
             return;
         }
 
+        // Image analysis (analysis.frust - to become the frust_image_analysis pod).
+        for (auto [name, fn] : { std::pair { "an_host_sin", reinterpret_cast<void*>(&an_host_sin) },
+                                 std::pair { "an_host_cos", reinterpret_cast<void*>(&an_host_cos) },
+                                 std::pair { "an_host_sqrt", reinterpret_cast<void*>(&an_host_sqrt) },
+                                 std::pair { "an_host_atan2", reinterpret_cast<void*>(&an_host_atan2) },
+                                 std::pair { "an_host_log", reinterpret_cast<void*>(&an_host_log) },
+                                 std::pair { "an_host_pow", reinterpret_cast<void*>(&an_host_pow) },
+                                 std::pair { "an_host_floor", reinterpret_cast<void*>(&an_host_floor) },
+                                 std::pair { "an_host_i64_to_f32", reinterpret_cast<void*>(&an_host_i64_to_f32) },
+                                 std::pair { "an_host_f32_to_i64", reinterpret_cast<void*>(&an_host_f32_to_i64) } })
+            runtime.registerHostFunction(name, fn);
+        ::frust::CompileRequest analysis;
+        analysis.sources.push_back({ "analysis.frust", std::string(ImageLabFrust::analysis_frust, ImageLabFrust::analysis_frustSize) });
+        if (! runtime.loadSource(analysisKey, analysis, loadError))
+        {
+            error = "Image analysis FRust routines did not compile: " + juce::String(loadError);
+            return;
+        }
+
         // The frust_image_demo pod (bundled copy of the Frate registry's 0.1.0). The plugin host needs an embedded
         // manifest, so one is put in front of the pod's own source, which is left exactly as published.
         image_demo_host::registerAll(runtime);
@@ -152,6 +184,13 @@ public:
             error = "The frust_image_demo generators did not compile: " + juce::String(loadError);
     }
 
+
+    // An image-analysis routine by name (analysis.frust).
+    template <typename Fn>
+    Fn an(const char* name)
+    {
+        return reinterpret_cast<Fn>(runtime.getFunction(analysisKey, name));
+    }
 
     // An image-effect routine by name (image_fx.frust).
     template <typename Fn>
@@ -244,6 +283,8 @@ ns::PinSignature enumIn(const std::string& name, const std::string& enumName, st
     pin.type.enumType = enumName;
     return pin;
 }
+ns::PinSignature boolOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Bool }, {} }; }
+ns::PinSignature floatOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Float }, {} }; }
 ns::PinSignature drawingIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
 ns::PinSignature drawingOut(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Drawing }, {} }; }
 ns::PinSignature brushIn(const std::string& name) { return { name, { ns::PinKind::Data, ns::DataType::Brush }, {} }; }
@@ -262,6 +303,7 @@ Definition define(std::string type, std::string name, std::string category, std:
     d.descriptor.displayName = std::move(name);
     d.descriptor.category = std::move(category);
     d.descriptor.description = std::move(description);
+    d.descriptor.diagramTypes = { kImageDiagram };
     d.evaluate = std::move(evaluate);
     return d;
 }
@@ -434,6 +476,11 @@ Library::Library()
                       "small bristles that streak; Image uses the image wired into tipImage." });
     enums.push_back({ "BrushRotation", "Brush Rotation", { "Fixed", "Follow Stroke", "Random" },
                       "How a brush's tip is turned: by its angle only, along the stroke's direction, or at random." });
+    enums.push_back({ "CompareOp", "Comparison", { "Less Than", "Less or Equal", "Equal", "Greater or Equal", "Greater Than", "Not Equal" },
+                      "How Compare relates a to b." });
+    enums.push_back({ "LogicOp", "Logic", { "And", "Or", "Xor" }, "How Logic combines a and b." });
+    enums.push_back({ "MathOp", "Math", { "Add", "Subtract", "Multiply", "Divide", "Minimum", "Maximum", "Power", "Modulo" },
+                      "What Math does with a and b." });
     enums.push_back({ "PaintMode", "Paint Mode", { "Stroke", "Fill", "Fill and Stroke" },
                       "Run the brush along the drawing's lines, fill its shapes, or both." });
 
@@ -452,6 +499,64 @@ Library::Library()
     definitions.push_back(valueNode("image.value.integer", "Integer", intIn("value", 1), "A whole number, wired into any integer setting."));
     definitions.push_back(valueNode("image.value.toggle", "Toggle", boolIn("value", false), "On or off, wired into any toggle setting."));
     definitions.push_back(valueNode("image.value.color", "Color", colourIn("value", 1.0f, 1.0f, 1.0f), "A colour, wired into any colour setting."));
+
+    // Conditions for decisions (shared/NodeSystem/FLOW.md): wire a result into a Switch or Route's selector.
+    definitions.push_back(define("image.value.compare", "Compare", "Values", "a compared with b, on or off - for example to drive a Switch.",
+        { floatIn("a", 0.0f), floatIn("b", 0.5f), enumIn("op", "CompareOp", 0) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            const float a = c.number("a", 0.0f), b = c.number("b", 0.5f);
+            bool r = false;
+            switch (c.integer("op", 0))
+            {
+                case 0: r = a < b; break;
+                case 1: r = a <= b; break;
+                case 2: r = std::abs(a - b) < 1.0e-6f; break;
+                case 3: r = a >= b; break;
+                case 4: r = a > b; break;
+                default: r = std::abs(a - b) >= 1.0e-6f; break;
+            }
+            c.valueOutputs["result"] = r;
+            return true;
+        }));
+    definitions.push_back(define("image.value.logic", "Logic", "Values", "a and / or / xor b.",
+        { boolIn("a", false), boolIn("b", false), enumIn("op", "LogicOp", 0) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            const bool a = c.flag("a", false), b = c.flag("b", false);
+            const int op = c.integer("op", 0);
+            c.valueOutputs["result"] = op == 0 ? (a && b) : op == 1 ? (a || b) : (a != b);
+            return true;
+        }));
+    definitions.push_back(define("image.value.not", "Not", "Values", "On becomes off, off becomes on.",
+        { boolIn("a", false) }, { boolOut("result") },
+        [](Context& c, auto&, juce::String&) {
+            c.valueOutputs["result"] = ! c.flag("a", false);
+            return true;
+        }));
+    definitions.push_back(define("image.value.math", "Math", "Values", "a and b combined into one number.",
+        { floatIn("a", 0.0f), floatIn("b", 1.0f), enumIn("op", "MathOp", 0) }, { floatOut("result") },
+        [](Context& c, auto&, juce::String& error) {
+            const float a = c.number("a", 0.0f), b = c.number("b", 1.0f);
+            float r = 0.0f;
+            switch (c.integer("op", 0))
+            {
+                case 0: r = a + b; break;
+                case 1: r = a - b; break;
+                case 2: r = a * b; break;
+                case 3:
+                    if (b == 0.0f) { error = "Division by zero."; return false; }
+                    r = a / b;
+                    break;
+                case 4: r = std::min(a, b); break;
+                case 5: r = std::max(a, b); break;
+                case 6: r = std::pow(a, b); break;
+                default:
+                    if (b == 0.0f) { error = "Modulo by zero."; return false; }
+                    r = std::fmod(a, b);
+                    break;
+            }
+            c.valueOutputs["result"] = r;
+            return true;
+        }));
 
     // --- Generate ---
     auto sizeInputs = [](std::vector<ns::PinSignature> extra) {
@@ -894,6 +999,27 @@ Library::Library()
         }));
 
     // --- Output --- File > Render Outputs saves each Output node's image as a project image named by `name`.
+    {
+        auto input = define("image.input", "Graph Input", "Output",
+            "An image this graph takes in when another graph uses it as a node (a Graph node): the image wired into the Graph "
+            "node's input called `name`. On its own, the graph uses the image wired or chosen here instead.",
+            { textIn("name"), imageIn("image") }, { imageOut("image") },
+            [needInput](Context& c, auto& out, juce::String& error) {
+                auto given = c.host.graphInputs.find(c.text("name").replaceCharacter(' ', '_').toStdString());
+                if (given != c.host.graphInputs.end() && given->second != nullptr)
+                {
+                    out["image"] = given->second;
+                    return true;
+                }
+                auto own = needInput(c, "image", error);
+                if (own == nullptr) return false;
+                out["image"] = own;
+                return true;
+            });
+        input.descriptor.graphPort = ns::GraphPort::input;
+        input.readsGraphInputs = true;
+        definitions.push_back(std::move(input));
+    }
     definitions.push_back(define("image.output", "Output", "Output",
         "A result of this graph. File > Render Outputs saves it as a project image called `name` (colour as 8-bit PNG, data such as "
         "height as 16-bit grey). Rendering again under the same name makes a new version.",
@@ -902,6 +1028,396 @@ Library::Library()
             auto input = needInput(c, "image", error);
             if (input == nullptr) return false;
             out["image"] = input;
+            return true;
+        }));
+    definitions.back().descriptor.graphPort = ns::GraphPort::output; // an output of the graph when it is used as a node
+
+    // --- Analysis --- measuring an image: colour channels, frequencies (Fourier), local detail, the colour spectrum.
+    // The maths is the general analysis.frust pack; these nodes call it.
+    auto greyImage = [](int w, int h) {
+        auto image = std::make_shared<Image>();
+        image->width = w;
+        image->height = h;
+        image->rgba.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 0.0f);
+        image->data = true;
+        return image;
+    };
+    // Split: one grey map per channel of a colour model; only the wanted ones are made.
+    auto splitNode = [needInput, greyImage](std::string type, std::string name, std::string description, std::int64_t mode,
+                                           std::vector<std::string> channels) {
+        std::vector<ns::PinSignature> outs;
+        for (const auto& ch : channels)
+            outs.push_back(imageOut(ch));
+        return define(std::move(type), std::move(name), "Analysis", std::move(description), { imageIn("image") }, outs,
+            [needInput, greyImage, mode, channels](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                auto channel = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t, std::int64_t)>("an_channel");
+                for (size_t i = 0; i < channels.size(); ++i)
+                    if (c.wants(channels[i]))
+                    {
+                        auto map = greyImage(input->width, input->height);
+                        if (! ok(channel(input->rgba.data(), map->rgba.data(), pixelCount(*map), mode, static_cast<std::int64_t>(i)), "Split", error))
+                            return false;
+                        out[channels[i]] = map;
+                    }
+                return true;
+            });
+    };
+    definitions.push_back(splitNode("image.analysis.split_rgb", "Split RGB", "The red, green, blue and alpha channels as grey maps.", 0,
+                                    { "r", "g", "b", "a" }));
+    definitions.push_back(splitNode("image.analysis.split_cmyk", "Split CMYK", "Cyan, magenta, yellow and black - the print separations.", 1,
+                                    { "c", "m", "y", "k" }));
+    definitions.push_back(splitNode("image.analysis.split_lab", "Split Lab",
+                                    "Lightness (0..1) and the colour axes a (green-red) and b (blue-yellow), 0.5 = neutral. "
+                                    "Detail usually lives in lightness, colour in broad patches.", 2, { "l", "a", "b" }));
+    definitions.push_back(splitNode("image.analysis.split_hsv", "Split HSV", "Hue (0..1 around the wheel), saturation and value.", 3,
+                                    { "h", "s", "v" }));
+
+    // Combine: grey maps back into colour; a channel not wired takes its neutral value.
+    auto combineNode = [greyImage](std::string type, std::string name, std::string description, std::int64_t mode,
+                                   std::vector<std::string> channels, std::vector<float> neutral) {
+        std::vector<ns::PinSignature> ins;
+        for (const auto& ch : channels)
+            ins.push_back(imageIn(ch));
+        return define(std::move(type), std::move(name), "Analysis", std::move(description), ins, { imageOut("image") },
+            [greyImage, mode, channels, neutral](Context& c, auto& out, juce::String& error) {
+                int w = 0, h = 0;
+                for (const auto& ch : channels)
+                    if (auto in = c.inputs.find(ch); in != c.inputs.end() && in->second != nullptr)
+                    {
+                        if (w != 0 && (in->second->width != w || in->second->height != h))
+                        {
+                            error = "The channels must all be the same size.";
+                            return false;
+                        }
+                        w = in->second->width;
+                        h = in->second->height;
+                    }
+                if (w == 0)
+                {
+                    error = "Wire at least one channel in.";
+                    return false;
+                }
+                std::vector<std::shared_ptr<Image>> fills;
+                std::vector<const float*> parts;
+                for (size_t i = 0; i < 4; ++i)
+                {
+                    auto in = i < channels.size() ? c.inputs.find(channels[i]) : c.inputs.end();
+                    if (in != c.inputs.end() && in->second != nullptr)
+                        parts.push_back(in->second->rgba.data());
+                    else
+                    {
+                        auto fill = greyImage(w, h);
+                        std::fill(fill->rgba.begin(), fill->rgba.end(), i < neutral.size() ? neutral[i] : 1.0f);
+                        fills.push_back(fill);
+                        parts.push_back(fill->rgba.data());
+                    }
+                }
+                auto image = greyImage(w, h);
+                image->data = false;
+                auto combine = c.routines.an<std::int64_t (*)(const float*, const float*, const float*, const float*, float*, std::int64_t,
+                                                              std::int64_t)>("an_combine");
+                if (! ok(combine(parts[0], parts[1], parts[2], parts[3], image->rgba.data(), pixelCount(*image), mode), "Combine", error))
+                    return false;
+                out["image"] = image;
+                return true;
+            });
+    };
+    definitions.push_back(combineNode("image.analysis.combine_rgb", "Combine RGB", "Red, green, blue and alpha maps into an image.", 0,
+                                      { "r", "g", "b", "a" }, { 0.0f, 0.0f, 0.0f, 1.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_cmyk", "Combine CMYK", "Cyan, magenta, yellow and black into an image.", 1,
+                                      { "c", "m", "y", "k" }, { 0.0f, 0.0f, 0.0f, 0.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_lab", "Combine Lab", "Lightness and the a / b colour axes into an image.", 2,
+                                      { "l", "a", "b" }, { 0.5f, 0.5f, 0.5f, 1.0f }));
+    definitions.push_back(combineNode("image.analysis.combine_hsv", "Combine HSV", "Hue, saturation and value into an image.", 3,
+                                      { "h", "s", "v" }, { 0.0f, 0.0f, 1.0f, 1.0f }));
+
+    definitions.push_back(define("image.analysis.colour_mask", "Colour Mask", "Analysis",
+        "How much of a chosen colour each pixel holds: 1 within the tolerance of it, fading to 0 over the softness.",
+        { imageIn("image"), colourIn("color", 0.8f, 0.4f, 0.1f), floatIn("tolerance", 0.1f), floatIn("softness", 0.1f) }, { imageOut("mask") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto colour = c.colour("color", { 0.8f, 0.4f, 0.1f });
+            auto mask = greyImage(input->width, input->height);
+            auto fn = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, float, float, float, float, float)>("an_colour_mask");
+            if (! ok(fn(input->rgba.data(), mask->rgba.data(), pixelCount(*mask), colour.x, colour.y, colour.z, c.number("tolerance", 0.1f),
+                        c.number("softness", 0.1f)), "Colour Mask", error))
+                return false;
+            out["mask"] = mask;
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.hue_band", "Hue Band", "Analysis",
+        "The colours in a range of hues (degrees around the wheel: 0 red, 60 yellow, 120 green, 180 cyan, 240 blue, 300 magenta), "
+        "weighted by how saturated they are.",
+        { imageIn("image"), floatIn("hue", 30.0f), floatIn("width", 40.0f), floatIn("softness", 20.0f) }, { imageOut("mask") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            auto mask = greyImage(input->width, input->height);
+            auto fn = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, float, float, float)>("an_hue_band");
+            if (! ok(fn(input->rgba.data(), mask->rgba.data(), pixelCount(*mask), c.number("hue", 30.0f) / 360.0f,
+                        c.number("width", 40.0f) / 360.0f, c.number("softness", 20.0f) / 360.0f), "Hue Band", error))
+                return false;
+            out["mask"] = mask;
+            return true;
+        }));
+
+    // Fourier: the FFT needs power-of-two sizes, so an image that is not is resampled (wrapping, so tiling holds)
+    // to the nearest, worked on, and resampled back.
+    auto toPow2 = [](int n) {
+        int p = 2;
+        while (p < 4096 && p * 2 - n < n - p) // nearest power of two
+            p *= 2;
+        return juce::jlimit(2, 4096, p);
+    };
+    auto resampled = [](Context& c, const Image& from, int w, int h) {
+        auto image = std::make_shared<Image>();
+        image->width = w;
+        image->height = h;
+        image->data = from.data;
+        image->rgba.assign(static_cast<size_t>(w) * static_cast<size_t>(h) * 4, 0.0f);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t)>("an_resample")(
+            from.rgba.data(), from.width, from.height, image->rgba.data(), w, h);
+        return image;
+    };
+    definitions.push_back(define("image.analysis.frequency_band", "Frequency Band", "Analysis",
+        "Keeps only the detail between two sizes (fractions of the image width): coarse shapes, fine grain, or one pattern's "
+        "scale. Softness is in octaves; Keep Average keeps the overall brightness. The image is treated as repeating, so a "
+        "tileable image stays tileable.",
+        { imageIn("image"), floatIn("smallest", 0.02f), floatIn("largest", 0.1f), floatIn("softness", 0.5f), boolIn("keepAverage", true) },
+        { imageOut("image") },
+        [needInput, toPow2, resampled](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int w = toPow2(input->width), h = toPow2(input->height);
+            auto work = (w == input->width && h == input->height) ? copyOf(input) : resampled(c, *input, w, h);
+            std::vector<float> complexBuffer(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
+            auto pack = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_pack");
+            auto fft = c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, std::int64_t)>("an_fft2d");
+            auto band = c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, float, float, float, std::int64_t)>("an_band");
+            auto unpack = c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_unpack");
+            const float smallest = juce::jmax(1.0e-4f, c.number("smallest", 0.02f)) * static_cast<float>(w);
+            const float largest = juce::jmax(1.0e-4f, c.number("largest", 0.1f)) * static_cast<float>(w);
+            for (std::int64_t channel = 0; channel < 3; ++channel)
+            {
+                pack(work->rgba.data(), complexBuffer.data(), pixelCount(*work), channel);
+                fft(complexBuffer.data(), w, h, 0);
+                band(complexBuffer.data(), w, h, smallest, largest, juce::jmax(0.0f, c.number("softness", 0.5f)), c.flag("keepAverage", true) ? 1 : 0);
+                fft(complexBuffer.data(), w, h, 1);
+                unpack(complexBuffer.data(), work->rgba.data(), pixelCount(*work), channel);
+            }
+            out["image"] = (w == input->width && h == input->height) ? work : resampled(c, *work, input->width, input->height);
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.spectrum", "Spectrum", "Analysis",
+        "The image's frequency picture (brightness): the average in the middle, fine detail towards the edges, the direction "
+        "of a pattern as a line of bright points across it.",
+        { imageIn("image") }, { imageOut("spectrum") },
+        [needInput, toPow2, resampled, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int w = toPow2(input->width), h = toPow2(input->height);
+            auto work = (w == input->width && h == input->height) ? input : ImagePtr(resampled(c, *input, w, h));
+            std::vector<float> complexBuffer(static_cast<size_t>(w) * static_cast<size_t>(h) * 2);
+            c.routines.an<std::int64_t (*)(const float*, float*, std::int64_t, std::int64_t)>("an_pack")(work->rgba.data(), complexBuffer.data(),
+                                                                                                         pixelCount(*work), 4);
+            c.routines.an<std::int64_t (*)(float*, std::int64_t, std::int64_t, std::int64_t)>("an_fft2d")(complexBuffer.data(), w, h, 0);
+            auto spectrum = greyImage(w, h);
+            c.routines.an<std::int64_t (*)(float*, float*, std::int64_t, std::int64_t)>("an_spectrum")(complexBuffer.data(), spectrum->rgba.data(), w, h);
+            out["spectrum"] = spectrum;
+            return true;
+        }));
+    definitions.push_back(define("image.analysis.detail_map", "Detail Map", "Analysis",
+        "How much change each part of the image holds: the brightness spread in a square (a fraction of the width) around each "
+        "pixel. Busy areas are bright, flat ones dark.",
+        { imageIn("image"), floatIn("square", 0.02f) }, { imageOut("detail") },
+        [needInput, greyImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const int radius = juce::jlimit(1, 256, juce::roundToInt(c.number("square", 0.02f) * static_cast<float>(input->width) * 0.5f));
+            std::vector<float> a(static_cast<size_t>(pixelCount(*input))), b(a.size());
+            auto detail = greyImage(input->width, input->height);
+            c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, float*, float*, float*)>("an_detail")(
+                input->rgba.data(), input->width, input->height, radius, a.data(), b.data(), detail->rgba.data());
+            out["detail"] = detail;
+            return true;
+        }));
+
+    // Local frequency: a windowed FFT square by square (squares half-overlapping), then spread over the image.
+    struct LocalAnalysis
+    {
+        int win = 0, hop = 0, gw = 0, gh = 0;
+        std::vector<float> scale, direction, strength, bands;
+    };
+    auto analyseLocally = [](Context& c, const Image& input, float square) {
+        LocalAnalysis local;
+        int win = 8;
+        const float target = square * static_cast<float>(input.width);
+        while (win < 256 && static_cast<float>(win * 2) <= target * 1.414f)
+            win *= 2;
+        local.win = win;
+        local.hop = win / 2;
+        local.gw = (input.width + local.hop - 1) / local.hop;
+        local.gh = (input.height + local.hop - 1) / local.hop;
+        const auto cells = static_cast<size_t>(local.gw) * static_cast<size_t>(local.gh);
+        local.scale.assign(cells, 0.0f);
+        local.direction.assign(cells, 0.0f);
+        local.strength.assign(cells, 0.0f);
+        local.bands.assign(cells * 7, 0.0f);
+        std::vector<float> scratch(static_cast<size_t>(win) * static_cast<size_t>(win) * 2);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t,
+                                       float*, float*, float*, float*)>("an_local")(
+            input.rgba.data(), input.width, input.height, win, local.hop, scratch.data(), local.gw, local.gh, local.scale.data(),
+            local.direction.data(), local.strength.data(), local.bands.data());
+        return local;
+    };
+    auto gridImage = [greyImage](Context& c, const LocalAnalysis& local, const std::vector<float>& grid, const Image& like) {
+        auto map = greyImage(like.width, like.height);
+        c.routines.an<std::int64_t (*)(const float*, std::int64_t, std::int64_t, std::int64_t, std::int64_t, float*, std::int64_t, std::int64_t)>(
+            "an_grid_to_image")(grid.data(), local.gw, local.gh, local.win, local.hop, map->rgba.data(), like.width, like.height);
+        return map;
+    };
+    definitions.push_back(define("image.analysis.local_frequency", "Local Frequency", "Analysis",
+        "Looks at the image square by square (a Fourier transform of each): Scale is the typical size of the detail there (a "
+        "fraction of the square), Direction which way its lines run (0 horizontal, 0.5 vertical, 1 horizontal again), Strength "
+        "how much it runs one way.",
+        { imageIn("image"), floatIn("square", 0.0625f) }, { imageOut("scale"), imageOut("direction"), imageOut("strength") },
+        [needInput, analyseLocally, gridImage](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            const auto local = analyseLocally(c, *input, c.number("square", 0.0625f));
+            if (c.wants("scale")) out["scale"] = gridImage(c, local, local.scale, *input);
+            if (c.wants("direction")) out["direction"] = gridImage(c, local, local.direction, *input);
+            if (c.wants("strength")) out["strength"] = gridImage(c, local, local.strength, *input);
+            return true;
+        }));
+    {
+        auto evenness = define("image.analysis.evenness", "Evenness", "Analysis",
+            "Whether the image is the same kind of thing all over - what a texture needs to tile without patterning out. "
+            "Compares each square's frequency make-up and contrast with the whole: the map is bright where a square differs, "
+            "Evenness is 1 for perfectly even.",
+            { imageIn("image"), floatIn("square", 0.125f) }, { imageOut("map"), floatOut("evenness") },
+            [needInput, analyseLocally, gridImage](Context& c, auto& out, juce::String& error) {
+                auto input = needInput(c, "image", error);
+                if (input == nullptr) return false;
+                const auto local = analyseLocally(c, *input, c.number("square", 0.125f));
+                const size_t cells = local.scale.size();
+                // Each square: six band fractions and its energy against the mean energy.
+                std::array<double, 6> meanBands {};
+                double meanEnergy = 0.0;
+                for (size_t i = 0; i < cells; ++i)
+                {
+                    for (size_t b = 0; b < 6; ++b)
+                        meanBands[b] += local.bands[i * 7 + b];
+                    meanEnergy += local.bands[i * 7 + 6];
+                }
+                for (auto& m : meanBands)
+                    m /= static_cast<double>(cells);
+                meanEnergy /= static_cast<double>(cells);
+                std::vector<float> distance(cells, 0.0f);
+                double total = 0.0;
+                for (size_t i = 0; i < cells; ++i)
+                {
+                    double d = 0.0;
+                    for (size_t b = 0; b < 6; ++b)
+                        d += std::abs(local.bands[i * 7 + b] - meanBands[b]);
+                    const double energy = meanEnergy > 0.0 ? local.bands[i * 7 + 6] / meanEnergy : 1.0;
+                    d = 0.5 * d + 0.5 * std::min(1.0, std::abs(energy - 1.0));
+                    distance[i] = static_cast<float>(std::min(1.0, d));
+                    total += distance[i];
+                }
+                if (c.wants("map")) out["map"] = gridImage(c, local, distance, *input);
+                c.valueOutputs["evenness"] = static_cast<float>(1.0 - total / static_cast<double>(cells));
+                return true;
+            });
+        definitions.push_back(std::move(evenness));
+    }
+    definitions.push_back(define("image.analysis.colour_spectrum", "Colour Spectrum", "Analysis",
+        "The image's colours around the hue wheel: Chart shows how much of each hue it holds; Dominant 1-3 are its main hues; "
+        "Harmony is the shape of its palette from a Fourier analysis of the hues - 1 one main hue, 2 complementary, 3 a triad, "
+        "4 a tetrad, 0 an even spread or no colour.",
+        { imageIn("image") }, { imageOut("chart"), { "dominant1", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "dominant2", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "dominant3", { ns::PinKind::Data, ns::DataType::Color }, {} },
+                                { "harmony", { ns::PinKind::Data, ns::DataType::Int }, {} } },
+        [needInput](Context& c, auto& out, juce::String& error) {
+            auto input = needInput(c, "image", error);
+            if (input == nullptr) return false;
+            constexpr int bins = 36;
+            std::vector<float> hist(bins);
+            c.routines.an<std::int64_t (*)(const float*, std::int64_t, float*, std::int64_t)>("an_hue_histogram")(input->rgba.data(), pixelCount(*input),
+                                                                                                                hist.data(), bins);
+            if (c.wants("chart"))
+            {
+                auto chart = std::make_shared<Image>();
+                chart->width = 360;
+                chart->height = 120;
+                chart->rgba.assign(360 * 120 * 4, 0.0f);
+                c.routines.an<std::int64_t (*)(const float*, std::int64_t, float*, std::int64_t, std::int64_t)>("an_hue_chart")(hist.data(), bins,
+                                                                                                                             chart->rgba.data(), 360, 120);
+                out["chart"] = chart;
+            }
+            // Harmony: the strongest of the first four circular harmonics of the hue histogram.
+            double sum = 0.0;
+            for (float v : hist) sum += v;
+            int harmony = 0;
+            double best = 0.0;
+            for (int k = 1; k <= 4 && sum > 0.0; ++k)
+            {
+                double re = 0.0, im = 0.0;
+                for (int j = 0; j < bins; ++j)
+                {
+                    const double a = 2.0 * juce::MathConstants<double>::pi * k * j / bins;
+                    re += hist[static_cast<size_t>(j)] * std::cos(a);
+                    im -= hist[static_cast<size_t>(j)] * std::sin(a);
+                }
+                const double magnitude = std::sqrt(re * re + im * im) / sum;
+                if (magnitude > best + 1.0e-6)
+                {
+                    best = magnitude;
+                    harmony = k;
+                }
+            }
+            if (best < 0.15)
+                harmony = 0;
+            c.valueOutputs["harmony"] = static_cast<std::int64_t>(harmony);
+            // Dominant hues: the highest peaks of the (lightly smoothed) histogram, at least 30 degrees apart.
+            std::vector<float> smooth(bins);
+            float top = 0.0f;
+            for (int j = 0; j < bins; ++j)
+            {
+                smooth[static_cast<size_t>(j)] = 0.25f * hist[static_cast<size_t>((j + bins - 1) % bins)] + 0.5f * hist[static_cast<size_t>(j)]
+                                               + 0.25f * hist[static_cast<size_t>((j + 1) % bins)];
+                top = std::max(top, smooth[static_cast<size_t>(j)]);
+            }
+            std::vector<int> peaks;
+            for (int pick = 0; pick < 3; ++pick)
+            {
+                int bestBin = -1;
+                for (int j = 0; j < bins; ++j)
+                {
+                    bool tooClose = false;
+                    for (int p : peaks)
+                        tooClose = tooClose || std::min((j - p + bins) % bins, (p - j + bins) % bins) < 3;
+                    if (! tooClose && smooth[static_cast<size_t>(j)] > 0.05f * top && (bestBin < 0 || smooth[static_cast<size_t>(j)] > smooth[static_cast<size_t>(bestBin)]))
+                        bestBin = j;
+                }
+                if (bestBin >= 0)
+                    peaks.push_back(bestBin);
+            }
+            const char* names[3] = { "dominant1", "dominant2", "dominant3" };
+            for (int i = 0; i < 3; ++i)
+            {
+                ns::Vec3Default colour { 0.0f, 0.0f, 0.0f };
+                if (i < static_cast<int>(peaks.size()))
+                {
+                    const auto hue = juce::Colour::fromHSV((static_cast<float>(peaks[static_cast<size_t>(i)]) + 0.5f) / bins, 1.0f, 1.0f, 1.0f);
+                    colour = { hue.getFloatRed(), hue.getFloatGreen(), hue.getFloatBlue() };
+                }
+                c.valueOutputs[names[i]] = colour;
+            }
             return true;
         }));
 
@@ -1346,11 +1862,22 @@ Library::Library()
 
 void Library::registerTypes(ns::NodeTypeRegistry& registry) const
 {
+    registry.RegisterDiagramType({ kImageDiagram, "Image", "Makes an image: generators, effects, drawing and surface maps." });
     for (const auto& e : enums)
         registry.RegisterEnum(e);
     for (const auto& d : definitions)
         registry.Register(d.descriptor);
     ns::RegisterSymbolGetNodes(registry); // params / constants / variables (shared/NodeSystem/SYMBOLS.md)
+    ns::RegisterGraphNode(registry, { kImageDiagram }); // another image graph used as a node (GRAPH_TYPES.md)
+    // Decisions (FLOW.md): Switch and Route for every kind of value an image graph carries.
+    std::vector<ns::FlowType> flowTypes;
+    for (auto type : { ns::DataType::Texture, ns::DataType::Float, ns::DataType::Int, ns::DataType::Bool, ns::DataType::Color,
+                       ns::DataType::String, ns::DataType::Drawing, ns::DataType::Brush })
+        flowTypes.push_back(ns::StandardFlowType(type));
+    ns::RegisterFlowNodes(registry, flowTypes, { kImageDiagram });
+    // Struct nodes (TYPES.md): making, taking apart and changing structs, for building algorithms.
+    ns::RegisterStructNodes(registry, { kImageDiagram });
+    ns::RegisterEnumNodes(registry, { kImageDiagram }); // enums whose values carry data: Make Variant, Match
 }
 
 const Definition* Library::find(const std::string& typeName) const
@@ -1363,8 +1890,36 @@ const Definition* Library::find(const std::string& typeName) const
 
 //==============================================================================
 Evaluator::Evaluator(const Library& lib, Host h)
-    : library(lib), host(std::move(h)), routines(std::make_unique<Routines>()), surfaceMaps(std::make_unique<surface_maps::Engine>())
+    : library(lib), host(std::move(h)), routines(std::make_shared<Routines>()), surfaceMaps(std::make_shared<surface_maps::Engine>())
 {
+}
+
+Evaluator::Evaluator(const Library& lib, Host h, std::shared_ptr<Routines> sharedRoutines, std::shared_ptr<surface_maps::Engine> sharedMaps)
+    : library(lib), host(std::move(h)), routines(std::move(sharedRoutines)), surfaceMaps(std::move(sharedMaps))
+{
+}
+
+Host::LoadedGraph readGraphDocument(const juce::String& json)
+{
+    Host::LoadedGraph result;
+    const auto doc = juce::JSON::parse(json);
+    if (doc["format"].toString() != kGraphDocumentFormat)
+    {
+        result.error = "not an image graph";
+        return result;
+    }
+    result.text = doc["graph"].toString().toStdString();
+    std::string parseError;
+    auto graph = ns::DeserializeGraph(result.text, parseError);
+    if (graph == nullptr)
+    {
+        result.error = juce::String(parseError);
+        return result;
+    }
+    graph->SetTarget(ns::GraphTarget::Dataflow);
+    graph->SetDiagramType(kImageDiagram);
+    result.graph = std::shared_ptr<const ns::Graph>(std::move(graph));
+    return result;
 }
 
 Evaluator::~Evaluator() = default;
@@ -1403,6 +1958,211 @@ ImagePtr Evaluator::evaluate(const ns::Graph& graph, ns::NodeId node, const std:
         return nullptr;
     }
     return found->second;
+}
+
+bool Evaluator::readSelector(const ns::Graph& graph, const ns::Node& node, ns::PinDefaultValue& selector, std::string& signature,
+                             juce::String& error, int depth)
+{
+    for (const auto& pin : node.Inputs())
+    {
+        if (pin.name != ns::kFlowSelectorPin)
+            continue;
+        selector = pin.defaultValue;
+        for (const auto& wire : graph.Connections())
+            if (wire.toNode == node.Id() && wire.toPin == pin.id)
+            {
+                const auto* from = graph.FindNode(wire.fromNode);
+                const auto* fromPin = from != nullptr ? from->FindPin(wire.fromPin) : nullptr;
+                if (fromPin == nullptr)
+                    break;
+                std::string upstream;
+                if (! evaluateNode(graph, wire.fromNode, { fromPin->name }, upstream, error, depth + 1))
+                    return false;
+                auto value = cache[wire.fromNode].values.find(fromPin->name);
+                if (value == cache[wire.fromNode].values.end())
+                {
+                    error = "The selector needs a value (a number, integer, toggle or choice).";
+                    return false;
+                }
+                selector = value->second;
+                signature += "|selector<" + upstream;
+                return true;
+            }
+        signature += "|selector=" + valueText(selector);
+        return true;
+    }
+    return true;
+}
+
+std::string Evaluator::flowChosenCase(const ns::Graph& graph, ns::NodeId id, juce::String& error)
+{
+    const auto* node = graph.FindNode(id);
+    if (node == nullptr)
+        return {};
+    ns::PinDefaultValue selector;
+    std::string signature;
+    if (! readSelector(graph, *node, selector, signature, error, 0))
+        return {};
+    const auto cases = ns::FlowCasePins(*node);
+    return cases.empty() ? std::string() : cases[static_cast<size_t>(ns::FlowCaseIndex(selector, static_cast<int>(cases.size())))]->name;
+}
+
+bool Evaluator::evaluateFlowNode(const ns::Graph& graph, const ns::Node& node, ns::FlowKind kind, const std::vector<std::string>& wanted,
+                                 std::string& signatureOut, juce::String& error, int depth)
+{
+    const auto title = juce::String(kind == ns::FlowKind::route ? "Route" : "Switch");
+    std::string signature = node.TypeName();
+    ns::PinDefaultValue selector;
+    if (! readSelector(graph, node, selector, signature, error, depth))
+        return false;
+    const auto cases = ns::FlowCasePins(node);
+    if (cases.empty())
+    {
+        error = title + ": it has no cases.";
+        return false;
+    }
+    const auto* chosen = cases[static_cast<size_t>(ns::FlowCaseIndex(selector, static_cast<int>(cases.size())))];
+
+    // A Route's other outputs carry nothing: whatever asks for one is not on the chosen path.
+    std::string outputName = ns::kFlowValuePin;
+    if (kind == ns::FlowKind::route)
+    {
+        for (const auto& w : wanted)
+            if (w != chosen->name)
+            {
+                error = "Not chosen - the Route sends to " + juce::String(chosen->name) + ".";
+                return false;
+            }
+        outputName = chosen->name;
+    }
+
+    // The one input that flows: the chosen case (Switch) or the Route's input. Nothing else is computed.
+    const ns::Pin* source = chosen;
+    if (kind == ns::FlowKind::route)
+        for (const auto& pin : node.Inputs())
+            if (pin.name == ns::kFlowValuePin)
+                source = &pin;
+
+    Cached result;
+    const ns::Connection* wire = nullptr;
+    for (const auto& connection : graph.Connections())
+        if (connection.toNode == node.Id() && connection.toPin == source->id)
+            wire = &connection;
+    if (wire != nullptr)
+    {
+        const auto* from = graph.FindNode(wire->fromNode);
+        const auto* fromPin = from != nullptr ? from->FindPin(wire->fromPin) : nullptr;
+        if (fromPin == nullptr)
+        {
+            error = title + ": a wire leads nowhere.";
+            return false;
+        }
+        std::string upstream;
+        if (! evaluateNode(graph, wire->fromNode, { fromPin->name }, upstream, error, depth + 1))
+            return false;
+        signature += "|" + source->name + "<" + upstream;
+        auto& up = cache[wire->fromNode];
+        switch (fromPin->type.dataType)
+        {
+            case ns::DataType::Texture: result.outputs[outputName] = up.outputs[fromPin->name]; break;
+            case ns::DataType::Drawing: result.drawings[outputName] = up.drawings[fromPin->name]; break;
+            case ns::DataType::Brush: result.brushes[outputName] = up.brushes[fromPin->name]; break;
+            case ns::DataType::Struct: result.structs[outputName] = up.structs[fromPin->name]; break;
+            default:
+                result.values[outputName] = up.values[fromPin->name];
+                if (auto full = up.structs.find(fromPin->name); full != up.structs.end())
+                    result.structs[outputName] = full->second; // an enum carrying data passes through whole
+                break;
+        }
+    }
+    else
+    {
+        const auto type = source->type.dataType;
+        if (type == ns::DataType::Texture || type == ns::DataType::Drawing || type == ns::DataType::Brush || type == ns::DataType::Struct)
+        {
+            error = title + ": nothing is wired into " + juce::String(source->name) + ".";
+            return false;
+        }
+        signature += "|" + source->name + "=" + valueText(source->defaultValue);
+        result.values[outputName] = source->defaultValue;
+    }
+    signatureOut = std::to_string(std::hash<std::string> {}(signature));
+    result.signature = signatureOut;
+    cache[node.Id()] = std::move(result);
+    return true;
+}
+
+bool Evaluator::evaluateGraphNode(const ns::Node& node, const Host::LoadedGraph& usedGraph, Context& context,
+                                  std::map<std::string, ImagePtr>& outputs, juce::String& error)
+{
+    if (host.depth >= 16)
+    {
+        error = "graphs use each other too deeply - does a graph use itself?";
+        return false;
+    }
+    const auto path = ns::GraphNodePath(node);
+    auto& entry = used[path];
+    if (entry.evaluator == nullptr || entry.text != usedGraph.text)
+    {
+        Host child;
+        child.loadImage = host.loadImage;
+        child.loadGraph = host.loadGraph;
+        child.depth = host.depth + 1;
+        child.structs = host.structs;
+        child.enums = host.enums;
+        entry.evaluator.reset(new Evaluator(library, std::move(child), routines, surfaceMaps));
+        entry.text = usedGraph.text;
+    }
+    auto& childHost = entry.evaluator->host;
+    childHost.paramOverrides.clear();
+    childHost.graphInputs.clear();
+    childHost.graphInputKeys.clear();
+    for (const auto& pin : node.Inputs())
+    {
+        if (pin.name == ns::kGraphPathPin)
+            continue;
+        if (pin.type.dataType == ns::DataType::Texture)
+        {
+            auto image = context.inputs.find(pin.name);
+            if (image != context.inputs.end() && image->second != nullptr)
+            {
+                childHost.graphInputs[pin.name] = image->second;
+                // A computed image is never changed in place, so its address names it.
+                childHost.graphInputKeys[pin.name] = std::to_string(reinterpret_cast<std::uintptr_t>(image->second.get()));
+            }
+        }
+        else if (const auto* symbol = usedGraph.graph->FindSymbol(pin.name); symbol != nullptr && symbol->kind == ns::SymbolKind::Param)
+        {
+            if (const auto* value = context.setting(pin.name); value != nullptr && ! std::holds_alternative<std::monostate>(*value))
+                childHost.paramOverrides[pin.name] = *value;
+        }
+    }
+
+    for (const auto& wanted : context.wantedOutputs)
+    {
+        const ns::Node* outputNode = nullptr;
+        for (const auto& [id, candidate] : usedGraph.graph->Nodes())
+        {
+            const auto* descriptor = library.find(candidate->TypeName());
+            if (descriptor != nullptr && descriptor->descriptor.graphPort == ns::GraphPort::output
+                && ns::GraphPortName(*candidate, ns::GraphPort::output) == wanted)
+                outputNode = candidate.get();
+        }
+        if (outputNode == nullptr || outputNode->Outputs().empty())
+        {
+            error = "the graph has no output called " + juce::String(wanted) + " any more.";
+            return false;
+        }
+        juce::String inner;
+        auto image = entry.evaluator->evaluate(*usedGraph.graph, outputNode->Id(), outputNode->Outputs().front().name, inner);
+        if (image == nullptr)
+        {
+            error = juce::String(path) + ": " + inner;
+            return false;
+        }
+        outputs[wanted] = image;
+    }
+    return true;
 }
 
 drawing::DrawingPtr Evaluator::evaluateDrawing(const ns::Graph& graph, ns::NodeId node, const std::string& output, juce::String& error)
@@ -1468,6 +2228,31 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             error = "A Get node's symbol is missing - choose one in its Properties.";
             return false;
         }
+        if (symbol->type == ns::DataType::Struct)
+        {
+            // A struct param: the whole struct, to send along or take apart (TYPES.md).
+            const auto* def = findStruct(graph, symbol->structType);
+            if (def == nullptr)
+            {
+                error = "The struct " + juce::String(symbol->structType) + " of " + juce::String(symbol->name) + " is not in scope any more.";
+                return false;
+            }
+            // The struct itself too: a member added or its default changed is a different value.
+            std::string text = node->TypeName() + "|" + symbol->id + ":" + def->name;
+            for (const auto& m : def->members)
+                text += ";" + m.name + "/" + std::to_string(static_cast<int>(m.type.dataType)) + m.type.structType + "=" + valueText(m.defaultValue);
+            for (const auto& v : symbol->memberValues)
+                text += "," + valueText(v);
+            signatureOut = std::to_string(std::hash<std::string> {}(text));
+            auto& cachedGet = cache[id];
+            if (cachedGet.signature != signatureOut || cachedGet.structs.count(ns::kSymbolValuePin) == 0)
+            {
+                cachedGet = {};
+                cachedGet.signature = signatureOut;
+                cachedGet.structs[ns::kSymbolValuePin] = structWithDefaults(graph, *def, &symbol->memberValues, 0);
+            }
+            return true;
+        }
         auto value = symbol->value;
         if (symbol->kind == ns::SymbolKind::Param)
         {
@@ -1475,18 +2260,47 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             if (overridden != host.paramOverrides.end())
                 value = overridden->second;
         }
-        signatureOut = std::to_string(std::hash<std::string> {}(node->TypeName() + "|" + symbol->id + "=" + valueText(value)));
+        // A Choice of an enum whose values carry data: what the chosen value carries, and the enum itself, count too.
+        const auto* carrying = findEnum(graph, symbol->enumType);
+        if (carrying != nullptr && ! ns::EnumCarriesValues(*carrying))
+            carrying = nullptr;
+        std::string text = node->TypeName() + "|" + symbol->id + "=" + valueText(value);
+        if (carrying != nullptr)
+        {
+            for (const auto& v : symbol->memberValues)
+                text += "," + valueText(v);
+            text += "|" + ns::FrustEnumDeclaration(*carrying);
+        }
+        signatureOut = std::to_string(std::hash<std::string> {}(text));
         auto& cachedGet = cache[id];
         cachedGet.signature = signatureOut;
         cachedGet.outputs.clear();
         cachedGet.drawings.clear();
         cachedGet.brushes.clear();
+        cachedGet.structs.clear();
         cachedGet.values = { { ns::kSymbolValuePin, value } };
+        if (carrying != nullptr)
+        {
+            const auto* index = std::get_if<std::int64_t>(&value);
+            // What it carries belongs to the param's own value; an outside value (an Automation) picks another variant,
+            // which then carries its defaults.
+            const bool own = index != nullptr && symbol->value == value;
+            cachedGet.structs[ns::kSymbolValuePin] = enumWithDefaults(graph, *carrying, index != nullptr ? static_cast<int>(*index) : 0,
+                                                                      own ? &symbol->memberValues : nullptr, 0);
+        }
         return true;
     }
 
-    const auto* definition = library.find(node->TypeName());
-    if (definition == nullptr)
+    if (const auto kind = ns::FlowKindOf(*node); kind != ns::FlowKind::none)
+        return evaluateFlowNode(graph, *node, kind, wanted, signatureOut, error, depth);
+
+    const bool graphNode = ns::IsGraphNode(*node);
+    const auto structKind = ns::StructNodeKindOf(*node);
+    const bool structNode = structKind != ns::StructNodeKind::none;
+    const auto enumKind = ns::EnumNodeKindOf(*node);
+    const bool enumNode = enumKind != ns::EnumNodeKind::none;
+    const auto* definition = graphNode || structNode || enumNode ? nullptr : library.find(node->TypeName());
+    if (! graphNode && ! structNode && ! enumNode && definition == nullptr)
     {
         error = "Unknown node type " + juce::String(node->TypeName()) + ".";
         return false;
@@ -1496,9 +2310,35 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     Context context { *node, host, *routines, *surfaceMaps, {}, {}, {}, {} };
     context.graph = &graph;
     std::string signature = node->TypeName();
-    if (definition->readsVariables)
+    if (definition != nullptr && definition->readsVariables)
         for (const auto& [name, value] : context.numericVariables())
             signature += "|$" + name + "=" + std::to_string(value);
+    if (definition != nullptr && definition->readsGraphInputs)
+        for (const auto& [name, key] : host.graphInputKeys)
+            signature += "|@" + name + "=" + key;
+    // A Graph node depends on the graph it uses, too.
+    Host::LoadedGraph usedGraph;
+    if (graphNode)
+    {
+        const auto path = ns::GraphNodePath(*node);
+        if (path.empty())
+        {
+            error = "A Graph node needs a graph - choose one in its Properties.";
+            return false;
+        }
+        if (! host.loadGraph)
+        {
+            error = "Graph nodes cannot be used here.";
+            return false;
+        }
+        usedGraph = host.loadGraph(juce::String(path));
+        if (usedGraph.graph == nullptr)
+        {
+            error = "The graph " + juce::String(path) + " cannot be read" + (usedGraph.error.isNotEmpty() ? ": " + usedGraph.error : juce::String(".")) ;
+            return false;
+        }
+        signature += "|graph=" + std::to_string(std::hash<std::string> {}(usedGraph.text));
+    }
     for (const auto& pin : node->Inputs())
     {
         const ns::Connection* wire = nullptr;
@@ -1509,6 +2349,10 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         if (wire == nullptr)
         {
             signature += "|" + pin.name + "=" + valueText(pin.defaultValue);
+            // A Graph node's image input may name a project image instead of being wired.
+            if (graphNode && pin.type.dataType == ns::DataType::Texture && host.loadImage)
+                if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty())
+                    context.inputs[pin.name] = host.loadImage(juce::String(*path));
             continue;
         }
 
@@ -1525,7 +2369,13 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
             case ns::DataType::Texture: context.inputs[pin.name] = upstreamResult.outputs[fromPin->name]; break;
             case ns::DataType::Drawing: context.drawings[pin.name] = upstreamResult.drawings[fromPin->name]; break;
             case ns::DataType::Brush: context.brushes[pin.name] = upstreamResult.brushes[fromPin->name]; break;
-            default: context.wiredValues[pin.name] = upstreamResult.values[fromPin->name]; break;
+            case ns::DataType::Struct: context.structs[pin.name] = upstreamResult.structs[fromPin->name]; break;
+            default:
+                context.wiredValues[pin.name] = upstreamResult.values[fromPin->name];
+                // An enum value carrying data: its full value comes along with its number.
+                if (auto full = upstreamResult.structs.find(fromPin->name); full != upstreamResult.structs.end())
+                    context.structs[pin.name] = full->second;
+                break;
         }
         signature += "|" + pin.name + "<" + upstream + ":" + fromPin->name;
     }
@@ -1539,7 +2389,8 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
         bool complete = true;
         for (const auto& name : needed)
             complete = complete && (cached.outputs.count(name) > 0 || cached.values.count(name) > 0
-                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0);
+                                    || cached.drawings.count(name) > 0 || cached.brushes.count(name) > 0
+                                    || cached.structs.count(name) > 0);
         if (complete)
             return true;
         for (const auto& [name, image] : cached.outputs)
@@ -1549,9 +2400,20 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     context.wantedOutputs.assign(needed.begin(), needed.end());
     std::map<std::string, ImagePtr> outputs;
     juce::String nodeError;
-    if (! definition->evaluate(context, outputs, nodeError))
+    const bool evaluated = graphNode    ? evaluateGraphNode(*node, usedGraph, context, outputs, nodeError)
+                           : structNode ? evaluateStructNode(graph, structKind, context, outputs, nodeError)
+                           : enumNode   ? evaluateEnumNode(graph, enumKind, context, outputs, nodeError)
+                                        : definition->evaluate(context, outputs, nodeError);
+    if (! evaluated)
     {
-        error = juce::String(definition->descriptor.displayName) + ": " + nodeError;
+        const auto title = graphNode ? juce::String("Graph")
+                         : structNode ? juce::String(structKind == ns::StructNodeKind::make         ? "Make Struct"
+                                                     : structKind == ns::StructNodeKind::breakApart ? "Break Struct"
+                                                     : structKind == ns::StructNodeKind::setMembers ? "Set Members"
+                                                                                                    : "Get Member")
+                         : enumNode   ? juce::String(enumKind == ns::EnumNodeKind::makeVariant ? "Make Variant" : "Match")
+                                      : juce::String(definition->descriptor.displayName);
+        error = title + ": " + nodeError;
         cached = {};
         return false;
     }
@@ -1560,6 +2422,327 @@ bool Evaluator::evaluateNode(const ns::Graph& graph, ns::NodeId id, const std::v
     cached.values = std::move(context.valueOutputs);
     cached.drawings = std::move(context.drawingOutputs);
     cached.brushes = std::move(context.brushOutputs);
+    cached.structs = std::move(context.structOutputs);
+    return true;
+}
+
+const ns::StructDef* Evaluator::findStruct(const ns::Graph& graph, const std::string& name) const
+{
+    if (const auto* own = graph.FindStruct(name))
+        return own;
+    for (const auto& def : host.structs)
+        if (def.name == name)
+            return &def;
+    return nullptr;
+}
+
+const ns::EnumDef* Evaluator::findEnum(const ns::Graph& graph, const std::string& name) const
+{
+    if (name.empty())
+        return nullptr;
+    if (const auto* own = graph.FindEnum(name))
+        return own;
+    for (const auto& def : host.enums)
+        if (def.name == name)
+            return &def;
+    for (const auto& def : library.getEnums())
+        if (def.name == name)
+            return &def;
+    return nullptr;
+}
+
+bool Evaluator::carriesValues(const ns::Graph& graph, const ns::PinTypeDesc& type) const
+{
+    const auto* def = type.enumType.empty() ? nullptr : findEnum(graph, type.enumType);
+    return def != nullptr && ns::EnumCarriesValues(*def);
+}
+
+void Evaluator::putDefault(const ns::Graph& graph, StructValue& into, const std::string& key, const ns::PinTypeDesc& type,
+                           const ns::PinDefaultValue& value, int depth) const
+{
+    switch (type.dataType)
+    {
+        case ns::DataType::Texture:
+            // An image member may name a project image.
+            if (const auto* path = std::get_if<std::string>(&value); path != nullptr && ! path->empty() && host.loadImage)
+                if (auto image = host.loadImage(juce::String(*path)))
+                    into.images[key] = image;
+            break;
+        case ns::DataType::Struct:
+            if (const auto* inner = findStruct(graph, type.structType); inner != nullptr && depth < 8)
+                into.structs[key] = structWithDefaults(graph, *inner, nullptr, depth + 1);
+            break;
+        case ns::DataType::Drawing:
+        case ns::DataType::Brush:
+            break; // nothing until one is wired in
+        default:
+        {
+            into.values[key] = std::holds_alternative<std::monostate>(value) ? ns::DefaultValueFor(type.dataType) : value;
+            // An enum whose values carry data: the full value travels alongside its number. Recursive types (a list
+            // whose value carries a list) stop after a few levels - the default of a default needs no more.
+            if (const auto* def = carriesValues(graph, type) ? findEnum(graph, type.enumType) : nullptr; def != nullptr && depth < 8)
+            {
+                const auto* index = std::get_if<std::int64_t>(&into.values[key]);
+                into.structs[key] = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, depth + 1);
+            }
+            break;
+        }
+    }
+}
+
+StructPtr Evaluator::structWithDefaults(const ns::Graph& graph, const ns::StructDef& def, const std::vector<ns::PinDefaultValue>* memberValues,
+                                        int depth) const
+{
+    auto made = std::make_shared<StructValue>();
+    made->type = def.name;
+    for (size_t i = 0; i < def.members.size(); ++i)
+    {
+        const auto& member = def.members[i];
+        const auto& value = memberValues != nullptr && i < memberValues->size() && ! std::holds_alternative<std::monostate>((*memberValues)[i])
+                                ? (*memberValues)[i]
+                                : member.defaultValue;
+        putDefault(graph, *made, ns::StructMemberPinName(member.name), member.type, value, depth);
+    }
+    return made;
+}
+
+StructPtr Evaluator::enumWithDefaults(const ns::Graph& graph, const ns::EnumDef& def, int variant, const std::vector<ns::PinDefaultValue>* fieldValues,
+                                      int depth) const
+{
+    auto made = std::make_shared<StructValue>();
+    made->type = def.name;
+    made->variant = def.variants.empty() ? 0 : juce::jlimit(0, static_cast<int>(def.variants.size()) - 1, variant);
+    if (def.variants.empty())
+        return made;
+    const auto& fields = def.variants[static_cast<size_t>(made->variant)].fields;
+    for (size_t i = 0; i < fields.size(); ++i)
+    {
+        const ns::PinDefaultValue none;
+        const auto& value = fieldValues != nullptr && i < fieldValues->size() ? (*fieldValues)[i] : none;
+        putDefault(graph, *made, ns::StructMemberPinName(fields[i].name), fields[i].type, value, depth);
+    }
+    return made;
+}
+
+void Evaluator::takeMember(const ns::Graph& graph, Context& context, const ns::Pin& pin, StructValue& into) const
+{
+    switch (pin.type.dataType)
+    {
+        case ns::DataType::Texture:
+        {
+            into.images.erase(pin.name);
+            auto image = context.inputs.find(pin.name);
+            if (image != context.inputs.end() && image->second != nullptr)
+                into.images[pin.name] = image->second;
+            else if (const auto* path = std::get_if<std::string>(&pin.defaultValue); path != nullptr && ! path->empty() && host.loadImage)
+                if (auto loaded = host.loadImage(juce::String(*path)))
+                    into.images[pin.name] = loaded;
+            break;
+        }
+        case ns::DataType::Drawing:
+            into.drawings.erase(pin.name);
+            if (auto d = context.drawings.find(pin.name); d != context.drawings.end())
+                into.drawings[pin.name] = d->second;
+            break;
+        case ns::DataType::Brush:
+            into.brushes.erase(pin.name);
+            if (auto b = context.brushes.find(pin.name); b != context.brushes.end())
+                into.brushes[pin.name] = b->second;
+            break;
+        case ns::DataType::Struct:
+            if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
+                into.structs[pin.name] = st->second;
+            else if (const auto* inner = findStruct(graph, pin.type.structType))
+                into.structs[pin.name] = structWithDefaults(graph, *inner, nullptr, 0);
+            break;
+        default:
+            if (const auto* value = context.setting(pin.name))
+                into.values[pin.name] = *value;
+            // An enum whose values carry data: the full value wired in, else the typed-in value with what it carries
+            // by default.
+            into.structs.erase(pin.name);
+            if (carriesValues(graph, pin.type))
+            {
+                if (auto st = context.structs.find(pin.name); st != context.structs.end() && st->second != nullptr)
+                    into.structs[pin.name] = st->second;
+                else if (const auto* def = findEnum(graph, pin.type.enumType))
+                {
+                    const auto* index = std::get_if<std::int64_t>(&into.values[pin.name]);
+                    into.structs[pin.name] = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, 0);
+                }
+            }
+            break;
+    }
+}
+
+bool Evaluator::giveMember(const StructValue& from, const std::string& key, const ns::Pin& out, Context& context,
+                           std::map<std::string, ImagePtr>& outputs, juce::String& error) const
+{
+    switch (out.type.dataType)
+    {
+        case ns::DataType::Texture:
+        {
+            auto image = from.images.find(key);
+            if (image == from.images.end())
+            {
+                if (context.wants(out.name))
+                {
+                    error = juce::String(out.name) + " has no image - wire one in where the value is made, or choose one in its param.";
+                    return false;
+                }
+                break;
+            }
+            outputs[out.name] = image->second;
+            break;
+        }
+        case ns::DataType::Drawing:
+            if (auto d = from.drawings.find(key); d != from.drawings.end())
+                context.drawingOutputs[out.name] = d->second;
+            break;
+        case ns::DataType::Brush:
+            if (auto b = from.brushes.find(key); b != from.brushes.end())
+                context.brushOutputs[out.name] = b->second;
+            break;
+        case ns::DataType::Struct:
+            if (auto st = from.structs.find(key); st != from.structs.end())
+                context.structOutputs[out.name] = st->second;
+            break;
+        default:
+            if (auto v = from.values.find(key); v != from.values.end())
+                context.valueOutputs[out.name] = v->second;
+            else
+                context.valueOutputs[out.name] = ns::DefaultValueFor(out.type.dataType);
+            // An enum carrying data: its full value goes along too.
+            if (auto st = from.structs.find(key); st != from.structs.end())
+                context.structOutputs[out.name] = st->second;
+            break;
+    }
+    return true;
+}
+
+bool Evaluator::evaluateStructNode(const ns::Graph& graph, ns::StructNodeKind kind, Context& context, std::map<std::string, ImagePtr>& outputs,
+                                   juce::String& error)
+{
+    const auto& node = context.node;
+    const auto typeName = ns::StructNodeType(node);
+    if (typeName.empty())
+    {
+        error = "choose its struct in Properties.";
+        return false;
+    }
+    const auto* def = findStruct(graph, typeName);
+    if (def == nullptr)
+    {
+        error = "the struct " + juce::String(typeName) + " is not in scope any more.";
+        return false;
+    }
+    auto isFixed = [](const ns::Pin& pin) {
+        return pin.name == ns::kStructTypePin || pin.name == ns::kStructValuePin || pin.name == ns::kStructMembersPin
+            || pin.name == ns::kStructMemberPin;
+    };
+
+    // The struct coming in: wired, or the struct's defaults when nothing is.
+    StructPtr incoming;
+    if (kind != ns::StructNodeKind::make)
+    {
+        auto wired = context.structs.find(ns::kStructValuePin);
+        incoming = wired != context.structs.end() && wired->second != nullptr ? wired->second : structWithDefaults(graph, *def, nullptr, 0);
+    }
+
+    if (kind == ns::StructNodeKind::make || kind == ns::StructNodeKind::setMembers)
+    {
+        // Members in: each one's wired value, else what is typed into the node.
+        auto made = kind == ns::StructNodeKind::make ? std::make_shared<StructValue>() : std::make_shared<StructValue>(*incoming);
+        made->type = def->name;
+        for (const auto& pin : node.Inputs())
+            if (! isFixed(pin))
+                takeMember(graph, context, pin, *made);
+        context.structOutputs[ns::kStructValuePin] = std::move(made);
+        return true;
+    }
+
+    // Break Struct / Get Member: members out.
+    for (const auto& pin : node.Outputs())
+        if (! isFixed(pin) && ! giveMember(*incoming, pin.name, pin, context, outputs, error))
+            return false;
+    return true;
+}
+
+bool Evaluator::evaluateEnumNode(const ns::Graph& graph, ns::EnumNodeKind kind, Context& context, std::map<std::string, ImagePtr>& outputs,
+                                 juce::String& error)
+{
+    const auto& node = context.node;
+    const auto typeName = ns::StructNodeText(node, ns::kEnumTypePin);
+    if (typeName.empty())
+    {
+        error = "choose its enum in Properties.";
+        return false;
+    }
+    const auto* def = findEnum(graph, typeName);
+    if (def == nullptr || def->variants.empty())
+    {
+        error = "the enum " + juce::String(typeName) + " is not in scope any more.";
+        return false;
+    }
+
+    if (kind == ns::EnumNodeKind::makeVariant)
+    {
+        // The chosen value, with what it carries: each wired in, else typed into the node.
+        const auto chosen = ns::StructNodeText(node, ns::kEnumVariantPin);
+        int variant = -1;
+        for (size_t i = 0; i < def->variants.size(); ++i)
+            if (def->variants[i].name == chosen)
+                variant = static_cast<int>(i);
+        if (variant < 0)
+        {
+            error = chosen.empty() ? juce::String("choose its value in Properties.") : "the enum has no value " + juce::String(chosen) + " any more.";
+            return false;
+        }
+        auto made = std::make_shared<StructValue>();
+        made->type = def->name;
+        made->variant = variant;
+        for (const auto& pin : node.Inputs())
+            if (pin.name != ns::kEnumTypePin && pin.name != ns::kEnumVariantPin)
+                takeMember(graph, context, pin, *made);
+        context.valueOutputs[ns::kEnumValuePin] = static_cast<std::int64_t>(variant);
+        context.structOutputs[ns::kEnumValuePin] = std::move(made);
+        return true;
+    }
+
+    // Match: the value coming in - wired with what it carries, or just its number (then it carries the defaults).
+    StructPtr incoming;
+    if (auto wired = context.structs.find(ns::kEnumValuePin); wired != context.structs.end() && wired->second != nullptr)
+        incoming = wired->second;
+    else
+    {
+        const auto* index = context.setting(ns::kEnumValuePin) != nullptr ? std::get_if<std::int64_t>(context.setting(ns::kEnumValuePin)) : nullptr;
+        incoming = enumWithDefaults(graph, *def, index != nullptr ? static_cast<int>(*index) : 0, nullptr, 0);
+    }
+    const auto& chosenName = def->variants[static_cast<size_t>(juce::jlimit(0, static_cast<int>(def->variants.size()) - 1, incoming->variant))].name;
+
+    // Every variant's fields have pins; only the chosen variant's carry anything (like a Route's unchosen outputs).
+    for (const auto& variant : def->variants)
+        for (const auto& field : variant.fields)
+        {
+            const auto pinName = ns::MatchPinName(variant.name, field.name);
+            const ns::Pin* out = nullptr;
+            for (const auto& pin : node.Outputs())
+                if (pin.name == pinName)
+                    out = &pin;
+            if (out == nullptr)
+                continue;
+            if (variant.name != chosenName)
+            {
+                if (context.wants(pinName))
+                {
+                    error = "Not chosen - the value is " + juce::String(chosenName) + ".";
+                    return false;
+                }
+                continue;
+            }
+            if (! giveMember(*incoming, ns::StructMemberPinName(field.name), *out, context, outputs, error))
+                return false;
+        }
     return true;
 }
 

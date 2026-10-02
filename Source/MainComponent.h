@@ -2,13 +2,10 @@
 
 #include <JuceHeader.h>
 #include <CreationDock/DockManager.h>
-#include "NodeGraphPanel.h"
-#include "ViewerPanel.h"
-#include "MaterialDocument.h"
-#include "NodePropertiesPanel.h"
+#include "ProjectImages.h"
 #include "ImageLabPanel.h"
 #include "SurfaceMapPanel.h"
-#include "ImageGraphPanel.h"
+#include "GraphWorkspace.h"
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
@@ -32,16 +29,12 @@ private:
     void openProject(const juce::String& projectId);
     bool ensureProjectSessionActive(juce::String& errorMessage);
 
-    void newMaterial();
-    void showOpenMaterialMenu();
-    void openMaterial(const creation::assets::AssetDescriptor& asset);
-    void saveMaterial();
-    void saveMaterialAs();
     void confirmDiscardingEdits(std::function<void()> proceed);
     void refreshTitle();
 
     // Work areas: each has its own dock layout, panels and menus (docs/REQUIREMENTS.md section 4).
-    enum class WorkArea { materials, imageLab, surfaceMap, imageGraph, draw };
+    // graph: the one Graph editor (image graphs and materials, shared/NodeSystem/GRAPH_TYPES.md); draw: its Draw view.
+    enum class WorkArea { imageLab, surfaceMap, graph, draw };
     void showWorkArea(WorkArea area);
     CreationDock::DockManager& dockFor(WorkArea area);
     void loadLayouts();
@@ -78,25 +71,21 @@ private:
     CreationSuiteHeaderBar headerBar;
     creation::ui::SuiteShellController suiteShellController;
     creation::assets::ProjectSession projectSession;
-    MaterialDocument materialDocument { projectSession };
+    ProjectImages projectImages;
 
-    NodeGraphPanel nodeGraphPanel;
-    ViewerPanel viewerPanel;
-    NodePropertiesPanel propertiesPanel;
     ImageLabWorkspace imageLab;
     SurfaceMapWorkspace surfaceMap;
-    ImageGraphWorkspace imageGraph;
+    GraphWorkspace graphEditor;
 
     // Declared after the panels they host, so they are destroyed first.
     std::unique_ptr<juce::MenuBarComponent> menuBar;
-    std::unique_ptr<CreationDock::DockManager> materialsDock;
     std::unique_ptr<CreationDock::DockManager> imageLabDock;
     std::unique_ptr<CreationDock::DockManager> surfaceMapDock;
-    std::unique_ptr<CreationDock::DockManager> imageGraphDock;
+    std::unique_ptr<CreationDock::DockManager> graphDock;
     std::unique_ptr<CreationDock::DockManager> drawDock;
     // Hosts of panels the Graph and Draw areas share, by area, so the area being shown can take its panels back.
     std::vector<std::pair<WorkArea, NonOwningPanelHost*>> sharedHosts;
-    WorkArea currentArea = WorkArea::materials;
+    WorkArea currentArea = WorkArea::graph;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

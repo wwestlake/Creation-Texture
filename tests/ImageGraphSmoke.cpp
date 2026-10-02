@@ -5,8 +5,12 @@
 
 #include <ImageGraph.h>
 #include <DrawScript.h>
+#include <node_system/frgraph_serialization.h>
 
+#include <array>
 #include <cmath>
+#include <functional>
+#include <map>
 #include <iostream>
 
 namespace ns = ce::node_system;
@@ -810,6 +814,663 @@ int main()
         }
         else
             std::cout << "ok   Paint without a drawing says so\n";
+    }
+
+    // Graphs as nodes (shared/NodeSystem/GRAPH_TYPES.md phase 2): an image graph used inside another.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        // The used graph: Graph Input "src" -> Invert -> Output "inverted"; and a param "shade" (colour, default red) ->
+        // Create Image 2 x 2 -> Output "swatch".
+        ns::Graph inner("Inner", ns::GraphTarget::Dataflow);
+        inner.SetDiagramType(image_graph::kImageDiagram);
+        inner.AddSymbol({ "shade", "Shade", ns::SymbolKind::Param, ns::DataType::Color, ns::Vec3Default { 1.0f, 0.0f, 0.0f }, "public", false, "" });
+        auto innerAdd = [&](const char* type) { return ns::AddRegisteredNode(inner, registry, type); };
+        auto* src = innerAdd("image.input");
+        set(src, "name", std::string("src"));
+        auto* flip = innerAdd("image.invert");
+        connect(inner, src, "image", flip, "image");
+        auto* inverted = innerAdd("image.output");
+        set(inverted, "name", std::string("inverted"));
+        connect(inner, flip, "image", inverted, "image");
+        auto* swatchImage = innerAdd("image.create");
+        set(swatchImage, "width", std::int64_t { 2 });
+        set(swatchImage, "height", std::int64_t { 2 });
+        const auto* shade = inner.FindSymbol("shade");
+        connect(inner, ns::AddSymbolGetNode(inner, registry, *shade), "value", swatchImage, "color");
+        auto* swatch = innerAdd("image.output");
+        set(swatch, "name", std::string("swatch"));
+        connect(inner, swatchImage, "image", swatch, "image");
+
+        std::map<std::string, std::string> saved { { "Assets/inner.imggraph.json", ns::SerializeGraph(inner) } };
+        evaluator.getHost().loadGraph = [&saved](const juce::String& path) {
+            image_graph::Host::LoadedGraph loaded;
+            auto found = saved.find(path.toStdString());
+            if (found == saved.end())
+                return loaded;
+            std::string parseError;
+            loaded.text = found->second;
+            loaded.graph = std::shared_ptr<const ns::Graph>(ns::DeserializeGraph(found->second, parseError));
+            return loaded;
+        };
+
+        // The interface: inputs shade (param) and src (Graph Input), outputs inverted and swatch.
+        const auto face = ns::InterfaceOf(inner, registry);
+        check("Graph interface: shade and src in, inverted and swatch out",
+              face.inputs.size() == 2 && face.inputs[0].name == "shade" && face.inputs[1].name == "src" && face.outputs.size() == 2
+                  && face.outputs[0].name == "inverted" && face.outputs[1].name == "swatch");
+
+        // The using graph: Create (0.2, 0.4, 0.6) -> Graph node's src -> inverted = (0.8, 0.6, 0.4).
+        auto* used = add(ns::kGraphNodeType);
+        set(used, "graph", std::string("Assets/inner.imggraph.json"));
+        ns::SyncGraphNodePins(graph, used->Id(), face);
+        auto* colour = add("image.create");
+        set(colour, "width", std::int64_t { 2 });
+        set(colour, "height", std::int64_t { 2 });
+        set(colour, "color", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        connect(graph, colour, "image", used, "src");
+        expectPixel("A used graph's output: the wired image inverted", evaluator.evaluate(graph, used->Id(), "inverted", error), 0, 0, { 0.8f, 0.6f, 0.4f });
+        // Its param: the Graph node's shade input starts at the param's default (red), then set to green.
+        expectPixel("A used graph's param at its default", evaluator.evaluate(graph, used->Id(), "swatch", error), 1, 1, { 1.0f, 0.0f, 0.0f });
+        set(used, "shade", ns::Vec3Default { 0.0f, 1.0f, 0.0f });
+        expectPixel("A used graph's param set on the Graph node", evaluator.evaluate(graph, used->Id(), "swatch", error), 1, 1, { 0.0f, 1.0f, 0.0f });
+
+        // Editing the used graph changes the result: its Invert replaced by a straight wire -> (0.2, 0.4, 0.6).
+        inner.RemoveNode(flip->Id());
+        connect(inner, src, "image", inverted, "image");
+        saved["Assets/inner.imggraph.json"] = ns::SerializeGraph(inner);
+        expectPixel("An edited used graph is picked up", evaluator.evaluate(graph, used->Id(), "inverted", error), 0, 0, { 0.2f, 0.4f, 0.6f });
+
+        // A graph that uses itself stops with an error instead of running forever.
+        ns::Graph loop("Loop", ns::GraphTarget::Dataflow);
+        auto* self = ns::AddRegisteredNode(loop, registry, ns::kGraphNodeType);
+        set(self, "graph", std::string("Assets/loop.imggraph.json"));
+        auto* loopOut = ns::AddRegisteredNode(loop, registry, "image.output");
+        set(loopOut, "name", std::string("out"));
+        saved["Assets/loop.imggraph.json"] = ns::SerializeGraph(loop);
+        ns::SyncGraphNodePins(loop, self->Id(), ns::InterfaceOf(loop, registry));
+        connect(loop, self, "out", loopOut, "image");
+        saved["Assets/loop.imggraph.json"] = ns::SerializeGraph(loop);
+        auto* outer = add(ns::kGraphNodeType);
+        set(outer, "graph", std::string("Assets/loop.imggraph.json"));
+        ns::SyncGraphNodePins(graph, outer->Id(), ns::InterfaceOf(loop, registry));
+        juce::String loopError;
+        check("A graph that uses itself stops with an error",
+              evaluator.evaluate(graph, outer->Id(), "out", loopError) == nullptr && loopError.contains("too deeply"));
+    }
+
+    // Decisions (shared/NodeSystem/FLOW.md): Switch picks one case and computes only that; Route sends one way.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinNamed = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+
+        // A Choice param (Weather: Dry, Wet, Deep Snow) drives a Switch (Image): the cases take its names.
+        registry.RegisterEnum({ "Weather", "Weather", { "Dry", "Wet", "Deep Snow" }, "" });
+        ns::Symbol weather { "weather", "Weather", ns::SymbolKind::Param, ns::DataType::Int, std::int64_t { 0 }, "agent", false, "", "Weather" };
+        graph.AddSymbol(weather);
+        auto* sw = add("core.switch.image");
+        auto* choice = ns::AddSymbolGetNode(graph, registry, weather);
+        graph.Connect(choice->Id(), choice->Outputs().front().id, sw->Id(), pinNamed(sw, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, sw->Id());
+        check("Switch cases named after the Choice: Dry, Wet, Deep_Snow",
+              ns::FlowCasePins(*sw).size() == 3 && ns::FlowCasePins(*sw)[2]->name == "Deep_Snow");
+
+        // Dry: red. Wet: a Blur with nothing wired in - it would fail if it were computed. Deep Snow: blue.
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", sw, "Dry");
+        connect(graph, add("image.blur"), "image", sw, "Wet");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", sw, "Deep_Snow");
+        expectPixel("Switch on Dry gives red - the broken Wet branch is never computed", evaluator.evaluate(graph, sw->Id(), "value", error), 0, 0,
+                    { 1.0f, 0.0f, 0.0f });
+        evaluator.getHost().paramOverrides["weather"] = std::int64_t { 2 };
+        expectPixel("Switch on Deep Snow gives blue", evaluator.evaluate(graph, sw->Id(), "value", error), 0, 0, { 0.0f, 0.0f, 1.0f });
+        evaluator.getHost().paramOverrides["weather"] = std::int64_t { 1 };
+        juce::String wetError;
+        check("Switch on Wet computes the broken branch, and says so",
+              evaluator.evaluate(graph, sw->Id(), "value", wetError) == nullptr && wetError.contains("Blur"));
+        evaluator.getHost().paramOverrides.clear();
+
+        // A type made in the node system (TYPES.md): the graph's own enum HSV Channel; a param of it drives a Switch
+        // whose cases become Hue, Saturation, Value; Saturation (1) picks the second, green.
+        graph.AddEnum({ "HsvChannel", "HSV Channel", { "Hue", "Saturation", "Value" }, "" });
+        ns::Symbol hsv { "hsv", "HSV", ns::SymbolKind::Param, ns::DataType::Int, std::int64_t { 1 }, "agent", false, "", "HsvChannel" };
+        graph.AddSymbol(hsv);
+        auto* byChannel = add("core.switch.image");
+        auto* hsvGet = ns::AddSymbolGetNode(graph, registry, hsv);
+        graph.Connect(hsvGet->Id(), hsvGet->Outputs().front().id, byChannel->Id(), pinNamed(byChannel, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, byChannel->Id());
+        check("A graph's own enum names the Switch cases Hue, Saturation, Value",
+              ns::FlowCasePins(*byChannel).size() == 3 && ns::FlowCasePins(*byChannel)[1]->name == "Saturation");
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", byChannel, "Hue");
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", byChannel, "Saturation");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", byChannel, "Value");
+        expectPixel("A param of the graph's own enum picks Saturation", evaluator.evaluate(graph, byChannel->Id(), "value", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+
+        // Route (Image): green in, selector 1 -> case_1 carries green; case_0 is not chosen.
+        auto* route = add("core.route.image");
+        ns::SyncFlowNodeCases(graph, registry, route->Id());
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", route, "value");
+        set(route, "selector", std::int64_t { 1 });
+        expectPixel("Route sends its input to the chosen output", evaluator.evaluate(graph, route->Id(), "case_1", error), 0, 0, { 0.0f, 1.0f, 0.0f });
+        juce::String routeError;
+        check("Route's other output carries nothing", evaluator.evaluate(graph, route->Id(), "case_0", routeError) == nullptr
+                                                         && routeError.contains("Not chosen"));
+        // What is downstream of an unchosen output is not computed: an Invert on case_0 is not chosen either.
+        auto* after = add("image.invert");
+        connect(graph, route, "case_0", after, "image");
+        juce::String afterError;
+        check("A node after an unchosen output is not chosen", evaluator.evaluate(graph, after->Id(), "image", afterError) == nullptr
+                                                                  && afterError.contains("Not chosen"));
+
+        // Conditions: Compare 0.3 < 0.5 -> on; a toggle selector makes the cases Off / On and picks On (white).
+        auto* cmp = add("image.value.compare");
+        set(cmp, "a", 0.3f);
+        auto* onOff = add("core.switch.image");
+        graph.Connect(cmp->Id(), cmp->Outputs().front().id, onOff->Id(), pinNamed(onOff, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, onOff->Id());
+        connect(graph, solid(0.0f, 0.0f, 0.0f), "image", onOff, "Off");
+        connect(graph, solid(1.0f, 1.0f, 1.0f), "image", onOff, "On");
+        expectPixel("Compare 0.3 < 0.5 switches to On", evaluator.evaluate(graph, onOff->Id(), "value", error), 0, 0, { 1.0f, 1.0f, 1.0f });
+
+        // Math 2 x 3 = 6; Logic on and off = off.
+        auto* times = add("image.value.math");
+        set(times, "a", 2.0f); set(times, "b", 3.0f); set(times, "op", std::int64_t { 2 });
+        ns::PinDefaultValue product, both;
+        juce::String valueError;
+        auto* logic = add("image.value.logic");
+        set(logic, "a", true);
+        check("Math 2 x 3 = 6, Logic on and off = off",
+              evaluator.evaluateValue(graph, times->Id(), "result", product, valueError) && std::get<float>(product) == 6.0f
+                  && evaluator.evaluateValue(graph, logic->Id(), "result", both, valueError) && ! std::get<bool>(both));
+    }
+
+    // Structs (shared/NodeSystem/TYPES.md): made in the Struct Editor, then Make / Break / Set Members / Get Member and
+    // struct params carry them through the graph.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinIn = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto pinOut = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Outputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto member = [](const char* name, ns::DataType type, ns::PinDefaultValue value) {
+            ns::StructMember m;
+            m.name = name;
+            m.type = { ns::PinKind::Data, type };
+            m.defaultValue = std::move(value);
+            return m;
+        };
+        auto structNode = [&](const char* type, const char* structName) {
+            auto* n = add(type);
+            set(n, ns::kStructTypePin, std::string(structName));
+            ns::SyncStructNodePins(graph, registry, n->Id());
+            return n;
+        };
+        auto value = [&](ns::Node* n, const char* output, ns::PinDefaultValue& out) {
+            juce::String e;
+            const bool good = evaluator.evaluateValue(graph, n->Id(), output, out, e);
+            if (! good)
+                std::cerr << "     " << e << "\n";
+            return good;
+        };
+        auto isColour = [](const ns::PinDefaultValue& v, float r, float g, float b) {
+            const auto* c = std::get_if<ns::Vec3Default>(&v);
+            return c != nullptr && c->x == r && c->y == g && c->z == b;
+        };
+        auto isNumber = [](const ns::PinDefaultValue& v, float n) {
+            const auto* f = std::get_if<float>(&v);
+            return f != nullptr && std::abs(*f - n) < 1.0e-6f;
+        };
+
+        // Tint { colour (red), amount (0.5), picture (an image) }, the graph's own.
+        ns::StructDef tint;
+        tint.name = "Tint";
+        tint.displayName = "Tint";
+        tint.scope = ns::TypeScope::graph;
+        tint.members = { member("colour", ns::DataType::Color, ns::Vec3Default { 1.0f, 0.0f, 0.0f }),
+                         member("amount", ns::DataType::Float, 0.5f), member("picture", ns::DataType::Texture, std::string()) };
+        graph.AddStruct(tint);
+
+        // Make Struct: colour blue, a green image into picture. Break Struct gives them back.
+        auto* make = structNode(ns::kMakeStructType, "Tint");
+        check("Make Struct has the members colour, amount, picture as inputs",
+              pinIn(make, "colour") != 0 && pinIn(make, "amount") != 0 && pinIn(make, "picture") != 0 && pinOut(make, ns::kStructValuePin) != 0);
+        set(make, "colour", ns::Vec3Default { 0.0f, 0.0f, 1.0f });
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", make, "picture");
+        auto* brk = structNode(ns::kBreakStructType, "Tint");
+        connect(graph, make, ns::kStructValuePin, brk, ns::kStructValuePin);
+        expectPixel("Break Struct gives back the picture wired into Make Struct (green)", evaluator.evaluate(graph, brk->Id(), "picture", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+        ns::PinDefaultValue colour, amount;
+        check("Break Struct gives colour blue (set) and amount 0.5 (the default)",
+              value(brk, "colour", colour) && isColour(colour, 0.0f, 0.0f, 1.0f) && value(brk, "amount", amount) && isNumber(amount, 0.5f));
+
+        // Set Members with only amount ticked: amount 0.9; colour passes through.
+        auto* setter = add(ns::kSetMembersType);
+        set(setter, ns::kStructTypePin, std::string("Tint"));
+        set(setter, ns::kStructMembersPin, std::string("amount"));
+        ns::SyncStructNodePins(graph, registry, setter->Id());
+        check("Set Members shows only the ticked member", pinIn(setter, "amount") != 0 && pinIn(setter, "colour") == 0);
+        set(setter, "amount", 0.9f);
+        connect(graph, make, ns::kStructValuePin, setter, ns::kStructValuePin);
+        auto getMember = [&](const char* memberName) {
+            auto* g = add(ns::kGetMemberType);
+            set(g, ns::kStructTypePin, std::string("Tint"));
+            set(g, ns::kStructMemberPin, std::string(memberName));
+            ns::SyncStructNodePins(graph, registry, g->Id());
+            connect(graph, setter, ns::kStructValuePin, g, ns::kStructValuePin);
+            return g;
+        };
+        auto* getAmount = getMember("amount");
+        auto* getColour = getMember("colour");
+        ns::PinDefaultValue setAmount, keptColour;
+        check("Set Members changes amount to 0.9 and passes colour (blue) through",
+              value(getAmount, "amount", setAmount) && isNumber(setAmount, 0.9f) && value(getColour, "colour", keptColour)
+                  && isColour(keptColour, 0.0f, 0.0f, 1.0f));
+
+        // A struct param: its members' values (green, 0.25, no image), read with its Get node and taken apart.
+        ns::Symbol look;
+        look.id = "look";
+        look.name = "Look";
+        look.type = ns::DataType::Struct;
+        look.structType = "Tint";
+        look.memberValues = { ns::Vec3Default { 0.0f, 1.0f, 0.0f }, 0.25f, std::string() };
+        graph.AddSymbol(look);
+        auto* lookGet = ns::AddSymbolGetNode(graph, registry, look);
+        check("A struct param's Get node gives a Tint", lookGet != nullptr && lookGet->Outputs().front().type.structType == "Tint");
+        auto* lookBreak = structNode(ns::kBreakStructType, "Tint");
+        graph.Connect(lookGet->Id(), lookGet->Outputs().front().id, lookBreak->Id(), pinIn(lookBreak, ns::kStructValuePin));
+        ns::PinDefaultValue lookAmount, lookColour;
+        check("The param's members come out of Break Struct: amount 0.25, colour green",
+              value(lookBreak, "amount", lookAmount) && isNumber(lookAmount, 0.25f) && value(lookBreak, "colour", lookColour)
+                  && isColour(lookColour, 0.0f, 1.0f, 0.0f));
+        juce::String noImage;
+        check("A member image that was never given says so",
+              evaluator.evaluate(graph, lookBreak->Id(), "picture", noImage) == nullptr && noImage.contains("has no image"));
+
+        // A project struct (Host::structs): Grade { gain 2 }; Get Member with nothing wired in gives the default.
+        ns::StructDef grade;
+        grade.name = "Grade";
+        grade.scope = ns::TypeScope::project;
+        grade.members = { member("gain", ns::DataType::Float, 2.0f) };
+        registry.ReplaceStructs(ns::TypeScope::project, { grade });
+        evaluator.getHost().structs = { grade };
+        auto* gain = add(ns::kGetMemberType);
+        set(gain, ns::kStructTypePin, std::string("Grade"));
+        set(gain, ns::kStructMemberPin, std::string("gain"));
+        ns::SyncStructNodePins(graph, registry, gain->Id());
+        ns::PinDefaultValue gainValue;
+        check("A project struct's member default reaches the graph (gain 2)", value(gain, "gain", gainValue) && isNumber(gainValue, 2.0f));
+
+        // Renaming a member keeps the Get Member's wire once the node follows the rename (the Types panel does that).
+        auto* downstream = add("image.value.math");
+        connect(graph, getAmount, "amount", downstream, "a");
+        graph.FindStruct("Tint")->members[1].name = "strength";
+        set(getAmount, ns::kStructMemberPin, std::string("strength"));
+        ns::SyncStructNodePins(graph, registry, getAmount->Id());
+        bool wireKept = false;
+        for (const auto& c : graph.Connections())
+            wireKept = wireKept || (c.fromNode == getAmount->Id() && c.fromPin == pinOut(getAmount, "strength"));
+        check("A renamed member keeps its pin's wire", wireKept);
+
+        // Saved and read back: the struct, the struct nodes' settings and the param's member values survive.
+        std::string readError;
+        auto reread = ns::DeserializeGraph(ns::SerializeGraph(graph), readError);
+        const auto* readLook = reread != nullptr ? reread->FindSymbol("look") : nullptr;
+        check("Structs, struct nodes and struct params round trip",
+              reread != nullptr && reread->FindStruct("Tint") != nullptr && reread->FindStruct("Tint")->members.size() == 3
+                  && readLook != nullptr && readLook->structType == "Tint" && readLook->memberValues.size() == 3
+                  && reread->FindNode(setter->Id()) != nullptr
+                  && ns::StructNodeText(*reread->FindNode(setter->Id()), ns::kStructMembersPin) == "amount");
+    }
+
+    // Enums whose values carry data (shared/NodeSystem/TYPES.md): Make Variant builds one, Match takes it apart, a
+    // Switch branches on it, and the whole value travels through params and struct members.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto solid = [&](float r, float g, float b) {
+            auto* n = add("image.create");
+            set(n, "width", std::int64_t { 2 });
+            set(n, "height", std::int64_t { 2 });
+            set(n, "color", ns::Vec3Default { r, g, b });
+            return n;
+        };
+        auto pinIn = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Inputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto pinOut = [](ns::Node* n, const std::string& name) -> ns::PinId {
+            for (const auto& p : n->Outputs()) if (p.name == name) return p.id;
+            return 0;
+        };
+        auto field = [](const char* name, ns::DataType type, const char* enumType = "") {
+            ns::EnumField f;
+            f.name = name;
+            f.type = { ns::PinKind::Data, type };
+            f.type.enumType = enumType;
+            return f;
+        };
+        auto value = [&](ns::Node* n, const std::string& output, ns::PinDefaultValue& out) {
+            juce::String e;
+            const bool good = evaluator.evaluateValue(graph, n->Id(), output, out, e);
+            if (! good)
+                std::cerr << "     " << e << "\n";
+            return good;
+        };
+        auto isColour = [](const ns::PinDefaultValue& v, float r, float g, float b) {
+            const auto* c = std::get_if<ns::Vec3Default>(&v);
+            return c != nullptr && c->x == r && c->y == g && c->z == b;
+        };
+        auto isNumber = [](const ns::PinDefaultValue& v, float n) {
+            const auto* f = std::get_if<float>(&v);
+            return f != nullptr && std::abs(*f - n) < 1.0e-6f;
+        };
+        auto makeVariant = [&](const char* enumName, const char* variant) {
+            auto* n = add(ns::kMakeVariantType);
+            set(n, ns::kEnumTypePin, std::string(enumName));
+            set(n, ns::kEnumVariantPin, std::string(variant));
+            ns::SyncEnumNodePins(graph, registry, n->Id());
+            return n;
+        };
+        auto matchOf = [&](const char* enumName, ns::Node* from, const std::string& fromPin) {
+            auto* n = add(ns::kMatchType);
+            set(n, ns::kEnumTypePin, std::string(enumName));
+            ns::SyncEnumNodePins(graph, registry, n->Id());
+            graph.Connect(from->Id(), pinOut(from, fromPin), n->Id(), pinIn(n, ns::kEnumValuePin));
+            return n;
+        };
+
+        // Fill { Nothing, Solid(colour, amount), Picture(image) }, the graph's own.
+        ns::EnumDef fill { "Fill", "Fill", { "Nothing", "Solid", "Picture" }, "", ns::TypeScope::graph };
+        fill.variants[1].fields = { field("colour", ns::DataType::Color), field("amount", ns::DataType::Float) };
+        fill.variants[2].fields = { field("image", ns::DataType::Texture) };
+        graph.AddEnum(fill);
+
+        // Solid (blue, 0.75) -> Match: Solid's values come out; Picture's is not chosen.
+        auto* solidFill = makeVariant("Fill", "Solid");
+        set(solidFill, "colour", ns::Vec3Default { 0.0f, 0.0f, 1.0f });
+        set(solidFill, "amount", 0.75f);
+        auto* solidMatch = matchOf("Fill", solidFill, ns::kEnumValuePin);
+        ns::PinDefaultValue colour, amount;
+        check("Match takes Solid apart: colour blue, amount 0.75",
+              value(solidMatch, "Solid_colour", colour) && isColour(colour, 0.0f, 0.0f, 1.0f) && value(solidMatch, "Solid_amount", amount)
+                  && isNumber(amount, 0.75f));
+        juce::String notChosen;
+        check("Match's Picture pins carry nothing when the value is Solid",
+              evaluator.evaluate(graph, solidMatch->Id(), "Picture_image", notChosen) == nullptr && notChosen.contains("Not chosen - the value is Solid"));
+
+        // Picture with a green image -> Match gives it back; the same value drives a Switch to its Picture case (blue).
+        auto* pictureFill = makeVariant("Fill", "Picture");
+        connect(graph, solid(0.0f, 1.0f, 0.0f), "image", pictureFill, "image");
+        auto* pictureMatch = matchOf("Fill", pictureFill, ns::kEnumValuePin);
+        expectPixel("Match gives back the image Picture carries (green)", evaluator.evaluate(graph, pictureMatch->Id(), "Picture_image", error), 0, 0,
+                    { 0.0f, 1.0f, 0.0f });
+        auto* byFill = add("core.switch.image");
+        graph.Connect(pictureFill->Id(), pinOut(pictureFill, ns::kEnumValuePin), byFill->Id(), pinIn(byFill, ns::kFlowSelectorPin));
+        ns::SyncFlowNodeCases(graph, registry, byFill->Id());
+        connect(graph, solid(1.0f, 0.0f, 0.0f), "image", byFill, "Nothing");
+        connect(graph, solid(1.0f, 1.0f, 1.0f), "image", byFill, "Solid");
+        connect(graph, solid(0.0f, 0.0f, 1.0f), "image", byFill, "Picture");
+        expectPixel("An enum carrying data drives a Switch: Picture picks blue", evaluator.evaluate(graph, byFill->Id(), "value", error), 0, 0,
+                    { 0.0f, 0.0f, 1.0f });
+
+        // A Choice param of Fill set to Solid (red, 0.5): its Get node carries what Solid carries.
+        ns::Symbol paint;
+        paint.id = "paint";
+        paint.name = "Paint";
+        paint.type = ns::DataType::Int;
+        paint.enumType = "Fill";
+        paint.value = std::int64_t { 1 };
+        paint.memberValues = { ns::Vec3Default { 1.0f, 0.0f, 0.0f }, 0.5f };
+        graph.AddSymbol(paint);
+        auto* paintGet = ns::AddSymbolGetNode(graph, registry, paint);
+        auto* paintMatch = matchOf("Fill", paintGet, paintGet->Outputs().front().name);
+        ns::PinDefaultValue paintAmount, paintColour;
+        check("A Choice param's value carries its data through Match: 0.5, red",
+              value(paintMatch, "Solid_amount", paintAmount) && isNumber(paintAmount, 0.5f) && value(paintMatch, "Solid_colour", paintColour)
+                  && isColour(paintColour, 1.0f, 0.0f, 0.0f));
+
+        // A struct member of type Fill keeps the whole value: Make Struct -> Break Struct -> Match gives the green image.
+        ns::StructDef layer;
+        layer.name = "Layer";
+        layer.displayName = "Layer";
+        layer.scope = ns::TypeScope::graph;
+        ns::StructMember fillMember;
+        fillMember.name = "fill";
+        fillMember.type = { ns::PinKind::Data, ns::DataType::Int };
+        fillMember.type.enumType = "Fill";
+        fillMember.defaultValue = std::int64_t { 0 };
+        layer.members = { fillMember };
+        graph.AddStruct(layer);
+        auto* makeLayer = add(ns::kMakeStructType);
+        set(makeLayer, ns::kStructTypePin, std::string("Layer"));
+        ns::SyncStructNodePins(graph, registry, makeLayer->Id());
+        graph.Connect(pictureFill->Id(), pinOut(pictureFill, ns::kEnumValuePin), makeLayer->Id(), pinIn(makeLayer, "fill"));
+        auto* breakLayer = add(ns::kBreakStructType);
+        set(breakLayer, ns::kStructTypePin, std::string("Layer"));
+        ns::SyncStructNodePins(graph, registry, breakLayer->Id());
+        graph.Connect(makeLayer->Id(), pinOut(makeLayer, ns::kStructValuePin), breakLayer->Id(), pinIn(breakLayer, ns::kStructValuePin));
+        auto* layerMatch = matchOf("Fill", breakLayer, "fill");
+        expectPixel("A struct member keeps the whole enum value (Picture's green image)",
+                    evaluator.evaluate(graph, layerMatch->Id(), "Picture_image", error), 0, 0, { 0.0f, 1.0f, 0.0f });
+
+        // A recursive type: List { Nil, Cons(head, tail: List) }. [1.5, 2.5]: the head, the tail's head, then Nil.
+        ns::EnumDef list { "List", "List", { "Nil", "Cons" }, "", ns::TypeScope::graph };
+        list.variants[1].fields = { field("head", ns::DataType::Float), field("tail", ns::DataType::Int, "List") };
+        graph.AddEnum(list);
+        auto* inner = makeVariant("List", "Cons");
+        set(inner, "head", 2.5f); // its tail is not wired: Nil, the default
+        auto* outer = makeVariant("List", "Cons");
+        set(outer, "head", 1.5f);
+        graph.Connect(inner->Id(), pinOut(inner, ns::kEnumValuePin), outer->Id(), pinIn(outer, "tail"));
+        auto* first = matchOf("List", outer, ns::kEnumValuePin);
+        auto* second = matchOf("List", first, "Cons_tail");
+        auto* third = matchOf("List", second, "Cons_tail");
+        ns::PinDefaultValue head1, head2;
+        check("A recursive list: heads 1.5 then 2.5", value(first, "Cons_head", head1) && isNumber(head1, 1.5f) && value(second, "Cons_head", head2)
+                                                         && isNumber(head2, 2.5f));
+        ns::PinDefaultValue none;
+        juce::String endError;
+        check("...and then Nil: no head", ! evaluator.evaluateValue(graph, third->Id(), "Cons_head", none, endError)
+                                             && endError.contains("Not chosen - the value is Nil"));
+
+        // Saved and read back: what the values carry, the enum nodes and the param's carried values survive.
+        std::string readError;
+        auto reread = ns::DeserializeGraph(ns::SerializeGraph(graph), readError);
+        check("Enums carrying values, Make Variant / Match and the param round trip",
+              reread != nullptr && reread->FindEnum("List") != nullptr && reread->FindEnum("List")->variants[1].fields[1].type.enumType == "List"
+                  && reread->FindSymbol("paint") != nullptr && reread->FindSymbol("paint")->memberValues.size() == 2
+                  && reread->FindNode(solidFill->Id()) != nullptr
+                  && ns::StructNodeText(*reread->FindNode(solidFill->Id()), ns::kEnumVariantPin) == "Solid");
+    }
+
+    // Analysis: channels, colour masks, Fourier, local frequency, evenness, colour spectrum. Test images come in
+    // through Load Image: a 64 x 64 grey sine with period 8 px across (0.5 + 0.25 sin(2 pi x / 8)), the same on the
+    // left half with flat 0.5 on the right, half red / half cyan, and a single colour.
+    {
+        auto check = [&](const char* what, bool good) {
+            if (good)
+                std::cout << "ok   " << what << "\n";
+            else
+            {
+                std::cerr << "FAIL " << what << "\n";
+                ++failures;
+            }
+        };
+        auto makeImage = [](int w, int h, std::function<std::array<float, 3>(int, int)> colourAt) {
+            auto image = std::make_shared<image_graph::Image>();
+            image->width = w;
+            image->height = h;
+            image->rgba.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+            for (int y = 0; y < h; ++y)
+                for (int x = 0; x < w; ++x)
+                {
+                    const auto c = colourAt(x, y);
+                    const size_t o = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4;
+                    image->rgba[o] = c[0]; image->rgba[o + 1] = c[1]; image->rgba[o + 2] = c[2]; image->rgba[o + 3] = 1.0f;
+                }
+            return image_graph::ImagePtr(image);
+        };
+        const double twoPi = 6.283185307179586;
+        auto sineAt = [twoPi](int x) { return static_cast<float>(0.5 + 0.25 * std::sin(twoPi * x / 8.0)); };
+        std::map<juce::String, image_graph::ImagePtr> testImages {
+            { "test://sine", makeImage(64, 64, [&](int x, int) { const float v = sineAt(x); return std::array<float, 3> { v, v, v }; }) },
+            { "test://half", makeImage(64, 64, [&](int x, int) { const float v = x < 32 ? sineAt(x) : 0.5f; return std::array<float, 3> { v, v, v }; }) },
+            { "test://redcyan", makeImage(8, 8, [](int x, int) { return x < 4 ? std::array<float, 3> { 1.0f, 0.0f, 0.0f } : std::array<float, 3> { 0.0f, 1.0f, 1.0f }; }) },
+            { "test://colour", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 0.2f, 0.4f, 0.6f }; }) },
+            { "test://red", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 1.0f, 0.0f, 0.0f }; }) },
+            { "test://green", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 0.0f, 1.0f, 0.0f }; }) },
+            { "test://white", makeImage(2, 2, [](int, int) { return std::array<float, 3> { 1.0f, 1.0f, 1.0f }; }) },
+        };
+        evaluator.getHost().loadImage = [testImages](const juce::String& path) {
+            auto found = testImages.find(path);
+            return found != testImages.end() ? found->second : nullptr;
+        };
+        auto load = [&](const char* path) {
+            auto* n = add("image.load");
+            set(n, "image", std::string(path));
+            return n;
+        };
+        auto analyse = [&](const char* type, const char* path) {
+            auto* n = add(type);
+            connect(graph, load(path), "image", n, "image");
+            return n;
+        };
+        auto output = [&](ns::Node* n, const char* name) { return evaluator.evaluate(graph, n->Id(), name, error); };
+
+        // Channels.
+        expectPixel("Split RGB: green of (0.2, 0.4, 0.6) is 0.4", output(analyse("image.analysis.split_rgb", "test://colour"), "g"), 0, 0, { 0.4f });
+        auto* cmyk = analyse("image.analysis.split_cmyk", "test://red");
+        expectPixel("Split CMYK of red: magenta 1", output(cmyk, "m"), 0, 0, { 1.0f });
+        expectPixel("Split CMYK of red: cyan 0", output(cmyk, "c"), 0, 0, { 0.0f });
+        expectPixel("Split CMYK of red: black 0", output(cmyk, "k"), 0, 0, { 0.0f });
+        auto* back = add("image.analysis.combine_cmyk");
+        for (const char* ch : { "c", "m", "y", "k" })
+            connect(graph, cmyk, ch, back, ch);
+        expectPixel("CMYK back together is red", output(back, "image"), 0, 0, { 1.0f, 0.0f, 0.0f, 1.0f }, 1.0e-4f);
+        auto* white = analyse("image.analysis.split_lab", "test://white");
+        expectPixel("Lab of white: lightness 1", output(white, "l"), 0, 0, { 1.0f }, 2.0e-3f);
+        expectPixel("Lab of white: a neutral 0.5", output(white, "a"), 0, 0, { 0.5f }, 2.0e-3f);
+        auto* lab = analyse("image.analysis.split_lab", "test://colour");
+        auto* labBack = add("image.analysis.combine_lab");
+        for (const char* ch : { "l", "a", "b" })
+            connect(graph, lab, ch, labBack, ch);
+        expectPixel("Lab there and back keeps (0.2, 0.4, 0.6)", output(labBack, "image"), 0, 0, { 0.2f, 0.4f, 0.6f }, 2.0e-3f);
+        expectPixel("HSV of green: hue 1/3", output(analyse("image.analysis.split_hsv", "test://green"), "h"), 0, 0, { 0.333333f }, 1.0e-4f);
+
+        // Colour masks: the colour itself is 1; black is 0.432 away, past tolerance 0.1 + softness 0.1 -> 0.
+        auto* mask = analyse("image.analysis.colour_mask", "test://colour");
+        set(mask, "color", ns::Vec3Default { 0.2f, 0.4f, 0.6f });
+        expectPixel("Colour Mask of the colour itself", output(mask, "mask"), 0, 0, { 1.0f });
+        set(mask, "color", ns::Vec3Default { 0.0f, 0.0f, 0.0f });
+        expectPixel("Colour Mask of a far colour", output(mask, "mask"), 0, 0, { 0.0f });
+        auto* hues = analyse("image.analysis.hue_band", "test://redcyan");
+        set(hues, "hue", 0.0f); set(hues, "width", 20.0f); set(hues, "softness", 10.0f);
+        expectPixel("Hue Band around red: red is in", output(hues, "mask"), 0, 0, { 1.0f });
+        expectPixel("Hue Band around red: cyan is out", output(hues, "mask"), 7, 0, { 0.0f });
+
+        // Frequency Band: keeping 6.4 - 12.8 px (0.1 - 0.2 of 64) keeps the period-8 sine: pixel x 3 stays
+        // 0.5 + 0.25 sin(3 pi / 4) = 0.676777; keeping 16 - 32 px leaves only the average 0.5.
+        auto* keep = analyse("image.analysis.frequency_band", "test://sine");
+        set(keep, "smallest", 0.1f); set(keep, "largest", 0.2f); set(keep, "softness", 0.0f);
+        expectPixel("Frequency Band keeps detail of its size", output(keep, "image"), 3, 5, { 0.676777f }, 2.0e-3f);
+        auto* drop = analyse("image.analysis.frequency_band", "test://sine");
+        set(drop, "smallest", 0.25f); set(drop, "largest", 0.5f); set(drop, "softness", 0.0f);
+        expectPixel("Frequency Band drops detail of another size", output(drop, "image"), 3, 5, { 0.5f }, 2.0e-3f);
+        // Spectrum: the average 2048 -> log 2049 is the top; the sine's 512 at 8 cycles shows at (32 + 8, 32) as
+        // log 513 / log 2049 = 0.81839; between them, at (36, 32), nothing.
+        auto* spectrum = analyse("image.analysis.spectrum", "test://sine");
+        expectPixel("Spectrum: the sine's frequency", output(spectrum, "spectrum"), 40, 32, { 0.81839f }, 2.0e-3f);
+        expectPixel("Spectrum: nothing between", output(spectrum, "spectrum"), 36, 32, { 0.0f }, 2.0e-3f);
+
+        // Detail Map: a flat image has none.
+        expectPixel("Detail Map of a flat image is 0", output(analyse("image.analysis.detail_map", "test://white"), "detail"), 0, 0, { 0.0f }, 1.0e-4f);
+
+        // Local Frequency, squares of 32 px on the sine: its wavelength 8 is 0.25 of a square; its lines run vertically
+        // (0.5), all one way (strength near 1).
+        auto* local = analyse("image.analysis.local_frequency", "test://sine");
+        set(local, "square", 0.5f);
+        expectPixel("Local Frequency: scale 0.25", output(local, "scale"), 20, 20, { 0.25f }, 0.03f);
+        expectPixel("Local Frequency: vertical lines", output(local, "direction"), 20, 20, { 0.5f }, 0.02f);
+        const auto strength = output(local, "strength");
+        check("Local Frequency: one direction", strength != nullptr && strength->rgba[(20 * 64 + 20) * 4] > 0.9f);
+
+        // Evenness: the sine is the same everywhere (1); sine on one half and flat on the other is not.
+        auto evenness = [&](const char* path) {
+            auto* n = analyse("image.analysis.evenness", path);
+            set(n, "square", 0.25f);
+            ns::PinDefaultValue v;
+            juce::String e;
+            return evaluator.evaluateValue(graph, n->Id(), "evenness", v, e) ? std::get<float>(v) : -1.0f;
+        };
+        const float even = evenness("test://sine"), uneven = evenness("test://half");
+        check("Evenness: an even image is near 1", even > 0.98f);
+        check("Evenness: half pattern, half flat is well below", uneven >= 0.0f && uneven < 0.8f);
+
+        // Colour Spectrum of half red, half cyan: two opposite hues -> harmony 2, the dominant hues red and cyan.
+        auto* palette = analyse("image.analysis.colour_spectrum", "test://redcyan");
+        ns::PinDefaultValue harmony, first, second;
+        juce::String e;
+        const bool read = evaluator.evaluateValue(graph, palette->Id(), "harmony", harmony, e)
+                       && evaluator.evaluateValue(graph, palette->Id(), "dominant1", first, e)
+                       && evaluator.evaluateValue(graph, palette->Id(), "dominant2", second, e);
+        auto isRed = [](const ns::PinDefaultValue& v) { const auto c = std::get<ns::Vec3Default>(v); return c.x > 0.9f && c.z < 0.1f; };
+        auto isCyan = [](const ns::PinDefaultValue& v) { const auto c = std::get<ns::Vec3Default>(v); return c.x < 0.1f && c.z > 0.9f; };
+        check("Colour Spectrum: complementary pair, red and cyan",
+              read && std::get<std::int64_t>(harmony) == 2 && ((isRed(first) && isCyan(second)) || (isCyan(first) && isRed(second))));
+        const auto chart = output(palette, "chart");
+        check("Colour Spectrum: a 360 x 120 chart", chart != nullptr && chart->width == 360 && chart->height == 120);
     }
 
     // FRust pod generators (frust_image_demo): no hand-worked pixel values exist for these, so check that each gives a
