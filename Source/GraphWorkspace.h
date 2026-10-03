@@ -12,6 +12,7 @@
 #include "DrawPanels.h"
 #include "ProjectImagePicker.h"
 #include "ViewerPanel.h"
+#include <creation/agent/VirtualEngineer.h>
 
 // The Graph editor (Layout > Graph, and its Draw view): one node editor for every kind of graph Texture makes
 // (shared/NodeSystem/GRAPH_TYPES.md). The graph's type picks its node list and how its result is made and shown:
@@ -70,6 +71,9 @@ public:
     juce::var graphForAgent() const;
     juce::var typesForAgent() const;
     juce::var errorsForAgent() const;
+    // The engineer's tools in this editor (GraphAgentTools.cpp): read, add, wire, set, remove, check - and the graph as
+    // the state they change, so one request undoes at once.
+    void registerAgentTools(creation::agent::VirtualEngineer& engineer);
 
 private:
     class Worker;
@@ -106,6 +110,17 @@ private:
     void saveProjectTypes(const std::vector<ce::node_system::EnumDef>& enums, const std::vector<ce::node_system::StructDef>& structs);
     void typesChanged();
     void status(const juce::String& text);
+
+    // For the engineer's tools (GraphAgentTools.cpp).
+    juce::var graphStateForAgent() const;
+    juce::var nodeForAgent(const ce::node_system::Node& node) const;
+    juce::String pinTypeForAgent(const ce::node_system::Node& node, const ce::node_system::Pin& pin) const;
+    juce::var pinValueForAgent(const ce::node_system::Node& node, const ce::node_system::Pin& pin) const;
+    // Calls `done` once the graph as it is now has been evaluated (at once for a material, which compiles as it is edited).
+    void whenEvaluated(std::function<void()> done);
+    void evaluationFinished(const std::string& graphText);
+    std::string lastEvaluatedGraph;
+    std::vector<std::pair<std::string, std::function<void()>>> evaluationWaiters;
 
     creation::assets::ProjectSession* projectSession = nullptr;
     project_images::Source images;

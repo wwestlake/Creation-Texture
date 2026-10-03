@@ -104,6 +104,8 @@ public:
         juce::String previewError;
         ns::NodeId overlayNode = 0;
         drawing::DrawingPtr overlay;
+        std::string graphText; // the graph this is for
+        bool complete = false; // every node was worked out (not cut short by a newer request)
     };
 
     Worker(const image_graph::Library& lib, std::function<creation::assets::ProjectSession*()> session)
@@ -174,6 +176,8 @@ public:
             evaluator->getHost().structs = std::move(job.types.structs);
             evaluator->getHost().enums = std::move(job.types.enums);
             Result out;
+            out.graphText = job.graphText;
+            out.complete = true;
             std::string parseError;
             auto copy = ns::DeserializeGraph(job.graphText, parseError);
             if (copy != nullptr)
@@ -181,7 +185,10 @@ public:
                 for (const auto& [id, node] : copy->Nodes())
                 {
                     if (threadShouldExit() || pendingArrived())
+                    {
+                        out.complete = false;
                         break;
+                    }
                     if (node->Outputs().empty())
                         continue;
                     juce::String error;
@@ -800,6 +807,8 @@ void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
     thumbnails = std::move(result.thumbnails);
     errors = std::move(result.errors);
     graphView.repaint();
+    if (result.complete)
+        evaluationFinished(result.graphText);
 
     if (result.previewNode != 0 && result.previewNode == preview->getNode())
     {

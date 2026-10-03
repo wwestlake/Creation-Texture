@@ -155,6 +155,7 @@ target_sources(CreationTextureApp PRIVATE
     Source/ImageLabPanel.cpp
     Source/SurfaceMapPanel.cpp
     Source/GraphWorkspace.cpp
+    Source/GraphAgentTools.cpp
     Source/GraphWorkspace.h
     Source/DrawPanels.cpp
     Source/DrawPanels.h

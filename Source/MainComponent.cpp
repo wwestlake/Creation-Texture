@@ -131,8 +131,10 @@ MainComponent::MainComponent()
     graphEditor.projectOpened();
     refreshTitle();
 
-    // The Virtual Engineer: what is open goes with every request; the API shows the graph, its types and its errors.
+    // The Virtual Engineer: what is open goes with every request; it acts on the graph with the editor's tools; the API
+    // shows the graph, its types and its errors.
     engineer.appContext = [this](const juce::String&) { return graphEditor.describeForAgent(); };
+    graphEditor.registerAgentTools(engineer);
     agentApi.addAppEndpoint("graph", "The open graph: its nodes, their errors, and its exact saved text (frgraph)",
                             [this] { return graphEditor.graphForAgent(); });
     agentApi.addAppEndpoint("types", "The enums and structs in scope: the graph's own, the project's, built-in",
