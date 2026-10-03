@@ -53,6 +53,14 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/LiteSemRag/CMakeLists.txt")
     set(CREATION_TEXTURE_LITESEMRAG_TARGET creation_suite_litesemrag)
 endif()
 
+# The suite's Virtual Engineer and its local API (shared/VirtualEngineer/README.md).
+set(CREATION_TEXTURE_VIRTUAL_ENGINEER_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/VirtualEngineer/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/VirtualEngineer"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedVirtualEngineer")
+    set(CREATION_TEXTURE_VIRTUAL_ENGINEER_TARGET creation_suite_virtual_engineer)
+endif()
+
 set(CREATION_TEXTURE_UI_TARGET "")
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/UI/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/UI"
