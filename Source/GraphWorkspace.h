@@ -64,6 +64,13 @@ public:
     bool canSaveOutput() const noexcept;
     juce::String getTitle() const;
 
+    // For the Virtual Engineer (shared/VirtualEngineer): a short description of what is open, sent with every request,
+    // and what its API endpoints show - the graph (with its exact saved text), the types in scope, the current errors.
+    juce::String describeForAgent() const;
+    juce::var graphForAgent() const;
+    juce::var typesForAgent() const;
+    juce::var errorsForAgent() const;
+
 private:
     class Worker;
     class PreviewPanel;
