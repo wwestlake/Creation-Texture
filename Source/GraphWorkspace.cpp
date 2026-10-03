@@ -104,6 +104,8 @@ public:
         juce::String previewError;
         ns::NodeId overlayNode = 0;
         drawing::DrawingPtr overlay;
+        std::string graphText; // the graph this is for
+        bool complete = false; // every node was worked out (not cut short by a newer request)
     };
 
     Worker(const image_graph::Library& lib, std::function<creation::assets::ProjectSession*()> session)
@@ -174,6 +176,8 @@ public:
             evaluator->getHost().structs = std::move(job.types.structs);
             evaluator->getHost().enums = std::move(job.types.enums);
             Result out;
+            out.graphText = job.graphText;
+            out.complete = true;
             std::string parseError;
             auto copy = ns::DeserializeGraph(job.graphText, parseError);
             if (copy != nullptr)
@@ -181,7 +185,10 @@ public:
                 for (const auto& [id, node] : copy->Nodes())
                 {
                     if (threadShouldExit() || pendingArrived())
+                    {
+                        out.complete = false;
                         break;
+                    }
                     if (node->Outputs().empty())
                         continue;
                     juce::String error;
@@ -570,6 +577,98 @@ void GraphWorkspace::status(const juce::String& text)
         onStatus(text);
 }
 
+juce::String GraphWorkspace::describeForAgent() const
+{
+    juce::String text;
+    text << (isMaterial() ? "Material graph \"" : "Image graph \"") << (graphName.isNotEmpty() ? graphName : juce::String("untitled")) << "\""
+         << (edited ? " (unsaved changes)" : "") << ": " << static_cast<int>(graph.Nodes().size()) << " nodes, "
+         << static_cast<int>(graph.Connections().size()) << " wires, " << static_cast<int>(graph.Symbols().size()) << " variables, "
+         << static_cast<int>(graph.Enums().size() + graph.Structs().size()) << " types of its own.";
+    if (const auto* node = graph.FindNode(selectedNode))
+    {
+        const auto* d = registry.Find(node->TypeName());
+        text << " Selected: " << (d != nullptr ? juce::String(d->displayName) : juce::String(node->TypeName())) << " (node " << static_cast<int>(selectedNode) << ").";
+    }
+    if (! errors.empty())
+    {
+        text << " " << static_cast<int>(errors.size()) << " node(s) report errors";
+        const auto& first = *errors.begin();
+        if (const auto* node = graph.FindNode(first.first))
+            if (const auto* d = registry.Find(node->TypeName()))
+                text << ", e.g. " << juce::String(d->displayName) << ": " << first.second;
+        text << ".";
+    }
+    return text;
+}
+
+juce::var GraphWorkspace::graphForAgent() const
+{
+    auto* body = new juce::DynamicObject();
+    body->setProperty("name", graphName);
+    body->setProperty("type", isMaterial() ? "material" : "image");
+    body->setProperty("edited", edited);
+    body->setProperty("selectedNode", static_cast<int>(selectedNode));
+    juce::Array<juce::var> nodes;
+    for (const auto& [id, node] : graph.Nodes())
+    {
+        auto* n = new juce::DynamicObject();
+        n->setProperty("id", static_cast<int>(id));
+        n->setProperty("type", juce::String(node->TypeName()));
+        if (const auto* d = registry.Find(node->TypeName()))
+            n->setProperty("title", juce::String(d->displayName));
+        if (auto found = errors.find(id); found != errors.end())
+            n->setProperty("error", found->second);
+        nodes.add(juce::var(n));
+    }
+    body->setProperty("nodes", juce::var(nodes));
+    body->setProperty("wires", static_cast<int>(graph.Connections().size()));
+    body->setProperty("frgraph", juce::String(ns::SerializeGraph(graph))); // the exact saved form: settings, wires, types, variables
+    return juce::var(body);
+}
+
+juce::var GraphWorkspace::typesForAgent() const
+{
+    auto* body = new juce::DynamicObject();
+    auto list = [](auto&& defs, const juce::String& scope) {
+        juce::Array<juce::var> out;
+        for (const auto& def : defs)
+        {
+            auto* t = new juce::DynamicObject();
+            t->setProperty("name", juce::String(def.name));
+            t->setProperty("displayName", juce::String(def.displayName));
+            t->setProperty("scope", scope);
+            out.add(juce::var(t));
+        }
+        return out;
+    };
+    auto enums = list(graph.Enums(), "graph");
+    auto structs = list(graph.Structs(), "graph");
+    for (const auto& def : registry.Enums())
+        if (graph.FindEnum(def.name) == nullptr)
+            enums.addArray(list(std::vector<ns::EnumDef> { def }, def.scope == ns::TypeScope::project ? "project" : "built-in"));
+    for (const auto& def : registry.Structs())
+        if (graph.FindStruct(def.name) == nullptr)
+            structs.addArray(list(std::vector<ns::StructDef> { def }, def.scope == ns::TypeScope::project ? "project" : "built-in"));
+    body->setProperty("enums", juce::var(enums));
+    body->setProperty("structs", juce::var(structs));
+    return juce::var(body);
+}
+
+juce::var GraphWorkspace::errorsForAgent() const
+{
+    juce::Array<juce::var> out;
+    for (const auto& [id, message] : errors)
+    {
+        auto* e = new juce::DynamicObject();
+        e->setProperty("node", static_cast<int>(id));
+        if (const auto* node = graph.FindNode(id))
+            e->setProperty("type", juce::String(node->TypeName()));
+        e->setProperty("error", message);
+        out.add(juce::var(e));
+    }
+    return juce::var(out);
+}
+
 juce::String GraphWorkspace::getTitle() const
 {
     return (graphName.isNotEmpty() ? graphName : juce::String(isMaterial() ? "Untitled material" : "Untitled image graph")) + (edited ? " *" : "");
@@ -708,6 +807,8 @@ void GraphWorkspace::changeListenerCallback(juce::ChangeBroadcaster*)
     thumbnails = std::move(result.thumbnails);
     errors = std::move(result.errors);
     graphView.repaint();
+    if (result.complete)
+        evaluationFinished(result.graphText);
 
     if (result.previewNode != 0 && result.previewNode == preview->getNode())
     {

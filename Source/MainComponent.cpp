@@ -76,6 +76,8 @@ MainComponent::MainComponent()
     graphDock->registerPanel("GraphPreview", "2D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getPreview()), Zone::Right);
     graphDock->registerPanel("GraphMaterialPreview", "3D Preview", std::make_unique<NonOwningPanelHost>(graphEditor.getMaterialPreview()), Zone::Right);
     graphDock->registerPanel("GraphProperties", "Properties", shared(WorkArea::graph, graphEditor.getPropertiesPanel()), Zone::Right);
+    graphDock->registerPanel("GraphEngineer", "Virtual Engineer", shared(WorkArea::graph, engineerChat), Zone::Right);
+    graphDock->registerPanel("GraphCards", "Cards", shared(WorkArea::graph, cardsPanel), Zone::Right);
     graphDock->activatePanel("GraphPreview");
     graphDock->activatePanel("GraphNodes");
     addChildComponent(graphDock.get());
@@ -90,6 +92,8 @@ MainComponent::MainComponent()
     drawDock->registerPanel("DrawGraph", "Image Graph", shared(WorkArea::draw, graphEditor.getGraphView()), Zone::CenterTab);
     drawDock->registerPanel("DrawCanvas", "Canvas", std::make_unique<NonOwningPanelHost>(graphEditor.getDrawCanvas()), Zone::Right);
     drawDock->registerPanel("DrawProperties", "Properties", shared(WorkArea::draw, graphEditor.getPropertiesPanel()), Zone::Right);
+    drawDock->registerPanel("DrawEngineer", "Virtual Engineer", shared(WorkArea::draw, engineerChat), Zone::Right);
+    drawDock->registerPanel("DrawCards", "Cards", shared(WorkArea::draw, cardsPanel), Zone::Right);
     drawDock->activatePanel("DrawScript");
     drawDock->activatePanel("DrawCanvas");
     addChildComponent(drawDock.get());
@@ -126,10 +130,32 @@ MainComponent::MainComponent()
     ensureProjectSessionActive(error);
     graphEditor.projectOpened();
     refreshTitle();
+
+    // The Virtual Engineer: what is open goes with every request; it acts on the graph with the editor's tools; the API
+    // shows the graph, its types and its errors.
+    engineer.appContext = [this](const juce::String&) { return graphEditor.describeForAgent(); };
+    graphEditor.registerAgentTools(engineer);
+    agentApi.addAppEndpoint("graph", "The open graph: its nodes, their errors, and its exact saved text (frgraph)",
+                            [this] { return graphEditor.graphForAgent(); });
+    agentApi.addAppEndpoint("types", "The enums and structs in scope: the graph's own, the project's, built-in",
+                            [this] { return graphEditor.typesForAgent(); });
+    agentApi.addAppEndpoint("errors", "The nodes that fail now, with their messages", [this] { return graphEditor.errorsForAgent(); });
+    projectChangedForEngineer();
+    juce::String apiError;
+    if (! agentApi.start(apiError))
+        headerBar.setStatusText("The Virtual Engineer API did not start: " + apiError);
+}
+
+void MainComponent::projectChangedForEngineer()
+{
+    engineer.setProjectId(projectSession.isValid() ? projectSession.getManifest().projectId : juce::String());
+    engineer.clearConversation();
+    cardsPanel.refresh();
 }
 
 MainComponent::~MainComponent()
 {
+    agentApi.stop();
     saveLayouts();
     menuBar.reset();
     imageLabDock.reset();
@@ -151,6 +177,7 @@ void MainComponent::openProject(const juce::String& projectId)
     projectImages.clear();
     graphEditor.projectOpened();
     graphEditor.newGraph(image_graph::kImageDiagram);
+    projectChangedForEngineer();
     refreshTitle();
 }
 

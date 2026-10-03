@@ -9,6 +9,9 @@
 #include <creation/ui/SuiteShellController.h>
 #include <creation/ui/CreationSuiteHeaderBar.h>
 #include <creation/assets/ProjectSession.h>
+#include <creation/agent/AgentApi.h>
+#include <creation/agent/CardsPanel.h>
+#include <creation/agent/EngineerChat.h>
 
 class MainComponent final : public juce::Component, public juce::DragAndDropContainer,
                             public juce::MenuBarModel
@@ -76,6 +79,14 @@ private:
     ImageLabWorkspace imageLab;
     SurfaceMapWorkspace surfaceMap;
     GraphWorkspace graphEditor;
+
+    // The suite's Virtual Engineer (shared/VirtualEngineer): its chat, its cards, and its local API with Texture's own
+    // endpoints. The engineer is declared first, so it outlives everything that uses it.
+    creation::agent::VirtualEngineer engineer { creation::assets::SuiteAppDomain::texture };
+    creation::agent::AgentApi agentApi { engineer };
+    creation::agent::EngineerChat engineerChat { engineer };
+    creation::agent::CardsPanel cardsPanel { engineer };
+    void projectChangedForEngineer();
 
     // Declared after the panels they host, so they are destroyed first.
     std::unique_ptr<juce::MenuBarComponent> menuBar;
