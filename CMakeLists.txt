@@ -45,6 +45,14 @@ if(EXISTS "${CREATION_SUITE_SHARED_DIR}/Services/CMakeLists.txt")
     set(CREATION_TEXTURE_SERVICES_TARGET creation_suite_services)
 endif()
 
+# LiteSemRAG cards for the suite's Virtual Engineer (shared/LiteSemRag/README.md).
+set(CREATION_TEXTURE_LITESEMRAG_TARGET "")
+if(EXISTS "${CREATION_SUITE_SHARED_DIR}/LiteSemRag/CMakeLists.txt")
+    add_subdirectory("${CREATION_SUITE_SHARED_DIR}/LiteSemRag"
+                     "${CMAKE_CURRENT_BINARY_DIR}/CreationSuiteSharedLiteSemRag")
+    set(CREATION_TEXTURE_LITESEMRAG_TARGET creation_suite_litesemrag)
+endif()
+
 set(CREATION_TEXTURE_UI_TARGET "")
 if(EXISTS "${CREATION_SUITE_SHARED_DIR}/UI/CMakeLists.txt")
     add_subdirectory("${CREATION_SUITE_SHARED_DIR}/UI"
